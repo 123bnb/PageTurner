@@ -342,6 +342,21 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [plans setProperty:@"新增方案：录制翻页器一个按键的特征（来源+方向+位移），再映射为动作序列。左滑可删除方案。" forKey:@"staticText"];
         [specs addObject:plans];
 
+        [specs addObject:[PSSpecifier groupSpecifierWithName:@"调试"]];
+        PSSpecifier *dbg = [PSSpecifier preferenceSpecifierNamed:@"调试模式"
+            target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+            detail:nil cell:PSSwitchCell edit:nil];
+        [dbg setProperty:@"debugMode" forKey:@"key"];
+        [dbg setProperty:@NO forKey:@"default"];
+        [dbg setProperty:@"开启后记录详细运行日志（拦截/特征/匹配/执行），排查映射不生效等问题" forKey:@"staticText"];
+        [specs addObject:dbg];
+
+        PSSpecifier *log = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
+            target:self set:nil get:nil detail:NSClassFromString(@"PTDebugLogVC")
+            cell:PSLinkCell edit:nil];
+        [log setProperty:@"查看并复制 /var/mobile/Documents/PageTurner.log 的最近记录" forKey:@"staticText"];
+        [specs addObject:log];
+
         _specifiers = [specs copy];
     }
     return _specifiers;
@@ -611,6 +626,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 // 方案页（名称 / 记录状态 / 映射区）
 // ============================================================
 @implementation PTPlanVC
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // 从动作设置页/学习页返回时自动刷新（新映射、新特征立即显示）
+    if (self.nameField) [self reload];
+}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -971,11 +992,21 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         cfg[@"plans"] = plans;
         PTWrite(cfg);
         PTSetLearningLocal(NO);
-        PTPlanVC *vc = [PTPlanVC new];
-        vc.planName = name;
+        // 原地更新栈内的方案页（不 push 新页）：返回一次直接回方案列表，看到的就是改好名的新方案
         NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
-        [stack removeLastObject];
-        [stack addObject:vc];
+        [stack removeLastObject];   // 移除学习页
+        PTPlanVC *planVC = nil;
+        for (UIViewController *vc in stack) {
+            if ([vc isKindOfClass:[PTPlanVC class]]) { planVC = (PTPlanVC *)vc; break; }
+        }
+        if (planVC) {
+            planVC.planName = name;
+            [planVC reload];
+        } else {
+            PTPlanVC *vc = [PTPlanVC new];
+            vc.planName = name;
+            [stack addObject:vc];
+        }
         [self.navigationController setViewControllers:stack animated:YES];
     }]];
     [self presentViewController:al animated:YES completion:nil];
@@ -1030,15 +1061,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
     UIView *area = [[UIView alloc] initWithFrame:CGRectMake(0, top, w, areaH)];
     area.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    area.userInteractionEnabled = YES;
     [self.view addSubview:area];
 
-    self.dot1 = [self makeDot:area label:@"1" color:[UIColor systemGreenColor]];
-    self.dot1.center = CGPointMake(w * 0.3, areaH * 0.4);
+    // 绿点直接挂全屏 view，可在屏幕任意位置拖动（点击/双击/滑动起点终点）
+    self.dot1 = [self makeDotOnView:self.view label:@"1" color:[UIColor systemGreenColor]];
+    self.dot1.center = CGPointMake(w * 0.3, h * 0.4);
 
     if (self.isSwipe) {
-        self.dot2 = [self makeDot:area label:@"2" color:[UIColor systemOrangeColor]];
-        self.dot2.center = CGPointMake(w * 0.7, areaH * 0.6);
+        self.dot2 = [self makeDotOnView:self.view label:@"2" color:[UIColor systemOrangeColor]];
+        self.dot2.center = CGPointMake(w * 0.7, h * 0.6);
         UILabel *speedLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, top + areaH + 44, 80, 30)];
         speedLabel.text = @"速度";
         speedLabel.font = [UIFont systemFontOfSize:14];
@@ -1051,7 +1082,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self updatePos];
 }
 
-- (UIView *)makeDot:(UIView *)area label:(NSString *)label color:(UIColor *)color {
+- (UIView *)makeDotOnView:(UIView *)root label:(NSString *)label color:(UIColor *)color {
     UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
     dot.layer.cornerRadius = 22;
     dot.backgroundColor = [color colorWithAlphaComponent:0.35];
@@ -1065,17 +1096,18 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [dot addSubview:l];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
     [dot addGestureRecognizer:pan];
-    [area addSubview:dot];
+    [root addSubview:dot];
     return dot;
 }
 
 - (void)drag:(UIPanGestureRecognizer *)g {
     UIView *dot = g.view;
-    CGPoint t = [g translationInView:dot.superview];
+    UIView *root = dot.superview;
+    CGPoint t = [g translationInView:root];
     dot.center = CGPointMake(dot.center.x + t.x, dot.center.y + t.y);
-    CGFloat w = dot.superview.bounds.size.width, h = dot.superview.bounds.size.height;
+    CGFloat w = root.bounds.size.width, h = root.bounds.size.height;
     dot.center = CGPointMake(MAX(22, MIN(w - 22, dot.center.x)), MAX(22, MIN(h - 22, dot.center.y)));
-    [g setTranslation:CGPointZero inView:dot.superview];
+    [g setTranslation:CGPointZero inView:root];
     [self updatePos];
 }
 
@@ -1116,5 +1148,54 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     cfg[@"plans"] = plans;
     PTWrite(cfg);
     [self.navigationController popViewControllerAnimated:YES];
+}
+@end
+
+// ============================================================
+// 调试日志页（读 PageTurner.log 尾部 + 复制）
+// ============================================================
+@implementation PTDebugLogVC
+
+- (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
+    self = [super initWithSpecifier:specifier];
+    if (self) self.title = @"调试日志";
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    UITextView *tv = [[UITextView alloc] initWithFrame:self.view.bounds];
+    tv.editable = NO;
+    tv.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    tv.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
+    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:tv];
+
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
+        style:UIBarButtonItemStyleDone target:self action:@selector(copyLog)];
+
+    NSString *path = @"/var/mobile/Documents/PageTurner.log";
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (content.length) {
+        NSArray *lines = [content componentsSeparatedByString:@"\n"];
+        NSUInteger n = lines.count;
+        NSUInteger from = n > 200 ? n - 200 : 0;
+        NSArray *tail = [lines subarrayWithRange:NSMakeRange(from, n - from)];
+        tv.text = [tail componentsJoinedByString:@"\n"];
+    } else {
+        tv.text = @"日志为空。\n\n开启首页「调试模式」后重开 App，翻页器相关拦截/特征/匹配/执行日志会写入此文件。";
+    }
+}
+
+- (void)copyLog {
+    UITextView *tv = [self.view.subviews firstObject];
+    if (![tv isKindOfClass:[UITextView class]]) return;
+    UIPasteboard.generalPasteboard.string = tv.text;
+    UIAlertController *al = [UIAlertController alertControllerWithTitle:@"已复制"
+        message:@"日志已复制到剪贴板，可直接粘贴发送" preferredStyle:UIAlertControllerStyleAlert];
+    [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:al animated:YES completion:nil];
 }
 @end
