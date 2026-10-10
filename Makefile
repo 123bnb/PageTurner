@@ -18,7 +18,7 @@ TWEAK_NAME = PageTurner
 PageTurner_FILES = Tweak.xm OverlayUI.m \
 	ptftouch/PTFakeMetaTouch.m ptftouch/UITouch-KIFAdditions.m \
 	ptftouch/UIEvent+KIFAdditions.m ptftouch/IOHIDEvent+KIF.m
-PageTurner_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Iptftouch -include ptftouch/Compat.h
+PageTurner_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-arc-retain-cycles -Iptftouch -include ptftouch/Compat.h
 PageTurner_LDFLAGS = -Wl,-undefined,dynamic_lookup
 PageTurner_FRAMEWORKS = Foundation UIKit
 PageTurner_LIBRARIES = substrate
