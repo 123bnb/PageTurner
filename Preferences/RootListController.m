@@ -134,6 +134,9 @@ static IOHIDEventGetFloatValue_t sGetFloat = NULL;
 static uint64_t sCurSender = 0;
 static BOOL sHooked = NO;
 static BOOL sCollectArmed = NO;      // 学习页打开时置 YES
+static uint64_t sAnchorSender = 0;   // 学习锚定的设备 sender：首个非空闲 digitizer 事件锁定，只收它（手指滑动不录）
+// 空闲 digitizer sender（无触摸心跳，不算按键）
+#define kIdleDigitizerSenderC 0x8000000800a15173ull
 // 学习会话（与运行端 Tweak.xm 同口径：addEvent 层读 IOHIDEvent 相对位移 0x23/0x24）
 static BOOL sSessActive = NO;
 static uint64_t sSessSender = 0;
@@ -164,8 +167,13 @@ static void SImpAddEvent(id self, SEL _cmd, void *event) {
         if (sGetType && sGetSender && event) {
             uint32_t type = sGetType(event);
             if (type == 11 && sCollectArmed) {
-                // 翻页器 digitizer：读相对位移（与运行端同一字段 0x23/0x24），同口径
                 uint64_t sender = sGetSender(event);
+                // 空闲心跳不算；首个非空闲 digitizer 事件锁定为学习设备（翻页器），
+                // 之后只收它 —— 手指滑动（sender 不同）不录
+                if (sender == 0 || sender == kIdleDigitizerSenderC) return;
+                if (sAnchorSender == 0) sAnchorSender = sender;
+                if (sender != sAnchorSender) return;
+                // 翻页器 digitizer：读相对位移（与运行端同一字段 0x23/0x24），同口径
                 double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
                 double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
                 double now = PTNowC();
@@ -872,8 +880,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
     PTSetLearningLocal(YES);
     sCollectArmed = YES;
+    sAnchorSender = 0;   // 每次进入学习页重新锚定
     sLastSampleAt = PTNowC();
     SCollectHook();
+    self.status.text = @"请只按翻页器要录的键（手指勿碰屏幕）";
     self.timer = [NSTimer scheduledTimerWithTimeInterval:0.3 target:self selector:@selector(poll) userInfo:nil repeats:YES];
 }
 
