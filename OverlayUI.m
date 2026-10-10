@@ -12,11 +12,11 @@
 #import <objc/runtime.h>
 
 // ---------- 面板子 VC 接口（供 PTOverlay 调用） ----------
-@interface PTOverlayPlansVC : UIViewController
+@interface PTOverlayPlansVC : UIViewController <UITableViewDataSource, UITableViewDelegate>
 - (void)reload;
 @end
 
-@interface PTOverlayPlanVC : UIViewController
+@interface PTOverlayPlanVC : UIViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) NSString *planName;
 - (void)reload;
 @end
