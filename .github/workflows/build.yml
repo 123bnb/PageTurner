@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.3-roothide.deb
+          DEB=PageTurner-1.0.4-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.3
-          NOTES=$'PageTurner v1.0.3（roothide 直装）—— 修复首页空条目 / 方案页布局 / 学习收集失效\n\n【v1.0.3 修复了什么】\n1. 首页删除「使用说明」「关于/版本」两个空组（PSGroupCell 说明文字不渲染，显示为空白行），只留：总开关 / 指定 App 生效 / 防抖间隔 / 记录与映射\n2. 方案页布局重排：新增记录改为大按钮（蓝底白字圆角），新增映射同样蓝色高亮，两个按钮视觉统一、紧邻\n3. 学习页收不到翻页器按键的根因：roothide 空 Filter 不注入系统 App（Preferences 进程），tweak 的学习收集链路从未生效。修复：学习收集搬进设置页 bundle 内自 hook（bundle 必然加载于 Preferences 进程），彻底绕开注入问题\n4. 学习页加诊断：1.5 秒未收到按键事件时橙色提示「未收到翻页器按键事件」\n\n【怎么测】\n1. 装 v1.0.3 → 注销\n2. 设置 → PageTurner：首页只剩 4 项\n3. 记录与映射 → 新增方案 → 点蓝色「＋ 新增记录」按钮 → 大白屏反复按翻页器同一键 → 计数应实时增长 → 稳定后命名\n4. 若学习页显示橙色「未收到翻页器按键事件」→ 把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.4
+          NOTES=$'PageTurner v1.0.4（roothide 直装）—— 设置条目加图标\n\n【v1.0.4 改了什么】\n1. 设置 App 里 PageTurner 条目现在有图标：深蓝渐变圆角 + 白色翻页箭头（icon.png 打包进 bundle，入口 plist 加 icon key）\n\n【功能（同 v1.0.3）】\n1. 首页只剩：总开关 / 指定 App 生效 / 防抖间隔 / 记录与映射\n2. 方案页：新增记录蓝底白字大按钮 + 新增映射蓝色高亮\n3. 学习收集由设置页 bundle 内自 hook（绕开 roothide 不注入系统 App 的问题）\n4. 学习页 1.5 秒无事件 → 橙色诊断提示\n\n【怎么测】\n1. 装 v1.0.4 → 注销\n2. 设置 → 看到带图标的 PageTurner 条目'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.3" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.4" --notes "$NOTES"
           fi
