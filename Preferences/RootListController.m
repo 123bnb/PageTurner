@@ -84,6 +84,9 @@
 @property (nonatomic, assign) BOOL isSwipe;
 @end
 
+@interface PTDebugLogVC : PSViewController
+@end
+
 // ---------- 工具 ----------
 static NSString *PT_PREFS = @"/var/mobile/Library/Preferences/com.yourname.pageturner.plist";
 static const double kDirTol = 15.0;     // 方向容差
