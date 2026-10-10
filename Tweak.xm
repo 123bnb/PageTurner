@@ -337,7 +337,8 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int to
     int steps = 12;
     double per = durationMs / steps / 1000.0;
     __block int i = 1;
-    void (^step)(void) = ^(void) {
+    __block void (^step)(void);
+    step = ^(void) {
         if (token != gExecToken) { if (done) done(); return; }   // 被中断
         if (i > steps) {
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
@@ -406,7 +407,8 @@ static void PTExecutePlan(NSString *name) {
     gIsInjecting = YES;
     PTLog(@"[执行] 命中 %@，开始动作序列（%lu 条）", name, (unsigned long)actions.count);
     __block int idx = 0;
-    void (^runNext)(void) = ^(void) {
+    __block void (^runNext)(void);
+    runNext = ^(void) {
         if (token != gExecToken) { gIsInjecting = NO; return; }
         if (idx >= (int)actions.count) { gIsInjecting = NO; PTLog(@"[执行] %@ 序列完成", name); return; }
         NSDictionary *a = actions[idx++];
