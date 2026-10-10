@@ -1,24 +1,20 @@
 // ============================================================
-// PageTurner v1.0.7 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.8 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
-// v1.0.7（录制回归修复 + 图标标准尺寸）：
-//   - 录制锚定修复：进入学习页延迟 1s 再接收（跳过手指点按钮的触摸收尾事件，
-//     防止锚定被锁死成手指 sender → 翻页器怎么按都没反应）
-//   - 锁定状态显示：已锁定设备 0x…/未锁定/没样本三种提示
-//   - 设置图标 29×29（PreferenceLoader icon 字段按 1x 渲染，87px 会显示成 87pt 偏大）
+// v1.0.8（拦截架构回滚到 sendEvent 层 —— 修复方向键完全没拦的根因）：
+//   - 【核心】v1.0.5 把拦截搬到 _UIUpdateHIDDigitizerInput -addEvent: 读 0x23/0x24
+//     是方向性错误：实测（HIDKeySniffer v1.0.8 日志）翻页器方向键在 addEvent 层
+//     根本不是 type=11（无 DIG 打印），点击键 type=11 但 0x23/0x24 读出全 0 →
+//     方向键完全没拦、位移全废 → 录制失败/运行失败/调试无绿点
+//   - 回滚到 v1.0.4/v1.0.10 验证过的架构：hook UIApplication -sendEvent:，
+//     从合成触摸的 _hidEvent 溯源 sender（手指触摸 sender=0 天然排除），
+//     从 UITouch 屏幕坐标提取位移/方向（真实、画布验证过）
+//   - 调试模式触摸特效：注入点触/翻页器合成=绿大圆点，手指=蓝小点（0.6s）
+//   - gInjectSender 捕获改在 sendEvent 层（非翻页器、非空闲、非零）
 //
-// v1.0.6（模拟触摸注入修复 + 调试模式重做）：
-//   - 【核心】模拟点击/双击/滑动不生效根因：注入 IOHIDEvent 没带 senderID，
-//     iOS16 丢弃无 sender 的注入触摸。修复：进程内捕获最近真实手指触摸
-//     senderID（gInjectSender），注入时 IOHIDEventSetSenderID 写入
-//   - 【调试模式重做】触摸可视化（VolumeKeyTapper 式）：注入点触=绿大圆点，
-//     真实触摸=蓝小圆点，独立 UIWindow(level 10000) 不挡触摸，0.6s 消失
-//   - keyWindow 兜底 windows.lastObject
-//
-// v1.0.5（拦截链路 HID 化）：
-//   - 运行模式特征提取搬到 _UIUpdateHIDDigitizerInput -addEvent:
-//     （IOHIDEvent 层直接读相对位移 0x23/0x24），已学 sender 直接吞并执行映射
-//   - 录制端同步搬到 addEvent 层（两端同源同口径）+ 结算竞态修复
+// v1.0.7：录制锚定武装延迟 + 锁定状态显示 + 设置图标 29×29
+// v1.0.6：注入 IOHIDEvent 补 senderID（gInjectSender）+ 调试特效 + keyWindow 兜底
+// v1.0.5：拦截链路 HID 化（已被 v1.0.8 回滚）
 //
 // v1.0.1 架构修正（用户定稿）：
 //   - 所有 UI（方案列表/方案页/学习页/动作设置）在【系统设置 → PageTurner 设置页】，
@@ -203,29 +199,37 @@ typedef struct {
     BOOL settled;   // 已结算防重复
 } PagerHIDSession;
 static PagerHIDSession gHID;
+static CGPoint gLastTouchPoint = {0, 0};
 
-// 已学 sender 的 digitizer 事件：提取相对位移并累计
-static void PTPagerAddDelta(double dx, double dy) {
+// 已学 sender 的合成触摸：按屏幕坐标增量累计会话
+// （翻页器方向键 = 鼠标相对位移合成触摸，坐标在小范围内重复；点击键坐标不变）
+static void PTPagerTouchPoint(CGPoint p, uint64_t sender) {
     double now = PTNow();
     if (gHID.active && now - gHID.lastEventAt > kPagerGapSec) PTFinishHIDSession();
     if (!gHID.active) {
         gHID.active = YES;
+        gHID.sender = sender;
         gHID.totalDist = 0;
         gHID.firstMoveDir = 0;
         gHID.hasMove = NO;
         gHID.settled = NO;
+        gLastTouchPoint = p;
     }
     gHID.lastEventAt = now;
-    double seg = hypot(dx, dy);
-    if (seg > 0) {
-        gHID.totalDist += seg;
-        if (!gHID.hasMove && gHID.totalDist > 5) {
-            gHID.hasMove = YES;
-            gHID.firstMoveDir = atan2(dy, dx) * 180.0 / M_PI;
+    if (!CGPointEqualToPoint(gLastTouchPoint, p)) {
+        double dx = p.x - gLastTouchPoint.x, dy = p.y - gLastTouchPoint.y;
+        double seg = hypot(dx, dy);
+        if (seg > 0) {
+            gHID.totalDist += seg;
+            if (!gHID.hasMove && gHID.totalDist > 5) {
+                gHID.hasMove = YES;
+                gHID.firstMoveDir = atan2(dy, dx) * 180.0 / M_PI;
+            }
         }
     }
-    if (gDebugMode) PTLog(@"[拦截] sender=0x%llx dx=%.1f dy=%.1f 累计=%.1f dir=%.1f",
-                          gHID.sender, dx, dy, gHID.totalDist, gHID.firstMoveDir);
+    gLastTouchPoint = p;
+    if (gDebugMode) PTLog(@"[拦截] sender=0x%llx pt=(%.1f,%.1f) 累计=%.1f dir=%.1f",
+                          sender, p.x, p.y, gHID.totalDist, gHID.firstMoveDir);
     // 事件流停止 250ms 后结算（事件流结束后没有新事件也能触发）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         PTFinishHIDSession();
@@ -451,44 +455,50 @@ static void PTShowFx(CGPoint p, BOOL injected) {
     });
 }
 
-static IMP gOrigAddEvent = NULL;
-static void PTImpAddEvent(id self, SEL _cmd, void *event) {
-    PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
-    if (event && pGetType && pGetSender) {
-        uint32_t type = pGetType(event);
-        if (type == 11) {   // Digitizer（触摸/翻页器鼠标位移）
-            uint64_t sender = pGetSender(event);
-            if (PTIsLearnedSender(sender)) {
-                // 翻页器（已学 sender）：提取相对位移，吞掉不让 UIKit 看到
-                double dx = pGetFloat ? pGetFloat(event, 0x23) : 0;
-                double dy = pGetFloat ? pGetFloat(event, 0x24) : 0;
-                gHID.sender = sender;
-                PTPagerAddDelta(dx, dy);
-                return;   // 吞：不调用原实现 → 事件不进入 App（无鼠标行为、无触摸）
-            }
-            // 真实手指触摸：记录 senderID 供模拟触摸注入使用（VolumeKeyTapper 实测：
-            // 模拟触摸必须带进程内有效 sender，否则 iOS16 丢弃）
-            if (sender != 0 && sender != kIdleDigitizerSender) gInjectSender = sender;
-        }
+// 从 UIEvent/UITouch 内部取回 IOHIDEvent 并读 sender（v1.0.10 验证：
+// 屏幕手指触摸 sender=0，外部 HID（翻页器）sender≠0 —— 天然区分设备）
+static uint64_t PTHIDEventSender(UIEvent *event) {
+    if (!event || !pGetSender) return 0;
+    id hid = nil;
+    @try { hid = [event valueForKey:@"_hidEvent"]; } @catch (NSException *e) {}
+    if (!hid) { @try { hid = [event valueForKey:@"hidEvent"]; } @catch (NSException *e) {} }
+    if (!hid && event.type == UIEventTypeTouches) {
+        UITouch *t = [event.allTouches anyObject];
+        if (t) { @try { hid = [t valueForKey:@"_hidEvent"]; } @catch (NSException *e) {} }
     }
-    ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
+    if (!hid) return 0;
+    @try { return pGetSender((__bridge void *)hid); } @catch (NSException *e) { return 0; }
 }
 
 static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
-    if (gDebugMode && event) {
-        // 触摸可视化（VolumeKeyTapper 式调试）：注入点触=绿大圆点，真实触摸=蓝小点
-        NSSet *ts = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
-        for (UITouch *t in ts) {
+    PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
+    if (!event) { ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event); return; }
+    uint64_t sender = PTHIDEventSender(event);
+
+    // 调试模式：所有点触可视化（注入=绿大圆点，翻页器合成=绿大圆点，手指=蓝小点）
+    if (gDebugMode && event.type == UIEventTypeTouches) {
+        for (UITouch *t in event.allTouches) {
             if (!t.window) continue;
             CGPoint p = [t locationInView:t.window];
-            PTShowFx(p, gIsInjecting);
+            if (gIsInjecting || PTIsLearnedSender(sender)) PTShowFx(p, YES);
+            else PTShowFx(p, NO);
         }
     }
-    if (gIsInjecting) {
-        // PTFakeMetaTouch 注入的触摸事件：放行给 App 处理
-        ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
-        return;
+
+    if (!gIsInjecting && sender != 0 && PTIsLearnedSender(sender)) {
+        // 翻页器合成触摸：提取屏幕坐标会话 → 吞掉（不进入 App）
+        UITouch *t = [event.allTouches anyObject];
+        if (t) {
+            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:nil];
+            PTPagerTouchPoint(p, sender);
+        }
+        return;   // 吞
+    }
+
+    // 捕获进程内真实触摸 sender（供模拟触摸注入；非翻页器、非空闲、非零）
+    if (!gIsInjecting && sender != 0 && sender != kIdleDigitizerSender && !PTIsLearnedSender(sender)) {
+        gInjectSender = sender;
     }
     ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
@@ -525,7 +535,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.5 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.8 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d 调试=%d",
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount, gDebugMode);
@@ -535,10 +545,10 @@ static void PTInit() {
             // tweak 不 hook，避免双收集。
             PTLog(@"Preferences 进程旁路：学习收集由设置页 bundle 负责");
         } else if (gMasterEnabled && [gEnabledApps containsObject:bundleID]) {
-            // 生效 App：hook addEvent 层（吞已学 sender 事件 + 提取特征）+ sendEvent（放行注入）
-            PTHook(@"_UIUpdateHIDDigitizerInput", @"addEvent:", (IMP)PTImpAddEvent, &gOrigAddEvent);
+            // 生效 App：hook sendEvent 层 —— 翻页器合成触摸（_hidEvent 溯源 sender）
+            // 直接吞掉并替换为映射动作；手指触摸（sender=0）放行
             PTHook(@"UIApplication", @"sendEvent:", (IMP)PTImpSendEvent, &gOrigSendEvent);
-            PTLog(@"生效 App 就绪：已学 sender 按键将在 HID 层被拦截并替换为映射动作");
+            PTLog(@"生效 App 就绪：已学 sender 按键将在触摸层被拦截并替换为映射动作");
         } else {
             PTLog(@"旁路：未生效 App（bundleID 不在列表或总开关关）");
         }
