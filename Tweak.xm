@@ -222,6 +222,14 @@ static void PTPagerAddDelta(double dx, double dy) {
 // 结算按键会话：提取特征 → 匹配 → 执行
 static void PTFinishHIDSession(void) {
     if (!gHID.active || gHID.settled) return;
+    // 事件流必须真正停止（最后事件 +250ms）才结算，否则重新等待——
+    // 避免连续按键时上一个结算块误结算/拆断新会话
+    if (PTNow() - gHID.lastEventAt < 0.25) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            PTFinishHIDSession();
+        });
+        return;
+    }
     gHID.settled = YES;
     uint64_t sender = gHID.sender;
     double dist = gHID.totalDist;
