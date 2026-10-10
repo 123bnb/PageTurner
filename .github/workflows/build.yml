@@ -45,13 +45,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.6-roothide.deb
+          DEB=PageTurner-1.0.7-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.6
-          NOTES=$'PageTurner v1.0.6（roothide 直装）—— 模拟触摸注入修复（核心）+ 调试模式重做（触摸特效）+ 录制锚定\n\n【v1.0.6 改了什么】\n1. 【核心】模拟触摸注入修复：模拟点击/双击/滑动不生效的根因 = 注入的 IOHIDEvent 没带 senderID，iOS16 会丢弃无 sender 的注入触摸（VolumeKeyTapper 实测结论：senderID 进程相关，必须用目标 App 进程内捕获的真实触摸 sender）。修复：进程内捕获最近一次手指触摸的 senderID，注入时写进 IOHIDEvent（IOHIDEventSetSenderID）\n2. 【调试模式重做】不再用日志方式：开启后所有点触可视化——注入的模拟点触显示绿色大圆点（36pt 带白边，0.6 秒消失），真实手指触摸显示蓝色小圆点；独立窗口（level 10000）不挡触摸。按翻页器键 → 立刻看到映射的点击序列圆点，一眼确认动作有没有打出去、位置对不对\n3. 【录制锚定】录制时锁定设备 sender：学习页打开后，第一个非空闲 digitizer 事件（翻页器）锁定为录制对象，之后只录它——手指滑动屏幕不再误录；学习页顶部提示“请只按翻页器要录的键（手指勿碰屏幕）”\n4. keyWindow 兜底：点击注入时 keyWindow 为空自动改用 windows.lastObject\n\n【怎么测（重点）】\n1. 装 v1.0.6 → 注销\n2. 设置 → PageTurner → 打开「调试模式」\n3. 录制一个方案（只按翻页器，手指别碰屏幕）\n4. 打开生效 App → 按翻页器学过的键 → 屏幕上应出现一串绿色大圆点 = 映射动作序列位置；若没有绿点且没有动作，把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.7
+          NOTES=$'PageTurner v1.0.7（roothide 直装）—— 录制回归修复 + 设置图标标准尺寸\n\n【v1.0.7 改了什么】\n1. 【录制回归修复】v1.0.6 加了设备锚定（只录翻页器、不录手指），但进入学习页瞬间手指点按钮的触摸收尾事件会先到达，把锚定锁死成手指 sender，导致翻页器怎么按都没反应。修复：进入学习页延迟 1 秒再开始接收（跳过触摸收尾）；锁定后状态栏显示“已锁定设备 0x…”，按了没反应就返回重进学习页\n2. 【图标】设置图标从 87×87 改为标准 29×29（PreferenceLoader 的 icon 字段按 1x 渲染，87px 会被当成 87pt 显示所以一直偏大）\n3. 学习页状态提示细化：未锁定 / 已锁定但没样本（区分“没收到事件”和“锁错了”）\n\n【怎么测】\n1. 装 v1.0.7 → 注销\n2. 设置 → PageTurner → 确认图标与其他插件一样大\n3. 新建方案 → 新增记录 → 等 1 秒后只按翻页器键（手指勿碰屏幕）→ 应正常录制\n4. 录制正常后 → 开调试模式 → 打开生效 App → 按学过的键 → 看绿色大圆点是否出现'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
             gh release delete "$TAG" --yes || true
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.6" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.7" --notes "$NOTES"
           fi
