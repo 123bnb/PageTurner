@@ -138,10 +138,6 @@ static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊�
 static IMP gOrigAddEvent = NULL;
 static IMP gOrigSendEvent = NULL;
 
-static BOOL SLearningActive(void) {
-    return [PTRead()[@"learning"][@"active"] boolValue];
-}
-
 static void SAppendSample(int phase, double dir, double dist) {
     NSMutableDictionary *cfg = PTRead();
     if (![cfg[@"learning"][@"active"] boolValue]) return;
