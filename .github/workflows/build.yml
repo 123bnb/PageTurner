@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.4-roothide.deb
+          DEB=PageTurner-1.0.5-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.4
-          NOTES=$'PageTurner v1.0.4（roothide 直装）—— 设置条目加图标\n\n【v1.0.4 改了什么】\n1. 设置 App 里 PageTurner 条目现在有图标：深蓝渐变圆角 + 白色翻页箭头（icon.png 打包进 bundle，入口 plist 加 icon key）\n\n【功能（同 v1.0.3）】\n1. 首页只剩：总开关 / 指定 App 生效 / 防抖间隔 / 记录与映射\n2. 方案页：新增记录蓝底白字大按钮 + 新增映射蓝色高亮\n3. 学习收集由设置页 bundle 内自 hook（绕开 roothide 不注入系统 App 的问题）\n4. 学习页 1.5 秒无事件 → 橙色诊断提示\n\n【怎么测】\n1. 装 v1.0.4 → 注销\n2. 设置 → 看到带图标的 PageTurner 条目'
+          TAG=v1.0.5
+          NOTES=$'PageTurner v1.0.5（roothide 直装）—— 修复映射动作不生效（核心）+ 调试模式 + 4项UI\n\n【v1.0.5 修复/新增】\n1. 【核心】指定 App 生效但没产生映射动作的根因：运行时特征提取原本依赖 UIApplication -sendEvent:，而普通 App（如番茄小说）不会把翻页器的鼠标移动合成为触摸事件，所以收不到、拦不到。修复：特征提取搬到 _UIUpdateHIDDigitizerInput -addEvent:（IOHIDEvent 层），直接读相对位移（0x23/0x24），已学 sender 的事件直接吞掉并执行映射 —— 所有 App 都能拦\n2. 新增调试模式（设置页首页开关）：拦截/特征/匹配/执行逐步日志，未命中会写原因（没有已学特征 / sender 不对 / 相位方向位移不匹配）\n3. 新增调试日志页（设置页首页）：一键查看并复制 /var/mobile/Documents/PageTurner.log 最近 200 行\n4. 新增映射绿点可全屏拖动（点击/双击/滑动起点终点，坐标实时显示）\n5. 录制完命名保存后原地更新方案页（不再 push 新页，返回一次直接回列表看到改名）\n6. 新增映射点完成返回方案页立即显示（viewWillAppear 自动刷新）\n7. 设置图标改为标准 87x87（3x 29pt），不再偏大\n\n【怎么测（重点）】\n1. 装 v1.0.5 → 注销\n2. 设置 → PageTurner → 打开「调试模式」\n3. 打开生效 App → 按翻页器学过的键 → 若仍未生效，进设置 → 调试日志 → 复制 → 发我\n4. 日志关键段：注入信息（确认 hook 成功）→ [拦截]（确认收到事件）→ [特征]（确认特征）→ [匹配] 命中/未命中原因 → [执行]（确认动作触发）'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.4" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.5" --notes "$NOTES"
           fi
