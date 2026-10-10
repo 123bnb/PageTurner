@@ -52,5 +52,6 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
+            gh release delete "$TAG" --yes || true
             gh release create "$TAG" "$DEB" --title "PageTurner v1.0.5" --notes "$NOTES"
           fi
