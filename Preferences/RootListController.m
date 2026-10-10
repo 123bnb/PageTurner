@@ -134,10 +134,10 @@ static IOHIDEventGetFloatValue_t sGetFloat = NULL;
 static uint64_t sCurSender = 0;
 static BOOL sHooked = NO;
 static BOOL sCollectArmed = NO;      // 学习页打开时置 YES
-static uint64_t sAnchorSender = 0;   // 学习锚定的设备 sender：首个非空闲 digitizer 事件锁定，只收它（手指滑动不录）
+static uint64_t sAnchorSender = 0;   // 学习锚定的设备 sender：首个非手指 HID 事件锁定，只收它
 // 空闲 digitizer sender（无触摸心跳，不算按键）
 #define kIdleDigitizerSenderC 0x8000000800a15173ull
-// 学习会话（与运行端 Tweak.xm 同口径：addEvent 层读 IOHIDEvent 相对位移 0x23/0x24）
+// 学习会话（与运行端 Tweak.xm 同口径：sendEvent 层合成触摸屏幕坐标 + _hidEvent 溯源 sender）
 static BOOL sSessActive = NO;
 static uint64_t sSessSender = 0;
 static double sSessLastAt = 0;
@@ -145,7 +145,8 @@ static double sSessDist = 0, sSessFirstDir = 0;
 static BOOL sSessHasMove = NO;
 static BOOL sSessSettled = NO;
 static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊断用）
-static IMP gOrigAddEvent = NULL;
+static CGPoint sLastPoint = {0, 0};
+static IMP gOrigSendEvent = NULL;
 
 static void SAppendSample(int phase, double dir, double dist) {
     NSMutableDictionary *cfg = PTRead();
@@ -162,45 +163,70 @@ static void SAppendSample(int phase, double dir, double dist) {
 
 static void SFinishSession(void);   // 前向声明
 
-static void SImpAddEvent(id self, SEL _cmd, void *event) {
+// 从 UIEvent/UITouch 内部取回 IOHIDEvent 并读 sender（屏幕手指触摸=0，外部 HID=翻页器≠0）
+static uint64_t SHIDEventSender(UIEvent *event) {
+    if (!event || !sGetSender) return 0;
+    id hid = nil;
+    @try { hid = [event valueForKey:@"_hidEvent"]; } @catch (NSException *e) {}
+    if (!hid) { @try { hid = [event valueForKey:@"hidEvent"]; } @catch (NSException *e) {} }
+    if (!hid && event.type == UIEventTypeTouches) {
+        UITouch *t = [event.allTouches anyObject];
+        if (t) { @try { hid = [t valueForKey:@"_hidEvent"]; } @catch (NSException *e) {} }
+    }
+    if (!hid) return 0;
+    @try { return sGetSender((__bridge void *)hid); } @catch (NSException *e) { return 0; }
+}
+
+// 已锚定设备的合成触摸：坐标增量累积会话（方向键=相对位移合成触摸，点击键坐标不变）
+static void STouchPoint(CGPoint p) {
+    double now = PTNowC();
+    if (sSessActive && now - sSessLastAt > 0.15) SFinishSession();
+    if (!sSessActive) {
+        sSessActive = YES;
+        sSessDist = 0; sSessFirstDir = 0;
+        sSessHasMove = NO; sSessSettled = NO;
+        sLastPoint = p;
+    }
+    sSessLastAt = now;
+    if (!CGPointEqualToPoint(sLastPoint, p)) {
+        double dx = p.x - sLastPoint.x, dy = p.y - sLastPoint.y;
+        double seg = hypot(dx, dy);
+        if (seg > 0) {
+            sSessDist += seg;
+            if (!sSessHasMove && sSessDist > 5) {
+                sSessHasMove = YES;
+                sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
+            }
+        }
+    }
+    sLastPoint = p;
+    // 事件流停止 250ms 后结算样本（同运行端）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        SFinishSession();
+    });
+}
+
+static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     @try {
-        if (sGetType && sGetSender && event) {
-            uint32_t type = sGetType(event);
-            if (type == 11 && sCollectArmed) {
-                uint64_t sender = sGetSender(event);
-                // 空闲心跳不算；首个非空闲 digitizer 事件锁定为学习设备（翻页器），
-                // 之后只收它 —— 手指滑动（sender 不同）不录
-                if (sender == 0 || sender == kIdleDigitizerSenderC) return;
+        if (sCollectArmed && event) {
+            uint64_t sender = SHIDEventSender(event);
+            // 手指触摸 sender=0 天然排除；空闲心跳 sender 也排除；其余首个设备锁定
+            if (sender != 0 && sender != kIdleDigitizerSenderC) {
                 if (sAnchorSender == 0) sAnchorSender = sender;
-                if (sender != sAnchorSender) return;
-                // 翻页器 digitizer：读相对位移（与运行端同一字段 0x23/0x24），同口径
-                double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
-                double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
-                double now = PTNowC();
-                if (sSessActive && now - sSessLastAt > 0.15) SFinishSession();
-                if (!sSessActive) {
-                    sSessActive = YES;
+                if (sender == sAnchorSender) {
                     sSessSender = sender;
-                    sSessDist = 0; sSessFirstDir = 0;
-                    sSessHasMove = NO; sSessSettled = NO;
-                }
-                sSessLastAt = now;
-                double seg = hypot(dx, dy);
-                if (seg > 0) {
-                    sSessDist += seg;
-                    if (!sSessHasMove && sSessDist > 5) {
-                        sSessHasMove = YES;
-                        sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
+                    if (event.type == UIEventTypeTouches) {
+                        UITouch *t = [event.allTouches anyObject];
+                        if (t) {
+                            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:nil];
+                            STouchPoint(p);
+                        }
                     }
                 }
-                // 事件流停止 250ms 后结算样本（同运行端）
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    SFinishSession();
-                });
             }
         }
     } @catch (NSException *e) {}
-    if (gOrigAddEvent) ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
+    if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
 
 // 结算按键会话 → append 样本（与运行端 PTFinishHIDSession 同构，含停止校验）
@@ -229,12 +255,14 @@ static void SCollectHook(void) {
             sGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
             sGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
-        Class addCls = NSClassFromString(@"_UIUpdateHIDDigitizerInput");
-        SEL addSel = sel_registerName("addEvent:");
-        Method am = addCls ? class_getInstanceMethod(addCls, addSel) : NULL;
-        if (am) { gOrigAddEvent = method_getImplementation(am); method_setImplementation(am, (IMP)SImpAddEvent); }
+        // hook UIApplication -sendEvent:（一定存在、一定工作）——
+        // 从合成触摸的 _hidEvent 溯源 sender 区分设备，屏幕坐标提取位移/方向
+        Class appCls = NSClassFromString(@"UIApplication");
+        SEL sendSel = sel_registerName("sendEvent:");
+        Method sm = appCls ? class_getInstanceMethod(appCls, sendSel) : NULL;
+        if (sm) { gOrigSendEvent = method_getImplementation(sm); method_setImplementation(sm, (IMP)SImpSendEvent); }
 
-        sHooked = (gOrigAddEvent != NULL && sGetType != NULL && sGetSender != NULL);
+        sHooked = (gOrigSendEvent != NULL && sGetSender != NULL);
     }
 }
 
