@@ -171,6 +171,12 @@ static BOOL PTIsLearnedSender(uint64_t s) {
 // 按键会话（addEvent 层，IOHIDEvent 相对位移）
 // ============================================================
 typedef struct {
+    int phase;        // 0=tap 1=swipe
+    double direction;
+    double dist;
+} PagerFeature;
+
+typedef struct {
     BOOL active;
     uint64_t sender;
     double lastEventAt;
@@ -238,12 +244,6 @@ static void PTFinishHIDSession(void) {
 // ============================================================
 // 事件处理（运行拦截：addEvent 层吞已学 sender + 特征提取 + 执行）
 // ============================================================
-typedef struct {
-    int phase;        // 0=tap 1=swipe
-    double direction;
-    double dist;
-} PagerFeature;
-
 static void PTExecutePlan(NSString *name);   // 前向声明（定义在动作执行段）
 
 // 运行模式：匹配（sender + 相位 + 方向±15° + 位移区间）→ 唯一方案
