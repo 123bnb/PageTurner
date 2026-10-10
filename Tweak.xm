@@ -1,23 +1,23 @@
 // ============================================================
-// PageTurner v1.0.1 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.5 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.5 关键修复（用户反馈"指定 App 生效没用"根因）：
+//   - 运行模式特征提取从 UIApplication -sendEvent:（依赖 UIKit 把鼠标移动合成
+//     触摸事件，普通 App 不合成 → 收不到）搬到 _UIUpdateHIDDigitizerInput
+//     -addEvent:（IOHIDEvent 层直接读相对位移 0x23/0x24），
+//     已学 sender 的事件直接吞掉并执行映射 —— 所有 App 都能拦
+//   - 新增调试模式（设置页开关）：拦截/特征/匹配/执行逐步日志
 //
 // v1.0.1 架构修正（用户定稿）：
 //   - 所有 UI（方案列表/方案页/学习页/动作设置）在【系统设置 → PageTurner 设置页】，
 //     App 内零 UI，删除三指手势
 //   - 来源 sender 录进特征，不写死设备：学什么拦什么
-//   - 学习宿主 = Preferences 进程：学习页打开时 tweak 收集翻页器事件 → plist，
-//     设置页轮询判定
+//   - 学习宿主 = Preferences 进程（设置页 bundle 内自 hook，roothide 空 Filter
+//     不注入系统 App，tweak 不参与学习收集）
 //
-// 注入范围：所有进程（roothide 黑名单默认）
-//   - Preferences 进程：无条件 hook（学习收集随时可能开）
-//   - 其它 App：运行时检查 masterEnabled + enabledApps[bundleID] 才 hook
-//
-// 事件链路：
-//   _UIUpdateHIDDigitizerInput -addEvent:（IOHIDEvent 层，拿 sender）
-//   → 学过的 sender / 学习模式 → 开窗口
-//   → UIApplication -sendEvent:（UIEvent 层）会话 up 提取特征
-//   → 学习模式（Preferences）：append 样本到 plist learningSamples，不吞
-//   → 运行模式（生效 App）：sender+相位+方向+位移匹配唯一方案 → 吞 → 防抖 → 顺序执行
+// 注入范围：仅生效 App（masterEnabled + enabledApps[bundleID]）
+//   - 学习收集：设置页 bundle 自 hook（Preferences 进程）
+//   - 运行拦截：addEvent 层吞已学 sender 事件 → 提取特征 → 匹配 → 执行映射
 //
 // 动作：PTFakeMetaTouch（点击/双击/滑动）+ AVSystemController（静音/音量±）
 // 防递归：gIsInjecting
@@ -45,10 +45,10 @@
 // ============================================================
 static NSString *kPrefPath = @"/var/mobile/Library/Preferences/com.yourname.pageturner.plist";
 static NSString *kPrefsBundleID = @"com.apple.Preferences";
-static const double kPagerWindowSec = 0.05;      // HID 事件 → UIEvent 分发窗口
-static const double kTapDistThreshold = 30.0;    // 位移 <30pt 判定 tap
-static const double kDirTolerance = 15.0;        // 方向容差 ±15°
-static const double kDistSlack = 30.0;           // 位移区间匹配裕度
+static const double kPagerGapSec = 0.15;      // HID 事件间隔 >150ms 视为按键会话结束
+static const double kTapDistThreshold = 30.0; // 位移 <30pt 判定 tap
+static const double kDirTolerance = 15.0;     // 方向容差 ±15°
+static const double kDistSlack = 30.0;        // 位移区间匹配裕度
 
 // ============================================================
 // 日志
@@ -87,7 +87,7 @@ static BOOL gMasterEnabled = NO;
 static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
 static NSMutableDictionary *gPlans = nil;   // name -> dict
-static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
+static BOOL gDebugMode = NO;                // 调试模式（详细日志）
 
 static uint64_t gLearnedSenders[32];        // 已学 sender 集合（运行时识别）
 static int gLearnedSenderCount = 0;
@@ -134,7 +134,7 @@ static void PTLoadConfig(BOOL force) {
             }
         }
     }
-    gLearnActive = [gConfig[@"learning"][@"active"] boolValue];
+    gDebugMode = [gConfig[@"debugMode"] boolValue];
 }
 
 // 供设置页读取当前配置快照（Preferences 进程内）
@@ -157,11 +157,10 @@ void PTSetLearning(BOOL on) {
 // ============================================================
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
+typedef double (*IOHIDEventGetFloatValue_t)(void *, uint32_t);
 static IOHIDEventGetType_t pGetType = NULL;
 static IOHIDEventGetSenderID_t pGetSender = NULL;
-
-static uint64_t gCurSender = 0;              // 最近 digitizer 事件 sender
-static double gPagerWindowUntil = 0;         // 翻页器活跃窗口
+static IOHIDEventGetFloatValue_t pGetFloat = NULL;
 
 static BOOL PTIsLearnedSender(uint64_t s) {
     for (int i = 0; i < gLearnedSenderCount; i++) if (gLearnedSenders[i] == s) return YES;
@@ -169,43 +168,83 @@ static BOOL PTIsLearnedSender(uint64_t s) {
 }
 
 // ============================================================
-// 触摸会话 + 特征
+// 按键会话（addEvent 层，IOHIDEvent 相对位移）
 // ============================================================
 typedef struct {
     BOOL active;
-    int nEvents;
-    CGPoint start, last;
+    uint64_t sender;
+    double lastEventAt;
     double totalDist;
     double firstMoveDir;
     BOOL hasMove;
-} PagerSession;
-static PagerSession gSession;
+    BOOL settled;   // 已结算防重复
+} PagerHIDSession;
+static PagerHIDSession gHID;
 
+static void PTFinishHIDSession(void);   // 前向声明
+
+// 已学 sender 的 digitizer 事件：提取相对位移并累计
+static void PTPagerAddDelta(double dx, double dy) {
+    double now = PTNow();
+    if (gHID.active && now - gHID.lastEventAt > kPagerGapSec) PTFinishHIDSession();
+    if (!gHID.active) {
+        gHID.active = YES;
+        gHID.totalDist = 0;
+        gHID.firstMoveDir = 0;
+        gHID.hasMove = NO;
+        gHID.settled = NO;
+    }
+    gHID.lastEventAt = now;
+    double seg = hypot(dx, dy);
+    if (seg > 0) {
+        gHID.totalDist += seg;
+        if (!gHID.hasMove && gHID.totalDist > 5) {
+            gHID.hasMove = YES;
+            gHID.firstMoveDir = atan2(dy, dx) * 180.0 / M_PI;
+        }
+    }
+    if (gDebugMode) PTLog(@"[拦截] sender=0x%llx dx=%.1f dy=%.1f 累计=%.1f dir=%.1f",
+                          gHID.sender, dx, dy, gHID.totalDist, gHID.firstMoveDir);
+    // 事件流停止 250ms 后结算（事件流结束后没有新事件也能触发）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        PTFinishHIDSession();
+    });
+}
+
+// 结算按键会话：提取特征 → 匹配 → 执行
+static void PTFinishHIDSession(void) {
+    if (!gHID.active || gHID.settled) return;
+    gHID.settled = YES;
+    uint64_t sender = gHID.sender;
+    double dist = gHID.totalDist;
+    PagerFeature f;
+    f.phase = (dist < kTapDistThreshold) ? 0 : 1;
+    f.direction = gHID.hasMove ? gHID.firstMoveDir : 0;
+    f.dist = dist;
+    gHID.active = NO;
+    if (gDebugMode) PTLog(@"[特征] sender=0x%llx phase=%d dir=%.1f dist=%.1f", sender, f.phase, f.direction, f.dist);
+    NSString *plan = PTMatchPlan(f, sender);
+    if (plan) {
+        PTLog(@"[匹配] 命中方案「%@」", plan);
+        PTExecutePlan(plan);
+    } else if (gDebugMode) {
+        // 未命中原因排查
+        if (gLearnedSenderCount == 0) PTLog(@"[匹配] 未命中：没有已学特征（先录制方案）");
+        else if (!PTIsLearnedSender(sender)) PTLog(@"[匹配] 未命中：sender=0x%llx 不在已学特征（录的是 0x%llx）", sender, gLearnedSenders[0]);
+        else PTLog(@"[匹配] 未命中：sender 对但相位/方向/位移不匹配（phase=%d dir=%.1f dist=%.1f）", f.phase, f.direction, f.dist);
+    }
+}
+
+// ============================================================
+// 事件处理（运行拦截：addEvent 层吞已学 sender + 特征提取 + 执行）
+// ============================================================
 typedef struct {
     int phase;        // 0=tap 1=swipe
     double direction;
     double dist;
 } PagerFeature;
 
-// ============================================================
-// 事件处理（学习收集 / 运行匹配+吞）
-// ============================================================
 static void PTExecutePlan(NSString *name);   // 前向声明（定义在动作执行段）
-// 学习模式（Preferences 进程）：append 样本到 plist，不吞
-static void PTAppendLearnSample(PagerFeature f, uint64_t sender) {
-    NSMutableDictionary *cfg = PTReadFileRaw();
-    if (![cfg[@"learning"][@"active"] boolValue]) return;
-    NSMutableArray *samples = [NSMutableArray arrayWithArray:cfg[@"learningSamples"] ?: @[]];
-    [samples addObject:@{
-        @"sender": [NSString stringWithFormat:@"0x%llx", sender],
-        @"phase": @(f.phase),
-        @"direction": @(f.direction),
-        @"dist": @(f.dist),
-    }];
-    cfg[@"learningSamples"] = samples;
-    PTWriteFileRaw(cfg);
-    PTLog(@"[学习] 样本 sender=0x%llx phase=%d dir=%.1f dist=%.1f", sender, f.phase, f.direction, f.dist);
-}
 
 // 运行模式：匹配（sender + 相位 + 方向±15° + 位移区间）→ 唯一方案
 static NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
@@ -233,65 +272,6 @@ static NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
         if (score < bestScore) { bestScore = score; best = name; }
     }
     return best;
-}
-
-// 返回 YES = 吞（运行模式命中/未命中翻页器均吞）
-static BOOL PTHandlePagerEvent(UIEvent *event) {
-    if (![event respondsToSelector:@selector(allTouches)]) return NO;
-    NSSet *touches = event.allTouches;
-    if (!touches.count) return NO;
-    UITouch *t = [touches anyObject];
-    CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
-    switch (t.phase) {
-        case UITouchPhaseBegan: {
-            gSession.active = YES;
-            gSession.nEvents = 0;
-            gSession.start = p;
-            gSession.last = p;
-            gSession.totalDist = 0;
-            gSession.hasMove = NO;
-            gSession.firstMoveDir = 0;
-            return gIsPreferences ? NO : YES;   // 学习宿主不吞（防锁死设置页）
-        }
-        case UITouchPhaseMoved: {
-            if (!gSession.active) return gIsPreferences ? NO : YES;
-            gSession.nEvents++;
-            double dx = p.x - gSession.last.x, dy = p.y - gSession.last.y;
-            double seg = hypot(dx, dy);
-            if (seg > 0) {
-                gSession.totalDist += seg;
-                if (!gSession.hasMove && gSession.totalDist > 5) {
-                    gSession.hasMove = YES;
-                    gSession.firstMoveDir = atan2(dy, dx) * 180.0 / M_PI;
-                }
-            }
-            gSession.last = p;
-            return gIsPreferences ? NO : YES;
-        }
-        case UITouchPhaseEnded: {
-            if (!gSession.active) return gIsPreferences ? NO : YES;
-            gSession.active = NO;
-            PagerFeature f;
-            f.phase = (gSession.totalDist < kTapDistThreshold) ? 0 : 1;
-            f.direction = gSession.hasMove ? gSession.firstMoveDir : 0;
-            f.dist = gSession.totalDist;
-            if (gIsPreferences && gLearnActive) {
-                PTAppendLearnSample(f, gCurSender);
-                return NO;
-            }
-            NSString *plan = PTMatchPlan(f, gCurSender);
-            if (plan) {
-                PTExecutePlan(plan);
-                return YES;
-            }
-            return YES;   // 翻页器事件一律吞（未匹配也不让 App 看到）
-        }
-        case UITouchPhaseCancelled:
-            gSession.active = NO;
-            return gIsPreferences ? NO : YES;
-        default:
-            return gIsPreferences ? NO : YES;
-    }
 }
 
 // ============================================================
@@ -353,6 +333,12 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int to
 // 执行单条动作 → 完成后 next()
 static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
     NSString *type = a[@"type"];
+    if (gDebugMode) {
+        if ([type isEqualToString:@"tap"]) PTLog(@"[执行] 点击(%@,%@)", a[@"x"], a[@"y"]);
+        else if ([type isEqualToString:@"doubleTap"]) PTLog(@"[执行] 双击(%@,%@)", a[@"x"], a[@"y"]);
+        else if ([type isEqualToString:@"swipe"]) PTLog(@"[执行] 滑动(%@,%@)→(%@,%@)", a[@"x1"], a[@"y1"], a[@"x2"], a[@"y2"]);
+        else PTLog(@"[执行] %@", type);
+    }
     if ([type isEqualToString:@"tap"]) {
         PTFakeTap(CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]));
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
@@ -419,15 +405,17 @@ static void PTExecutePlan(NSString *name) {
 static IMP gOrigAddEvent = NULL;
 static void PTImpAddEvent(id self, SEL _cmd, void *event) {
     PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
-    if (event && pGetSender && pGetType) {
+    if (event && pGetType && pGetSender) {
         uint32_t type = pGetType(event);
-        uint64_t sender = pGetSender(event);
-        if (type == 11) {
-            gCurSender = sender;
-            if (gIsPreferences && gLearnActive) {
-                gPagerWindowUntil = PTNow() + kPagerWindowSec;   // 学习：全部 digitizer
-            } else if (PTIsLearnedSender(sender)) {
-                gPagerWindowUntil = PTNow() + kPagerWindowSec;   // 运行：学过的 sender
+        if (type == 11) {   // Digitizer（触摸/翻页器鼠标位移）
+            uint64_t sender = pGetSender(event);
+            if (PTIsLearnedSender(sender)) {
+                // 翻页器（已学 sender）：提取相对位移，吞掉不让 UIKit 看到
+                double dx = pGetFloat ? pGetFloat(event, 0x23) : 0;
+                double dy = pGetFloat ? pGetFloat(event, 0x24) : 0;
+                gHID.sender = sender;
+                PTPagerAddDelta(dx, dy);
+                return;   // 吞：不调用原实现 → 事件不进入 App（无鼠标行为、无触摸）
             }
         }
     }
@@ -436,13 +424,20 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
 
 static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
-    PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
     if (gIsInjecting) {
+        // PTFakeMetaTouch 注入的触摸事件：放行给 App 处理
         ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
         return;
     }
-    if (event && PTNow() < gPagerWindowUntil) {
-        if (PTHandlePagerEvent(event)) return;
+    if (gDebugMode && event) {
+        // 低频摘要：确认 App 侧收到的触摸事件（区分链路）
+        static double sLastDump = 0;
+        double now = PTNow();
+        if (now - sLastDump > 1.0) {
+            sLastDump = now;
+            NSSet *ts = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
+            PTLog(@"[调试] sendEvent 收到 UIEvent touches=%lu", (unsigned long)(ts ? ts.count : 0));
+        }
     }
     ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
@@ -476,22 +471,23 @@ static void PTInit() {
         if (iokit) {
             pGetType = (IOHIDEventGetType_t)dlsym(iokit, "IOHIDEventGetType");
             pGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
+            pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.1 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
-        PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
+        PTLog(@"PageTurner v1.0.5 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d 调试=%d",
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
-              (unsigned long)gPlans.count, gLearnedSenderCount);
+              (unsigned long)gPlans.count, gLearnedSenderCount, gDebugMode);
         if (gIsPreferences) {
             // 学习收集由设置页 bundle 内自 hook 负责（roothide 空 Filter 不注入系统 App，
             // tweak 在此进程收不到事件；bundle 必然被 PreferenceLoader 加载）。
             // tweak 不 hook，避免双收集。
             PTLog(@"Preferences 进程旁路：学习收集由设置页 bundle 负责");
         } else if (gMasterEnabled && [gEnabledApps containsObject:bundleID]) {
-            // 生效 App：hook 拦截
+            // 生效 App：hook addEvent 层（吞已学 sender 事件 + 提取特征）+ sendEvent（放行注入）
             PTHook(@"_UIUpdateHIDDigitizerInput", @"addEvent:", (IMP)PTImpAddEvent, &gOrigAddEvent);
             PTHook(@"UIApplication", @"sendEvent:", (IMP)PTImpSendEvent, &gOrigSendEvent);
-            PTLog(@"生效 App 就绪：学过的 sender 按键将被拦截");
+            PTLog(@"生效 App 就绪：已学 sender 按键将在 HID 层被拦截并替换为映射动作");
         } else {
             PTLog(@"旁路：未生效 App（bundleID 不在列表或总开关关）");
         }
