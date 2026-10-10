@@ -483,10 +483,10 @@ static void PTInit() {
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
         if (gIsPreferences) {
-            // Preferences 进程：无条件 hook（学习收集随时可能开）
-            PTHook(@"_UIUpdateHIDDigitizerInput", @"addEvent:", (IMP)PTImpAddEvent, &gOrigAddEvent);
-            PTHook(@"UIApplication", @"sendEvent:", (IMP)PTImpSendEvent, &gOrigSendEvent);
-            PTLog(@"Preferences 进程就绪：学习页开启时自动收集翻页器样本");
+            // 学习收集由设置页 bundle 内自 hook 负责（roothide 空 Filter 不注入系统 App，
+            // tweak 在此进程收不到事件；bundle 必然被 PreferenceLoader 加载）。
+            // tweak 不 hook，避免双收集。
+            PTLog(@"Preferences 进程旁路：学习收集由设置页 bundle 负责");
         } else if (gMasterEnabled && [gEnabledApps containsObject:bundleID]) {
             // 生效 App：hook 拦截
             PTHook(@"_UIUpdateHIDDigitizerInput", @"addEvent:", (IMP)PTImpAddEvent, &gOrigAddEvent);
