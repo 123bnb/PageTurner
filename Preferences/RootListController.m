@@ -879,11 +879,19 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.view addSubview:self.distLabel];
 
     PTSetLearningLocal(YES);
-    sCollectArmed = YES;
+    sCollectArmed = NO;   // 武装延迟：跳过进入页面瞬间的手指触摸收尾事件，防止锚定锁死成手指 sender
     sAnchorSender = 0;   // 每次进入学习页重新锚定
     sLastSampleAt = PTNowC();
     SCollectHook();
-    self.status.text = @"请只按翻页器要录的键（手指勿碰屏幕）";
+    self.status.text = @"正在准备…请稍候";
+    __weak typeof(self) ws = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        sCollectArmed = YES;
+        if (ws) {
+            ws.status.text = @"请按翻页器要录的键（手指勿碰屏幕）";
+            ws.status.textColor = [UIColor labelColor];
+        }
+    });
     self.timer = [NSTimer scheduledTimerWithTimeInterval:0.3 target:self selector:@selector(poll) userInfo:nil repeats:YES];
 }
 
@@ -908,8 +916,14 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (!samples.count) {
         // 诊断：一直没收到翻页器事件
         if (!self.finished && self.mem.count == 0 && PTNowC() - sLastSampleAt > 1.5) {
-            self.status.text = @"⚠️ 未收到翻页器按键事件\n确认翻页器已连接、保持在前台按它";
-            self.status.textColor = [UIColor systemOrangeColor];
+            if (sAnchorSender != 0) {
+                // 已锁定设备但没样本：可能锁错了（锁成手指）或翻页器没连
+                self.status.text = [NSString stringWithFormat:@"已锁定设备 0x%llx\n按了没反应？返回重进学习页再试", sAnchorSender];
+                self.status.textColor = [UIColor systemOrangeColor];
+            } else {
+                self.status.text = @"⚠️ 未收到翻页器按键事件\n确认翻页器已连接、保持在前台按它";
+                self.status.textColor = [UIColor systemOrangeColor];
+            }
         }
         return;
     }
