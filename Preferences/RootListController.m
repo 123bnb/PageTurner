@@ -22,6 +22,10 @@
 #import <Preferences/PSSpecifier.h>
 #import <Preferences/PSViewController.h>
 #import <UIKit/UIKit.h>
+#import <dlfcn.h>
+#import <sys/time.h>
+#include <math.h>
+#include <float.h>
 
 @interface PSViewController (Private)
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier;
@@ -107,6 +111,128 @@ static void PTSetLearningLocal(BOOL on) {
     cfg[@"learning"] = @{ @"active": @(on) };
     if (on) cfg[@"learningSamples"] = @[];
     PTWrite(cfg);
+}
+
+// ---------- 学习收集（bundle 内自 hook，不依赖 tweak 注入 Preferences 进程）----------
+// 根因：roothide 空 Filter 不注入系统 App（Preferences），tweak 收集链路失效。
+// bundle 必然被 PreferenceLoader 加载进 Preferences 进程，在这里自己 hook 事件收集样本。
+static double PTNowC(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
+typedef uint32_t (*IOHIDEventGetType_t)(void *);
+typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
+static IOHIDEventGetType_t sGetType = NULL;
+static IOHIDEventGetSenderID_t sGetSender = NULL;
+static uint64_t sCurSender = 0;
+static double sWindowUntil = 0;
+static BOOL sHooked = NO;
+static BOOL sCollectArmed = NO;      // 学习页打开时置 YES
+static BOOL sSessActive = NO;
+static double sSessDist = 0, sSessFirstDir = 0;
+static BOOL sSessHasMove = NO;
+static CGPoint sSessLast = {0, 0};
+static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊断用）
+static IMP gOrigAddEvent = NULL;
+static IMP gOrigSendEvent = NULL;
+
+static BOOL SLearningActive(void) {
+    return [PTRead()[@"learning"][@"active"] boolValue];
+}
+
+static void SAppendSample(int phase, double dir, double dist) {
+    NSMutableDictionary *cfg = PTRead();
+    if (![cfg[@"learning"][@"active"] boolValue]) return;
+    NSMutableArray *samples = [NSMutableArray arrayWithArray:cfg[@"learningSamples"] ?: @[]];
+    [samples addObject:@{
+        @"sender": [NSString stringWithFormat:@"0x%llx", sCurSender],
+        @"phase": @(phase), @"direction": @(dir), @"dist": @(dist),
+    }];
+    cfg[@"learningSamples"] = samples;
+    PTWrite(cfg);
+    sLastSampleAt = PTNowC();
+}
+
+static void SImpAddEvent(id self, SEL _cmd, void *event) {
+    @try {
+        if (sGetType && sGetSender && event) {
+            uint32_t type = sGetType(event);
+            if (type == 11) {
+                sCurSender = sGetSender(event);
+                if (sCollectArmed) sWindowUntil = PTNowC() + 0.05;
+            }
+        }
+    } @catch (NSException *e) {}
+    if (gOrigAddEvent) ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
+}
+
+static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
+    @try {
+        if (sCollectArmed && event && PTNowC() < sWindowUntil) {
+            NSSet *touches = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
+            UITouch *t = [touches anyObject];
+            if (t && sGetSender) {
+                CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+                switch (t.phase) {
+                    case UITouchPhaseBegan: {
+                        sSessActive = YES; sSessDist = 0; sSessHasMove = NO; sSessFirstDir = 0;
+                        sSessLast = p;
+                        break;
+                    }
+                    case UITouchPhaseMoved: {
+                        if (sSessActive) {
+                            double dx = p.x - sSessLast.x, dy = p.y - sSessLast.y;
+                            double seg = hypot(dx, dy);
+                            if (seg > 0) {
+                                sSessDist += seg;
+                                if (!sSessHasMove && sSessDist > 5) {
+                                    sSessHasMove = YES;
+                                    sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
+                                }
+                            }
+                            sSessLast = p;
+                        }
+                        break;
+                    }
+                    case UITouchPhaseEnded: {
+                        if (sSessActive) {
+                            sSessActive = NO;
+                            int phase = (sSessDist < 30.0) ? 0 : 1;
+                            double dir = sSessHasMove ? sSessFirstDir : 0;
+                            SAppendSample(phase, dir, sSessDist);
+                        }
+                        break;
+                    }
+                    case UITouchPhaseCancelled: sSessActive = NO; break;
+                    default: break;
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
+}
+
+static void SCollectHook(void) {
+    if (sHooked) return;
+    @autoreleasepool {
+        void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
+        if (iokit) {
+            sGetType = (IOHIDEventGetType_t)dlsym(iokit, "IOHIDEventGetType");
+            sGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
+        }
+        Class addCls = NSClassFromString(@"_UIUpdateHIDDigitizerInput");
+        SEL addSel = sel_registerName("addEvent:");
+        Method am = addCls ? class_getInstanceMethod(addCls, addSel) : NULL;
+        if (am) { gOrigAddEvent = method_getImplementation(am); method_setImplementation(am, (IMP)SImpAddEvent); }
+
+        Class appCls = NSClassFromString(@"UIApplication");
+        SEL sendSel = sel_registerName("sendEvent:");
+        Method sm = appCls ? class_getInstanceMethod(appCls, sendSel) : NULL;
+        if (sm) { gOrigSendEvent = method_getImplementation(sm); method_setImplementation(sm, (IMP)SImpSendEvent); }
+
+        sHooked = (gOrigAddEvent != NULL && gOrigSendEvent != NULL && sGetType != NULL && sGetSender != NULL);
+    }
 }
 
 static NSString *PTDirName(double dir) {
@@ -218,19 +344,6 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             cell:PSLinkCell edit:nil];
         [plans setProperty:@"新增方案：录制翻页器一个按键的特征（来源+方向+位移），再映射为动作序列。左滑可删除方案。" forKey:@"staticText"];
         [specs addObject:plans];
-
-        [specs addObject:[PSSpecifier groupSpecifierWithName:@"使用说明"]];
-        PSSpecifier *help = [PSSpecifier preferenceSpecifierNamed:@"怎么用"
-            target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        [help setProperty:@"1. 打开总开关，勾选生效 App\n2. 记录与映射 → 新增方案 → 新增记录\n3. 学习页：按翻页器同一键 5 次以上（如：左键），直到提示稳定 → 命名\n4. 方案页：新增映射 → 设置动作（点击/双击/滑动/延迟/静音/音量±）\n5. 打开生效 App 按该键 → 顺序执行全部动作" forKey:@"staticText"];
-        [specs addObject:help];
-
-        [specs addObject:[PSSpecifier groupSpecifierWithName:@"关于"]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"版本"
-            target:self set:nil get:nil detail:nil cell:PSGroupCell edit:nil];
-        NSString *verStr = [NSBundle bundleForClass:self.class].infoDictionary[@"CFBundleShortVersionString"] ?: @"1.0.1";
-        [ver setProperty:[NSString stringWithFormat:@"PageTurner v%@（roothide）", verStr] forKey:@"staticText"];
-        [specs addObject:ver];
 
         _specifiers = [specs copy];
     }
@@ -528,20 +641,25 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [self.nameField addTarget:self action:@selector(nameChanged) forControlEvents:UIControlEventEditingChanged];
         [self.view addSubview:self.nameField];
 
-        self.recStatus = [[UILabel alloc] initWithFrame:CGRectMake(16, top + 42, w - 32, 30)];
-        self.recStatus.font = [UIFont systemFontOfSize:13];
-        self.recStatus.textColor = [UIColor labelColor];
+        // 记录按钮：大按钮样式（蓝底白字），与下方「新增映射」视觉统一、紧凑
+        self.recStatus = [[UILabel alloc] initWithFrame:CGRectMake(16, top + 44, w - 32, 44)];
+        self.recStatus.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        self.recStatus.textColor = [UIColor whiteColor];
+        self.recStatus.backgroundColor = [UIColor systemBlueColor];
+        self.recStatus.textAlignment = NSTextAlignmentCenter;
+        self.recStatus.layer.cornerRadius = 10;
+        self.recStatus.clipsToBounds = YES;
         self.recStatus.userInteractionEnabled = YES;
         [self.recStatus addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(recordTapped)]];
         [self.view addSubview:self.recStatus];
 
-        self.tv = [[UITableView alloc] initWithFrame:CGRectMake(0, top + 78, w, self.view.bounds.size.height - top - 78)
+        self.tv = [[UITableView alloc] initWithFrame:CGRectMake(0, top + 96, w, self.view.bounds.size.height - top - 96)
             style:UITableViewStylePlain];
         self.tv.dataSource = self;
         self.tv.delegate = self;
         [self.view addSubview:self.tv];
 
-        UILabel *hv = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, w - 32, 44)];
+        UILabel *hv = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, w - 32, 34)];
         hv.text = @"映射区：按一次该键 → 从上到下依次执行全部动作";
         hv.font = [UIFont systemFontOfSize:12];
         hv.textColor = [UIColor secondaryLabelColor];
@@ -552,12 +670,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         NSDictionary *ft = plan[@"feature"];
         NSString *d = PTDirName([ft[@"direction"] doubleValue]);
         NSString *ph = [ft[@"phase"] intValue] == 0 ? @"点击" : [NSString stringWithFormat:@"滑动%@", d];
-        self.recStatus.text = [NSString stringWithFormat:@"✅ 已录制完成：%@（来源%@，%d次）—— 点我清空重录",
-            ph, ft[@"sender"], [ft[@"recordCount"] intValue]];
-        self.recStatus.textColor = [UIColor systemGreenColor];
+        self.recStatus.text = [NSString stringWithFormat:@"✅ 已录制：%@（%d次）· 点我清空重录",
+            ph, [ft[@"recordCount"] intValue]];
+        self.recStatus.backgroundColor = [UIColor systemGreenColor];
     } else {
-        self.recStatus.text = @"【新增记录】点我进入录制";
-        self.recStatus.textColor = [UIColor systemBlueColor];
+        self.recStatus.text = @"＋ 新增记录（按翻页器同一键录特征）";
+        self.recStatus.backgroundColor = [UIColor systemBlueColor];
     }
     [self.tv reloadData];
 }
@@ -622,7 +740,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         c.textLabel.text = [NSString stringWithFormat:@"%ld. %@", (long)(ip.row + 1), PTActionText(self.actions[ip.row])];
         c.accessoryType = UITableViewCellAccessoryNone;
     } else {
-        c.textLabel.text = @"新增映射";
+        c.textLabel.text = @"＋ 新增映射";
+        c.textLabel.textColor = [UIColor systemBlueColor];
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     }
     return c;
@@ -736,6 +855,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.view addSubview:self.distLabel];
 
     PTSetLearningLocal(YES);
+    sCollectArmed = YES;
+    sLastSampleAt = PTNowC();
+    SCollectHook();
     self.timer = [NSTimer scheduledTimerWithTimeInterval:0.3 target:self selector:@selector(poll) userInfo:nil repeats:YES];
 }
 
@@ -743,6 +865,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [super viewDidDisappear:animated];
     [self.timer invalidate];
     self.timer = nil;
+    sCollectArmed = NO;
     PTSetLearningLocal(NO);
 }
 
@@ -756,7 +879,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSArray *samples = cfg[@"learningSamples"] ?: @[];
     cfg[@"learningSamples"] = @[];   // 清空已读
     PTWrite(cfg);
-    if (!samples.count) return;
+    if (!samples.count) {
+        // 诊断：一直没收到翻页器事件
+        if (!self.finished && self.mem.count == 0 && PTNowC() - sLastSampleAt > 1.5) {
+            self.status.text = @"⚠️ 未收到翻页器按键事件\n确认翻页器已连接、保持在前台按它";
+            self.status.textColor = [UIColor systemOrangeColor];
+        }
+        return;
+    }
+    sLastSampleAt = PTNowC();
     for (NSDictionary *s in samples) [self judge:s];
 }
 
