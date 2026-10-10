@@ -190,6 +190,7 @@ typedef struct {
 // ============================================================
 // 事件处理（学习收集 / 运行匹配+吞）
 // ============================================================
+static void PTExecutePlan(NSString *name);   // 前向声明（定义在动作执行段）
 // 学习模式（Preferences 进程）：append 样本到 plist，不吞
 static void PTAppendLearnSample(PagerFeature f, uint64_t sender) {
     NSMutableDictionary *cfg = PTReadFileRaw();
