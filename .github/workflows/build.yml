@@ -1,0 +1,56 @@
+name: Build PageTurner
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone Theos (roothide fork)
+        run: git clone --recursive --depth=1 https://github.com/roothide/theos.git "$THEOS"
+
+      - name: Get iOS 16.5 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          sparse-checkout: iPhoneOS16.5.sdk
+          path: theos/sdks
+
+      - name: Install dpkg & ldid
+        run: brew install dpkg ldid
+
+      - name: Build roothide deb
+        run: |
+          make clean
+          make package THEOS_PACKAGE_SCHEME=roothide
+          echo "===== 产物 ====="
+          ls -la packages/
+          DEB=$(ls packages/*.deb | head -1)
+          echo "deb=$DEB"
+          dpkg-deb -f "$DEB" | grep -E '^(Package|Version|Architecture):'
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RAW=$(ls packages/*.deb | head -1)
+          DEB=PageTurner-1.0.0-roothide.deb
+          cp "$RAW" "$DEB"
+          TAG=v1.0.0
+          NOTES=$'PageTurner v1.0.0（roothide 直装）—— 翻页器按键拦截正式版 v1\n\n【本版做什么】\n1. 注入所有 App，运行时检查「总开关 + 指定 App 生效」→ 未勾选完全放行\n2. 拦截翻页器触摸键（上/下/左/右/点击）：UIApplication sendEvent: 层提取触摸特征（方向/位移/相位）\n3. 学习模式：大白屏反复按同一键录特征（下限5次+方向一致+位移收敛+上限15次+录制去重）\n4. 映射：一个按键特征 → 动作序列（点击/双击/滑动/延迟/静音/音量±），一次按键顺序全执行，执行中再按=中断\n5. 三指同时按 0.4 秒 → 调出录制面板（方案列表/方案页/学习页/绿点动作设置）\n6. 防抖间隔设置页可调（默认 300ms）\n7. 设置页：总开关 / 指定 App 生效（枚举+搜索+勾选）/ 防抖间隔 / 版本\n\n【已知限制】\n- 音量键不拦截（保持原生调音量）\n- 翻页器来源判定用 sender=0x1000008ef（v1.0.7 实测），若手指触摸同 sender 需后续版本调\n- 设置页改动 → 目标 App 下次按键自动刷新配置，即时生效\n\n【怎么测】\n1. 装 v1.0.0 → 注销\n2. 设置 App 里勾选生效 App、打开总开关\n3. 打开目标 App → 三指长按 0.4s → 新增方案 → 录特征 → 映射动作 → 按翻页器验证'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DEB" --clobber
+          else
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.0" --notes "$NOTES"
+          fi
