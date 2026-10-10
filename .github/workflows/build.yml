@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.1-roothide.deb
+          DEB=PageTurner-1.0.2-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.1
-          NOTES=$'PageTurner v1.0.1（roothide 直装）—— 架构修正版\n\n【v1.0.1 修正了什么】\n1. 所有 UI 移入系统设置 → PageTurner 设置页：方案列表（左滑删除）/ 新增方案 / 方案页（名称/记录/映射区）/ 学习页（大白屏录特征）/ 绿点动作设置。App 内零 UI，删除三指手势\n2. 来源 sender 录进特征（不写死设备）：学习时把事件来源一并记录，运行按 sender 过滤——学什么拦什么，换翻页器也能学\n3. 学习宿主 = Preferences 进程：进入学习页自动开始收集翻页器按键样本，实时显示 已录次数/方向/位移/稳定状态\n4. 特征判定：下限 5 次 + 方向一致 + 位移收敛，上限 15 次；与已有方案（同 sender+方向+位移）高度相似 → 拒绝并提示可能按错键\n5. 映射：点击/双击/滑动（绿点①起点②终点+速度）/延迟/静音/音量±；一次按键顺序全执行，执行中再按=中断\n6. 音量键不拦（保持原生），动作库静音/音量±保留可映射\n\n【怎么测】\n1. 装 v1.0.1 → 注销\n2. 设置 → PageTurner → 开总开关 → 勾选生效 App\n3. 设置 → PageTurner → 记录与映射 → 新增方案 → 新增记录 → 大白屏反复按翻页器同一键（直到显示已稳定）→ 命名\n4. 方案页 → 新增映射 → 设置动作 → 打开生效 App 按翻页器验证\n\n【已知限制】\n- 学习页需在设置 App 内按翻页器键（前台是设置页时翻页器事件才会被收集）\n- 动作为模拟触摸（PTFakeMetaTouch），个别 App 可能不响应\n- 设置改动即时生效，无需注销（仅安装/升级需要注销一次）'
+          TAG=v1.0.2
+          NOTES=$'PageTurner v1.0.2（roothide 直装）—— 修复设置页条目不显示\n\n【v1.0.2 修复了什么】\n1. 设置里看不到 PageTurner 条目：PreferenceLoader 入口 plist 缺少 detail=RootListController 和 isController=true，PreferenceLoader 不认这是控制器入口 → 已补齐（对照已验证能显示的 HIDEventSniffer 入口格式）\n2. Makefile before-package 手动把入口 plist 装进 staging，双保险\n\n【功能（同 v1.0.1）】\n1. 所有 UI 在系统设置 → PageTurner：方案列表（左滑删除）/ 新增方案 / 方案页（名称/记录/映射区）/ 学习页（大白屏录特征）/ 绿点动作设置。App 内零 UI\n2. sender 录进特征（不写死设备），学习宿主 = Preferences 进程\n3. 特征判定：下限 5 次 + 方向一致 + 位移收敛，上限 15 次；高度相似拒绝\n4. 映射：点击/双击/滑动（绿点①②+速度）/延迟/静音/音量±；一次按键顺序全执行，执行中再按=中断\n\n【怎么测】\n1. 装 v1.0.2 → 注销\n2. 设置往下翻 → 能看到 PageTurner 条目\n3. 开总开关 → 勾选生效 App → 记录与映射 → 新增方案 → 新增记录 → 大白屏反复按翻页器同一键 → 命名 → 新增映射 → 打开生效 App 验证'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.1" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.2" --notes "$NOTES"
           fi
