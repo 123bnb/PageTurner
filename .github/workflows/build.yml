@@ -45,13 +45,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.7-roothide.deb
+          DEB=PageTurner-1.0.8-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.7
-          NOTES=$'PageTurner v1.0.7（roothide 直装）—— 录制回归修复 + 设置图标标准尺寸\n\n【v1.0.7 改了什么】\n1. 【录制回归修复】v1.0.6 加了设备锚定（只录翻页器、不录手指），但进入学习页瞬间手指点按钮的触摸收尾事件会先到达，把锚定锁死成手指 sender，导致翻页器怎么按都没反应。修复：进入学习页延迟 1 秒再开始接收（跳过触摸收尾）；锁定后状态栏显示“已锁定设备 0x…”，按了没反应就返回重进学习页\n2. 【图标】设置图标从 87×87 改为标准 29×29（PreferenceLoader 的 icon 字段按 1x 渲染，87px 会被当成 87pt 显示所以一直偏大）\n3. 学习页状态提示细化：未锁定 / 已锁定但没样本（区分“没收到事件”和“锁错了”）\n\n【怎么测】\n1. 装 v1.0.7 → 注销\n2. 设置 → PageTurner → 确认图标与其他插件一样大\n3. 新建方案 → 新增记录 → 等 1 秒后只按翻页器键（手指勿碰屏幕）→ 应正常录制\n4. 录制正常后 → 开调试模式 → 打开生效 App → 按学过的键 → 看绿色大圆点是否出现'
+          TAG=v1.0.8
+          NOTES=$'PageTurner v1.0.8（roothide 直装）—— 拦截架构回滚到 sendEvent 层，修复方向键完全没拦\n\n【v1.0.8 改了什么（核心）】\n1. 【拦截回滚】v1.0.5 把拦截搬到 _UIUpdateHIDDigitizerInput -addEvent: 读 0x23/0x24 字段，实测是错的：翻页器方向键在 addEvent 层根本不是 type=11，点击键 type=11 但 0x23/0x24 读出全 0 → 方向键完全没拦、位移全废 → 录制失败/运行失败/调试没绿点。回滚到 v1.0.4 验证过的方案：hook UIApplication -sendEvent:，从合成触摸的 _hidEvent 溯源 sender（手指触摸 sender=0 天然排除、翻页器≠0），从 UITouch 屏幕坐标提取位移/方向（和画布实测一致的真实数据）\n2. 【录制】录制端同架构：只录翻页器设备（sender≠0 锚定），手指滑动自动排除，位移/方向用真实合成坐标\n3. 【调试模式】开启后所有点触可视化：注入的模拟点触=绿色大圆点、翻页器合成触摸=绿色大圆点、手指=蓝色小圆点（0.6 秒消失，独立窗口不挡触摸）。按翻页器键立刻看到绿点=映射动作位置\n4. 点击/双击/滑动注入补 senderID（v1.0.6 保留）\n\n【怎么测（重点）】\n1. 装 v1.0.8 → 注销\n2. 设置 → PageTurner → 确认图标大小正常\n3. 新建方案 → 新增记录 → 只按翻页器键（手指勿碰屏幕）→ 应正常录制（计数上涨、显示方向/位移）\n4. 开调试模式 → 打开生效 App → 按学过的键 → 屏幕出现绿色大圆点 = 映射动作位置；同时确认映射动作（点击/滑动）真的生效\n5. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
             gh release delete "$TAG" --yes || true
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.7" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.8" --notes "$NOTES"
           fi
