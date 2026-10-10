@@ -127,19 +127,22 @@ static double PTNowC(void) {
 
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
+typedef double (*IOHIDEventGetFloatValue_t)(void *, uint32_t);
 static IOHIDEventGetType_t sGetType = NULL;
 static IOHIDEventGetSenderID_t sGetSender = NULL;
+static IOHIDEventGetFloatValue_t sGetFloat = NULL;
 static uint64_t sCurSender = 0;
-static double sWindowUntil = 0;
 static BOOL sHooked = NO;
 static BOOL sCollectArmed = NO;      // 学习页打开时置 YES
+// 学习会话（与运行端 Tweak.xm 同口径：addEvent 层读 IOHIDEvent 相对位移 0x23/0x24）
 static BOOL sSessActive = NO;
+static uint64_t sSessSender = 0;
+static double sSessLastAt = 0;
 static double sSessDist = 0, sSessFirstDir = 0;
 static BOOL sSessHasMove = NO;
-static CGPoint sSessLast = {0, 0};
+static BOOL sSessSettled = NO;
 static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊断用）
 static IMP gOrigAddEvent = NULL;
-static IMP gOrigSendEvent = NULL;
 
 static void SAppendSample(int phase, double dir, double dist) {
     NSMutableDictionary *cfg = PTRead();
@@ -154,63 +157,59 @@ static void SAppendSample(int phase, double dir, double dist) {
     sLastSampleAt = PTNowC();
 }
 
+static void SFinishSession(void);   // 前向声明
+
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
     @try {
         if (sGetType && sGetSender && event) {
             uint32_t type = sGetType(event);
-            if (type == 11) {
-                sCurSender = sGetSender(event);
-                if (sCollectArmed) sWindowUntil = PTNowC() + 0.05;
+            if (type == 11 && sCollectArmed) {
+                // 翻页器 digitizer：读相对位移（与运行端同一字段 0x23/0x24），同口径
+                uint64_t sender = sGetSender(event);
+                double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
+                double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
+                double now = PTNowC();
+                if (sSessActive && now - sSessLastAt > 0.15) SFinishSession();
+                if (!sSessActive) {
+                    sSessActive = YES;
+                    sSessSender = sender;
+                    sSessDist = 0; sSessFirstDir = 0;
+                    sSessHasMove = NO; sSessSettled = NO;
+                }
+                sSessLastAt = now;
+                double seg = hypot(dx, dy);
+                if (seg > 0) {
+                    sSessDist += seg;
+                    if (!sSessHasMove && sSessDist > 5) {
+                        sSessHasMove = YES;
+                        sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
+                    }
+                }
+                // 事件流停止 250ms 后结算样本（同运行端）
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    SFinishSession();
+                });
             }
         }
     } @catch (NSException *e) {}
     if (gOrigAddEvent) ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
 }
 
-static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
-    @try {
-        if (sCollectArmed && event && PTNowC() < sWindowUntil) {
-            NSSet *touches = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
-            UITouch *t = [touches anyObject];
-            if (t && sGetSender) {
-                CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
-                switch (t.phase) {
-                    case UITouchPhaseBegan: {
-                        sSessActive = YES; sSessDist = 0; sSessHasMove = NO; sSessFirstDir = 0;
-                        sSessLast = p;
-                        break;
-                    }
-                    case UITouchPhaseMoved: {
-                        if (sSessActive) {
-                            double dx = p.x - sSessLast.x, dy = p.y - sSessLast.y;
-                            double seg = hypot(dx, dy);
-                            if (seg > 0) {
-                                sSessDist += seg;
-                                if (!sSessHasMove && sSessDist > 5) {
-                                    sSessHasMove = YES;
-                                    sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
-                                }
-                            }
-                            sSessLast = p;
-                        }
-                        break;
-                    }
-                    case UITouchPhaseEnded: {
-                        if (sSessActive) {
-                            sSessActive = NO;
-                            int phase = (sSessDist < 30.0) ? 0 : 1;
-                            double dir = sSessHasMove ? sSessFirstDir : 0;
-                            SAppendSample(phase, dir, sSessDist);
-                        }
-                        break;
-                    }
-                    case UITouchPhaseCancelled: sSessActive = NO; break;
-                    default: break;
-                }
-            }
-        }
-    } @catch (NSException *e) {}
-    if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
+// 结算按键会话 → append 样本（与运行端 PTFinishHIDSession 同构，含停止校验）
+static void SFinishSession(void) {
+    if (!sSessActive || sSessSettled) return;
+    if (PTNowC() - sSessLastAt < 0.25) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            SFinishSession();
+        });
+        return;
+    }
+    sSessSettled = YES;
+    int phase = (sSessDist < 30.0) ? 0 : 1;
+    double dir = sSessHasMove ? sSessFirstDir : 0;
+    sCurSender = sSessSender;
+    sSessActive = NO;
+    SAppendSample(phase, dir, sSessDist);
 }
 
 static void SCollectHook(void) {
@@ -220,18 +219,14 @@ static void SCollectHook(void) {
         if (iokit) {
             sGetType = (IOHIDEventGetType_t)dlsym(iokit, "IOHIDEventGetType");
             sGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
+            sGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         Class addCls = NSClassFromString(@"_UIUpdateHIDDigitizerInput");
         SEL addSel = sel_registerName("addEvent:");
         Method am = addCls ? class_getInstanceMethod(addCls, addSel) : NULL;
         if (am) { gOrigAddEvent = method_getImplementation(am); method_setImplementation(am, (IMP)SImpAddEvent); }
 
-        Class appCls = NSClassFromString(@"UIApplication");
-        SEL sendSel = sel_registerName("sendEvent:");
-        Method sm = appCls ? class_getInstanceMethod(appCls, sendSel) : NULL;
-        if (sm) { gOrigSendEvent = method_getImplementation(sm); method_setImplementation(sm, (IMP)SImpSendEvent); }
-
-        sHooked = (gOrigAddEvent != NULL && gOrigSendEvent != NULL && sGetType != NULL && sGetSender != NULL);
+        sHooked = (gOrigAddEvent != NULL && sGetType != NULL && sGetSender != NULL);
     }
 }
 
