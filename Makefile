@@ -34,3 +34,5 @@ include $(THEOS_MAKE_PATH)/aggregate.mk
 # ---------- 注入所有 App（无 Filter 限制，运行时检查 bundleID）----------
 before-package::
 	printf '{}' > "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/PageTurner.plist"
+	mkdir -p "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences"
+	cp -f "layout/Library/PreferenceLoader/Preferences/PageTurner.plist" "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences/"
