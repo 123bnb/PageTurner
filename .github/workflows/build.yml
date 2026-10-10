@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.2-roothide.deb
+          DEB=PageTurner-1.0.3-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.2
-          NOTES=$'PageTurner v1.0.2（roothide 直装）—— 修复设置页条目不显示\n\n【v1.0.2 修复了什么】\n1. 设置里看不到 PageTurner 条目：PreferenceLoader 入口 plist 缺少 detail=RootListController 和 isController=true，PreferenceLoader 不认这是控制器入口 → 已补齐（对照已验证能显示的 HIDEventSniffer 入口格式）\n2. Makefile before-package 手动把入口 plist 装进 staging，双保险\n\n【功能（同 v1.0.1）】\n1. 所有 UI 在系统设置 → PageTurner：方案列表（左滑删除）/ 新增方案 / 方案页（名称/记录/映射区）/ 学习页（大白屏录特征）/ 绿点动作设置。App 内零 UI\n2. sender 录进特征（不写死设备），学习宿主 = Preferences 进程\n3. 特征判定：下限 5 次 + 方向一致 + 位移收敛，上限 15 次；高度相似拒绝\n4. 映射：点击/双击/滑动（绿点①②+速度）/延迟/静音/音量±；一次按键顺序全执行，执行中再按=中断\n\n【怎么测】\n1. 装 v1.0.2 → 注销\n2. 设置往下翻 → 能看到 PageTurner 条目\n3. 开总开关 → 勾选生效 App → 记录与映射 → 新增方案 → 新增记录 → 大白屏反复按翻页器同一键 → 命名 → 新增映射 → 打开生效 App 验证'
+          TAG=v1.0.3
+          NOTES=$'PageTurner v1.0.3（roothide 直装）—— 修复首页空条目 / 方案页布局 / 学习收集失效\n\n【v1.0.3 修复了什么】\n1. 首页删除「使用说明」「关于/版本」两个空组（PSGroupCell 说明文字不渲染，显示为空白行），只留：总开关 / 指定 App 生效 / 防抖间隔 / 记录与映射\n2. 方案页布局重排：新增记录改为大按钮（蓝底白字圆角），新增映射同样蓝色高亮，两个按钮视觉统一、紧邻\n3. 学习页收不到翻页器按键的根因：roothide 空 Filter 不注入系统 App（Preferences 进程），tweak 的学习收集链路从未生效。修复：学习收集搬进设置页 bundle 内自 hook（bundle 必然加载于 Preferences 进程），彻底绕开注入问题\n4. 学习页加诊断：1.5 秒未收到按键事件时橙色提示「未收到翻页器按键事件」\n\n【怎么测】\n1. 装 v1.0.3 → 注销\n2. 设置 → PageTurner：首页只剩 4 项\n3. 记录与映射 → 新增方案 → 点蓝色「＋ 新增记录」按钮 → 大白屏反复按翻页器同一键 → 计数应实时增长 → 稳定后命名\n4. 若学习页显示橙色「未收到翻页器按键事件」→ 把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.2" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.3" --notes "$NOTES"
           fi
