@@ -102,7 +102,7 @@ static void PTLoadConfig(BOOL force) {
 }
 
 // 保存配置（UI 在 App 进程内调用，写后立即刷新）
-static void PTSaveConfig(NSDictionary *cfg) {
+void PTSaveConfig(NSDictionary *cfg) {
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:cfg format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
     if (!data) return;
     NSString *tmp = [kPrefPath stringByAppendingString:@".tmp"];
@@ -285,11 +285,13 @@ static NSString *PTMatchPlan(PagerFeature f) {
         double pd = [ft[@"direction"] doubleValue];
         double d = fabs(fabs(f.direction - pd)); if (d > 180) d = 360 - d;
         if (d > kDirTolerance) continue;
+        double lo = 0, hi = 0;
         if (f.phase == 1) {
-            double lo = [ft[@"distMin"] doubleValue], hi = [ft[@"distMax"] doubleValue];
+            lo = [ft[@"distMin"] doubleValue];
+            hi = [ft[@"distMax"] doubleValue];
             if (f.dist < lo - kDistSlack || f.dist > hi + kDistSlack) continue;
         }
-        double score = d + fabs(f.dist - (lo + hi) / 2.0) / 100.0;
+        double score = d + (f.phase == 1 ? fabs(f.dist - (lo + hi) / 2.0) / 100.0 : 0);
         if (score < bestScore) { bestScore = score; best = name; }
     }
     return best;
