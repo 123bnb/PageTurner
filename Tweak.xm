@@ -1,18 +1,26 @@
 // ============================================================
-// PageTurner v1.0.0 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.1 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
-// 架构：
-//   注入所有 App（roothide 黑名单默认）→ 运行时检查 bundleID + 总开关 → 旁路
-//   事件来源判定：_UIUpdateHIDDigitizerInput -addEvent: 看 sender（翻页器=0x1000008ef，v1.0.7 实测）
-//   特征提取：UIApplication -sendEvent:（UIEvent 层，UITouch 真实坐标）
-//   会话：down→move→up 构建轨迹 → 特征{相位 tap/swipe, 方向角, 位移量}
-//   学习模式：样本收集 → 下限5次 + 方向一致 + 位移收敛 → 上限15次；录制去重
-//   运行模式：方向±15° + 位移区间 → 唯一方案 → 吞事件 → 防抖 → 顺序执行动作
-//   执行中再按 = 中断当前序列（token 递增）
-//   防递归：gIsInjecting 注入标志
-//   三指同时按 0.4s → PTOverlay 调出面板
-//   动作：PTFakeMetaTouch（点击/双击/滑动）+ AVSystemController（静音/音量±）
+// v1.0.1 架构修正（用户定稿）：
+//   - 所有 UI（方案列表/方案页/学习页/动作设置）在【系统设置 → PageTurner 设置页】，
+//     App 内零 UI，删除三指手势
+//   - 来源 sender 录进特征，不写死设备：学什么拦什么
+//   - 学习宿主 = Preferences 进程：学习页打开时 tweak 收集翻页器事件 → plist，
+//     设置页轮询判定
 //
+// 注入范围：所有进程（roothide 黑名单默认）
+//   - Preferences 进程：无条件 hook（学习收集随时可能开）
+//   - 其它 App：运行时检查 masterEnabled + enabledApps[bundleID] 才 hook
+//
+// 事件链路：
+//   _UIUpdateHIDDigitizerInput -addEvent:（IOHIDEvent 层，拿 sender）
+//   → 学过的 sender / 学习模式 → 开窗口
+//   → UIApplication -sendEvent:（UIEvent 层）会话 up 提取特征
+//   → 学习模式（Preferences）：append 样本到 plist learningSamples，不吞
+//   → 运行模式（生效 App）：sender+相位+方向+位移匹配唯一方案 → 吞 → 防抖 → 顺序执行
+//
+// 动作：PTFakeMetaTouch（点击/双击/滑动）+ AVSystemController（静音/音量±）
+// 防递归：gIsInjecting
 // 日志：App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log
 // ============================================================
 
@@ -31,20 +39,16 @@
 #include <sys/time.h>
 #include <unistd.h>
 #import "ptftouch/PTFakeMetaTouch.h"
-#import "OverlayUI.h"
 
 // ============================================================
 // 常量
 // ============================================================
 static NSString *kPrefPath = @"/var/mobile/Library/Preferences/com.yourname.pageturner.plist";
-static uint64_t kPagerSender = 0x1000008efull;   // v1.0.7 实测：翻页器 digitizer sender
+static NSString *kPrefsBundleID = @"com.apple.Preferences";
 static const double kPagerWindowSec = 0.05;      // HID 事件 → UIEvent 分发窗口
 static const double kTapDistThreshold = 30.0;    // 位移 <30pt 判定 tap
 static const double kDirTolerance = 15.0;        // 方向容差 ±15°
 static const double kDistSlack = 30.0;           // 位移区间匹配裕度
-static const int kLearnMin = 5;                  // 下限 5 次
-static const int kLearnMax = 15;                 // 上限 15 次兜底
-static const double kLearnConverge = 60.0;       // 位移收敛阈值（max-min）
 
 // ============================================================
 // 日志
@@ -73,15 +77,36 @@ static double PTNow(void) {
 }
 
 // ============================================================
-// 配置（plist：masterEnabled / enabledApps[] / debounceMs / plans[]）
+// 配置（plist：masterEnabled / enabledApps[] / debounceMs / plans[] / learning / learningSamples）
 // ============================================================
 static NSString *gBundleID = nil;
+static BOOL gIsPreferences = NO;
 static NSDictionary *gConfig = nil;
 static double gConfigMtime = 0;
 static BOOL gMasterEnabled = NO;
 static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
-static NSMutableDictionary *gPlans = nil;   // name -> dict（缓存，配置变化重读）
+static NSMutableDictionary *gPlans = nil;   // name -> dict
+static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
+
+static uint64_t gLearnedSenders[32];        // 已学 sender 集合（运行时识别）
+static int gLearnedSenderCount = 0;
+
+// 原始读文件（不碰 mtime 缓存）
+static NSMutableDictionary *PTReadFileRaw(void) {
+    NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefPath];
+    return d ? d : [NSMutableDictionary dictionary];
+}
+
+// 原子写（tmp + rename）
+static void PTWriteFileRaw(NSDictionary *cfg) {
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:cfg format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+    if (!data) return;
+    NSString *tmp = [kPrefPath stringByAppendingString:@".tmp"];
+    [data writeToFile:tmp atomically:YES];
+    [[NSFileManager defaultManager] removeItemAtPath:kPrefPath error:nil];
+    [[NSFileManager defaultManager] moveItemAtPath:tmp toPath:kPrefPath error:nil];
+}
 
 static void PTLoadConfig(BOOL force) {
     NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:kPrefPath error:nil];
@@ -96,36 +121,52 @@ static void PTLoadConfig(BOOL force) {
     double db = [gConfig[@"debounceMs"] doubleValue];
     gDebounceMs = (db > 0) ? db : 300;
     gPlans = [NSMutableDictionary dictionary];
+    gLearnedSenderCount = 0;
     for (NSDictionary *p in gConfig[@"plans"] ?: @[]) {
-        if (p[@"name"]) gPlans[p[@"name"]] = p;
+        if (!p[@"name"]) continue;
+        gPlans[p[@"name"]] = p;
+        NSDictionary *ft = p[@"feature"];
+        if (ft[@"sender"]) {
+            unsigned long long s = 0;
+            NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
+            if ([sc scanHexLongLong:&s] && gLearnedSenderCount < 32) {
+                gLearnedSenders[gLearnedSenderCount++] = s;
+            }
+        }
     }
+    gLearnActive = [gConfig[@"learning"][@"active"] boolValue];
 }
 
-// 保存配置（UI 在 App 进程内调用，写后立即刷新）
-void PTSaveConfig(NSDictionary *cfg) {
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:cfg format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
-    if (!data) return;
-    NSString *tmp = [kPrefPath stringByAppendingString:@".tmp"];
-    [data writeToFile:tmp atomically:YES];
-    [[NSFileManager defaultManager] removeItemAtPath:kPrefPath error:nil];
-    [[NSFileManager defaultManager] moveItemAtPath:tmp toPath:kPrefPath error:nil];
-    PTLoadConfig(YES);
-    [PTOverlay refreshPlans];
-}
-
-// 当前配置整体读回（供 UI 编辑）
+// 供设置页读取当前配置快照（Preferences 进程内）
 NSDictionary *PTGetConfig(void) { PTLoadConfig(NO); return gConfig; }
 
+// 供设置页写回完整配置
+void PTSaveConfig(NSDictionary *cfg) { PTWriteFileRaw(cfg); }
+
+// 学习模式开关（设置页学习页进入/退出时写 learning.active）
+void PTSetLearning(BOOL on) {
+    NSMutableDictionary *cfg = PTReadFileRaw();
+    cfg[@"learning"] = @{ @"active": @(on) };
+    if (on) cfg[@"learningSamples"] = @[];
+    PTWriteFileRaw(cfg);
+    PTLoadConfig(YES);
+}
+
 // ============================================================
-// IOKit（sender 判定）
+// IOKit（sender 读取）
 // ============================================================
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
 static IOHIDEventGetType_t pGetType = NULL;
 static IOHIDEventGetSenderID_t pGetSender = NULL;
 
-// 翻页器活跃窗口：最近一个翻页器 HID 事件后的这段时间内，UIEvent 视为翻页器
-static double gPagerWindowUntil = 0;
+static uint64_t gCurSender = 0;              // 最近 digitizer 事件 sender
+static double gPagerWindowUntil = 0;         // 翻页器活跃窗口
+
+static BOOL PTIsLearnedSender(uint64_t s) {
+    for (int i = 0; i < gLearnedSenderCount; i++) if (gLearnedSenders[i] == s) return YES;
+    return NO;
+}
 
 // ============================================================
 // 触摸会话 + 特征
@@ -135,152 +176,48 @@ typedef struct {
     int nEvents;
     CGPoint start, last;
     double totalDist;
-    double firstMoveDir;     // 第一个 move 的方向角（度）
+    double firstMoveDir;
     BOOL hasMove;
 } PagerSession;
 static PagerSession gSession;
 
 typedef struct {
     int phase;        // 0=tap 1=swipe
-    double direction; // 度（swipe 才有意义）
-    double dist;      // pt
+    double direction;
+    double dist;
 } PagerFeature;
 
 // ============================================================
-// 学习状态
+// 事件处理（学习收集 / 运行匹配+吞）
 // ============================================================
-static BOOL gLearning = NO;
-static NSMutableArray *gLearnSamples = nil;   // 每项 @[@(phase), @(dir), @(dist)]
-static BOOL gLearnRejected = NO;
-
-static void PTLearnReset(void) {
-    gLearnSamples = [NSMutableArray array];
-    gLearnRejected = NO;
+// 学习模式（Preferences 进程）：append 样本到 plist，不吞
+static void PTAppendLearnSample(PagerFeature f, uint64_t sender) {
+    NSMutableDictionary *cfg = PTReadFileRaw();
+    if (![cfg[@"learning"][@"active"] boolValue]) return;
+    NSMutableArray *samples = [NSMutableArray arrayWithArray:cfg[@"learningSamples"] ?: @[]];
+    [samples addObject:@{
+        @"sender": [NSString stringWithFormat:@"0x%llx", sender],
+        @"phase": @(f.phase),
+        @"direction": @(f.direction),
+        @"dist": @(f.dist),
+    }];
+    cfg[@"learningSamples"] = samples;
+    PTWriteFileRaw(cfg);
+    PTLog(@"[学习] 样本 sender=0x%llx phase=%d dir=%.1f dist=%.1f", sender, f.phase, f.direction, f.dist);
 }
 
-// 学习模式开关（由 Overlay UI 调）
-void PTSetLearning(BOOL on) {
-    gLearning = on;
-    if (on) PTLearnReset();
-}
-
-// 录制去重：新样本与已有方案比对 → 高度相似返回已有方案名
-static NSString *PTDuplicatePlan(int phase, double dir, double dist) {
-    for (NSString *name in gPlans) {
-        NSDictionary *ft = gPlans[name][@"feature"];
-        if (!ft) continue;
-        if ([ft[@"phase"] intValue] != phase) continue;
-        double pd = [ft[@"direction"] doubleValue];
-        double d = fabs(fabs(dir - pd)); if (d > 180) d = 360 - d;
-        if (d > kDirTolerance) continue;
-        double lo = [ft[@"distMin"] doubleValue], hi = [ft[@"distMax"] doubleValue];
-        if (phase == 1 && (dist < lo - kDistSlack || dist > hi + kDistSlack)) continue;
-        return name;   // 方向一致 + 位移接近 → 重复
-    }
-    return nil;
-}
-
-// 稳定判定：最近连续 kLearnMin 个样本方向一致 + 位移收敛
-static BOOL PTLearnStable(void) {
-    if ((int)gLearnSamples.count < kLearnMin) return NO;
-    NSInteger n = gLearnSamples.count;
-    double dir = [gLearnSamples[n-1][1] doubleValue];
-    for (NSInteger i = n - kLearnMin; i < n; i++) {
-        double d = [gLearnSamples[i][1] doubleValue];
-        double diff = fabs(fabs(dir - d)); if (diff > 180) diff = 360 - diff;
-        if (diff > kDirTolerance) return NO;
-    }
-    if ([gLearnSamples[n-1][0] intValue] == 1) {   // swipe 才比位移收敛
-        double lo = DBL_MAX, hi = 0;
-        for (NSInteger i = n - kLearnMin; i < n; i++) {
-            double v = [gLearnSamples[i][2] doubleValue];
-            if (v < lo) lo = v;
-            if (v > hi) hi = v;
-        }
-        if (hi - lo > kLearnConverge) return NO;
-    }
-    return YES;
-}
-
-// 学习样本入库（引擎每次 up 调用）
-static void PTLearnSample(PagerFeature f) {
-    if (!gLearning) return;
-    // 去重（新方案且首个样本即可判定方向）
-    if (!gLearnRejected) {
-        NSString *dup = PTDuplicatePlan(f.phase, f.direction, f.dist);
-        if (dup) {
-            gLearnRejected = YES;
-            PTLog(@"[学习] 拒绝：与已有方案 %@ 高度相似（方向/位移接近），可能按错了键", dup);
-            [PTOverlay learnFeedback:(int)gLearnSamples.count dir:f.direction stable:NO rejected:dup];
-            return;
-        }
-    }
-    [gLearnSamples addObject:@[@(f.phase), @(f.direction), @(f.dist)]];
-    int count = (int)gLearnSamples.count;
-    BOOL stable = PTLearnStable();
-    PTLog(@"[学习] 样本#%d phase=%d dir=%.1f dist=%.1f stable=%d", count, f.phase, f.direction, f.dist, stable);
-    if (count >= kLearnMax) {
-        [PTOverlay learnFeedback:count dir:f.direction stable:NO rejected:nil];
-        [PTOverlay learnTooMany];   // 上限：提示重录
-        return;
-    }
-    if (stable) {
-        [PTOverlay learnFeedback:count dir:f.direction stable:YES rejected:nil];
-        [PTOverlay learnStable];    // 触发命名/保存流程
-    } else {
-        [PTOverlay learnFeedback:count dir:f.direction stable:NO rejected:nil];
-    }
-}
-
-// 学习完成：生成特征区间（由 UI 在命名后调用；同名则更新 feature 保留 actions）
-void PTFinishLearning(NSString *planName) {
-    if (!gLearnSamples.count) return;
-    NSInteger n = gLearnSamples.count;
-    double dir = [gLearnSamples[n-1][1] doubleValue];
-    int phase = [gLearnSamples[n-1][0] intValue];
-    double lo = DBL_MAX, hi = 0;
-    for (NSArray *s in gLearnSamples) {
-        double v = [s[2] doubleValue];
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
-    }
-    NSMutableDictionary *ft = [NSMutableDictionary dictionary];
-    ft[@"phase"] = @(phase);
-    ft[@"direction"] = @(dir);
-    ft[@"distMin"] = @(lo);
-    ft[@"distMax"] = @(hi);
-    ft[@"recordCount"] = @(n);
-    // 写入配置（同名更新 / 否则新增）
-    NSMutableDictionary *cfg = [NSMutableDictionary dictionaryWithDictionary:PTGetConfig()];
-    NSMutableArray *plans = [NSMutableArray array];
-    BOOL updated = NO;
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:planName]) {
-            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
-            np[@"feature"] = ft;
-            [plans addObject:np];
-            updated = YES;
-        } else [plans addObject:p];
-    }
-    if (!updated) [plans addObject:@{@"name": planName, @"feature": ft, @"actions": @[]}];
-    cfg[@"plans"] = plans;
-    PTSaveConfig(cfg);
-    PTLog(@"[学习] 方案 %@ 已保存 feature=%@", planName, ft);
-    gLearning = NO;
-}
-
-// 清空重录（UI 调用）
-void PTClearLearning(void) { PTLearnReset(); }
-
-// ============================================================
-// 匹配
-// ============================================================
-static NSString *PTMatchPlan(PagerFeature f) {
+// 运行模式：匹配（sender + 相位 + 方向±15° + 位移区间）→ 唯一方案
+static NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
     NSString *best = nil;
     double bestScore = DBL_MAX;
     for (NSString *name in gPlans) {
         NSDictionary *ft = gPlans[name][@"feature"];
         if (!ft) continue;
+        if (ft[@"sender"]) {
+            unsigned long long s = 0;
+            NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
+            if (![sc scanHexLongLong:&s] || s != sender) continue;   // sender 必须一致
+        }
         if ([ft[@"phase"] intValue] != f.phase) continue;
         double pd = [ft[@"direction"] doubleValue];
         double d = fabs(fabs(f.direction - pd)); if (d > 180) d = 360 - d;
@@ -295,6 +232,65 @@ static NSString *PTMatchPlan(PagerFeature f) {
         if (score < bestScore) { bestScore = score; best = name; }
     }
     return best;
+}
+
+// 返回 YES = 吞（运行模式命中/未命中翻页器均吞）
+static BOOL PTHandlePagerEvent(UIEvent *event) {
+    if (![event respondsToSelector:@selector(allTouches)]) return NO;
+    NSSet *touches = event.allTouches;
+    if (!touches.count) return NO;
+    UITouch *t = [touches anyObject];
+    CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+    switch (t.phase) {
+        case UITouchPhaseBegan: {
+            gSession.active = YES;
+            gSession.nEvents = 0;
+            gSession.start = p;
+            gSession.last = p;
+            gSession.totalDist = 0;
+            gSession.hasMove = NO;
+            gSession.firstMoveDir = 0;
+            return gIsPreferences ? NO : YES;   // 学习宿主不吞（防锁死设置页）
+        }
+        case UITouchPhaseMoved: {
+            if (!gSession.active) return gIsPreferences ? NO : YES;
+            gSession.nEvents++;
+            double dx = p.x - gSession.last.x, dy = p.y - gSession.last.y;
+            double seg = hypot(dx, dy);
+            if (seg > 0) {
+                gSession.totalDist += seg;
+                if (!gSession.hasMove && gSession.totalDist > 5) {
+                    gSession.hasMove = YES;
+                    gSession.firstMoveDir = atan2(dy, dx) * 180.0 / M_PI;
+                }
+            }
+            gSession.last = p;
+            return gIsPreferences ? NO : YES;
+        }
+        case UITouchPhaseEnded: {
+            if (!gSession.active) return gIsPreferences ? NO : YES;
+            gSession.active = NO;
+            PagerFeature f;
+            f.phase = (gSession.totalDist < kTapDistThreshold) ? 0 : 1;
+            f.direction = gSession.hasMove ? gSession.firstMoveDir : 0;
+            f.dist = gSession.totalDist;
+            if (gIsPreferences && gLearnActive) {
+                PTAppendLearnSample(f, gCurSender);
+                return NO;
+            }
+            NSString *plan = PTMatchPlan(f, gCurSender);
+            if (plan) {
+                PTExecutePlan(plan);
+                return YES;
+            }
+            return YES;   // 翻页器事件一律吞（未匹配也不让 App 看到）
+        }
+        case UITouchPhaseCancelled:
+            gSession.active = NO;
+            return gIsPreferences ? NO : YES;
+        default:
+            return gIsPreferences ? NO : YES;
+    }
 }
 
 // ============================================================
@@ -316,7 +312,6 @@ static float PTGetVolume(void) {
 static void PTSetVolume(float v) {
     @try {
         id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
-        // iOS16 双路径：先 forCategory 再单参数
         [c performSelector:NSSelectorFromString(@"setVolumeTo:forCategory:") withObject:@(v) withObject:@"AVAudioSessionCategoryAmbient"];
         [c performSelector:NSSelectorFromString(@"setVolumeTo:") withObject:@(v)];
     } @catch (NSException *e) {}
@@ -339,7 +334,7 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int to
     __block int i = 1;
     __block void (^step)(void);
     step = ^(void) {
-        if (token != gExecToken) { if (done) done(); return; }   // 被中断
+        if (token != gExecToken) { if (done) done(); return; }
         if (i > steps) {
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
             if (done) done();
@@ -402,7 +397,7 @@ static void PTExecutePlan(NSString *name) {
     NSDictionary *p = gPlans[name];
     NSArray *actions = p[@"actions"] ?: @[];
     if (!actions.count) { PTLog(@"[执行] %@ 无动作，跳过", name); return; }
-    gExecToken++;                 // 中断旧的
+    gExecToken++;
     int token = gExecToken;
     gIsInjecting = YES;
     PTLog(@"[执行] 命中 %@，开始动作序列（%lu 条）", name, (unsigned long)actions.count);
@@ -418,107 +413,21 @@ static void PTExecutePlan(NSString *name) {
 }
 
 // ============================================================
-// 翻页器事件处理（学习/匹配/吞）
-// ============================================================
-// 返回 YES = 吞掉（不调用原 sendEvent:）
-static BOOL PTHandlePagerEvent(UIEvent *event) {
-    if (![event respondsToSelector:@selector(allTouches)]) return NO;
-    NSSet *touches = event.allTouches;
-    if (!touches.count) return NO;
-    UITouch *t = [touches anyObject];
-    CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
-    switch (t.phase) {
-        case UITouchPhaseBegan: {
-            gSession.active = YES;
-            gSession.nEvents = 0;
-            gSession.start = p;
-            gSession.last = p;
-            gSession.totalDist = 0;
-            gSession.hasMove = NO;
-            gSession.firstMoveDir = 0;
-            return YES;   // 吞 down
-        }
-        case UITouchPhaseMoved: {
-            if (!gSession.active) return YES;
-            gSession.nEvents++;
-            double dx = p.x - gSession.last.x, dy = p.y - gSession.last.y;
-            double seg = hypot(dx, dy);
-            if (seg > 0) {
-                gSession.totalDist += seg;
-                if (!gSession.hasMove && gSession.totalDist > 5) {
-                    gSession.hasMove = YES;
-                    gSession.firstMoveDir = atan2(dy, dx) * 180.0 / M_PI;
-                }
-            }
-            gSession.last = p;
-            return YES;   // 吞 move
-        }
-        case UITouchPhaseEnded: {
-            if (!gSession.active) return YES;
-            gSession.active = NO;
-            PagerFeature f;
-            f.phase = (gSession.totalDist < kTapDistThreshold) ? 0 : 1;
-            f.direction = gSession.hasMove ? gSession.firstMoveDir : 0;
-            f.dist = gSession.totalDist;
-            if (gLearning) {
-                PTLearnSample(f);
-                return YES;   // 学习也吞（防误触 App 功能）
-            }
-            NSString *plan = PTMatchPlan(f);
-            if (plan) {
-                PTExecutePlan(plan);
-                return YES;   // 吞
-            }
-            return YES;   // 翻页器事件一律吞（未匹配也不让 App 看到）
-        }
-        case UITouchPhaseCancelled:
-            gSession.active = NO;
-            return YES;
-        default:
-            return YES;
-    }
-}
-
-// ============================================================
-// 三指手势（手指触摸，非翻页器）
-// ============================================================
-static int gFingerCount = 0;
-static double gThreeFingerSince = 0;
-
-static void PTDetectThreeFinger(UIEvent *event) {
-    if ([PTOverlay isVisible]) return;   // 面板已开不重复触发
-    if (![event respondsToSelector:@selector(allTouches)]) return;
-    for (UITouch *t in event.allTouches) {
-        switch (t.phase) {
-            case UITouchPhaseBegan:
-                gFingerCount++;
-                if (gFingerCount >= 3 && gThreeFingerSince == 0) gThreeFingerSince = PTNow();
-                break;
-            case UITouchPhaseEnded:
-            case UITouchPhaseCancelled:
-                gFingerCount--;
-                if (gFingerCount < 3) gThreeFingerSince = 0;
-                break;
-            default: break;
-        }
-    }
-    if (gFingerCount >= 3 && gThreeFingerSince > 0 && PTNow() - gThreeFingerSince > 0.4) {
-        gThreeFingerSince = 0;
-        PTLog(@"[手势] 三指 0.4s → 调出面板");
-        [PTOverlay show];
-    }
-}
-
-// ============================================================
 // hook
 // ============================================================
 static IMP gOrigAddEvent = NULL;
 static void PTImpAddEvent(id self, SEL _cmd, void *event) {
+    PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
     if (event && pGetSender && pGetType) {
         uint32_t type = pGetType(event);
         uint64_t sender = pGetSender(event);
-        if (type == 11 && sender == kPagerSender) {
-            gPagerWindowUntil = PTNow() + kPagerWindowSec;
+        if (type == 11) {
+            gCurSender = sender;
+            if (gIsPreferences && gLearnActive) {
+                gPagerWindowUntil = PTNow() + kPagerWindowSec;   // 学习：全部 digitizer
+            } else if (PTIsLearnedSender(sender)) {
+                gPagerWindowUntil = PTNow() + kPagerWindowSec;   // 运行：学过的 sender
+            }
         }
     }
     ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
@@ -526,14 +435,13 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
 
 static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
-    if (gIsInjecting) {   // 注入的触摸放行（防递归）
+    PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
+    if (gIsInjecting) {
         ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
         return;
     }
     if (event && PTNow() < gPagerWindowUntil) {
-        if (PTHandlePagerEvent(event)) return;   // 吞
-    } else {
-        PTDetectThreeFinger(event);   // 手指：三指手势
+        if (PTHandlePagerEvent(event)) return;
     }
     ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
@@ -556,9 +464,8 @@ static void PTInit() {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (!bundleID.length) return;
         gBundleID = bundleID;
+        gIsPreferences = [bundleID isEqualToString:kPrefsBundleID];
         PTLoadConfig(YES);
-        // 未勾选或总开关关 → 旁路（零开销）
-        if (!gMasterEnabled || ![gEnabledApps containsObject:bundleID]) return;
 
         NSString *home = NSHomeDirectory();
         NSString *logPath = [[home stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"PageTurner.log"];
@@ -570,13 +477,23 @@ static void PTInit() {
             pGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.0 已注入 %@ (pid=%d)", bundleID, getpid());
-        PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu",
-              gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs, (unsigned long)gPlans.count);
-        PTHook(@"_UIUpdateHIDDigitizerInput", @"addEvent:", (IMP)PTImpAddEvent, &gOrigAddEvent);
-        PTHook(@"UIApplication", @"sendEvent:", (IMP)PTImpSendEvent, &gOrigSendEvent);
-        // 面板窗口在首次三指调用 [PTOverlay show] 时懒创建（constructor 阶段 UIApplication 未就绪）
-        PTLog(@"初始化完成。三指长按0.4s调出面板");
+        PTLog(@"PageTurner v1.0.1 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
+              gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
+              (unsigned long)gPlans.count, gLearnedSenderCount);
+        if (gIsPreferences) {
+            // Preferences 进程：无条件 hook（学习收集随时可能开）
+            PTHook(@"_UIUpdateHIDDigitizerInput", @"addEvent:", (IMP)PTImpAddEvent, &gOrigAddEvent);
+            PTHook(@"UIApplication", @"sendEvent:", (IMP)PTImpSendEvent, &gOrigSendEvent);
+            PTLog(@"Preferences 进程就绪：学习页开启时自动收集翻页器样本");
+        } else if (gMasterEnabled && [gEnabledApps containsObject:bundleID]) {
+            // 生效 App：hook 拦截
+            PTHook(@"_UIUpdateHIDDigitizerInput", @"addEvent:", (IMP)PTImpAddEvent, &gOrigAddEvent);
+            PTHook(@"UIApplication", @"sendEvent:", (IMP)PTImpSendEvent, &gOrigSendEvent);
+            PTLog(@"生效 App 就绪：学过的 sender 按键将被拦截");
+        } else {
+            PTLog(@"旁路：未生效 App（bundleID 不在列表或总开关关）");
+        }
         PTLog(@"==================================================");
     }
 }
