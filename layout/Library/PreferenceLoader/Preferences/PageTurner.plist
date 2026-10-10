@@ -8,6 +8,10 @@
 		<string>PageTurner</string>
 		<key>cell</key>
 		<string>PSLinkCell</string>
+		<key>detail</key>
+		<string>RootListController</string>
+		<key>isController</key>
+		<true/>
 		<key>label</key>
 		<string>PageTurner</string>
 	</dict>
