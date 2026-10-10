@@ -3,3 +3,7 @@
 #ifndef DLog
 #define DLog(...) NSLog(__VA_ARGS__)
 #endif
+
+// 注入用 senderID（由 Tweak.xm 在进程内捕获真实触摸 sender 后写入；
+// 模拟触摸的 IOHIDEvent 必须带目标 App 进程内有效的 senderID，否则被系统丢弃）
+extern uint64_t gInjectSender;
