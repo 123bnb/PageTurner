@@ -22,6 +22,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <Preferences/PSViewController.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 #import <dlfcn.h>
 #import <sys/time.h>
 #include <math.h>
