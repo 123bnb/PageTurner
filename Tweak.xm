@@ -1,12 +1,19 @@
 // ============================================================
-// PageTurner v1.0.5 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.6 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
-// v1.0.5 关键修复（用户反馈"指定 App 生效没用"根因）：
-//   - 运行模式特征提取从 UIApplication -sendEvent:（依赖 UIKit 把鼠标移动合成
-//     触摸事件，普通 App 不合成 → 收不到）搬到 _UIUpdateHIDDigitizerInput
-//     -addEvent:（IOHIDEvent 层直接读相对位移 0x23/0x24），
-//     已学 sender 的事件直接吞掉并执行映射 —— 所有 App 都能拦
-//   - 新增调试模式（设置页开关）：拦截/特征/匹配/执行逐步日志
+// v1.0.6（模拟触摸注入修复 + 调试模式重做 + 录制锚定）：
+//   - 【核心】模拟点击/双击/滑动不生效根因：注入 IOHIDEvent 没带 senderID，
+//     iOS16 丢弃无 sender 的注入触摸。修复：进程内捕获最近真实手指触摸
+//     senderID（gInjectSender），注入时 IOHIDEventSetSenderID 写入
+//   - 【调试模式重做】触摸可视化（VolumeKeyTapper 式）：注入点触=绿大圆点，
+//     真实触摸=蓝小圆点，独立 UIWindow(level 10000) 不挡触摸，0.6s 消失
+//   - keyWindow 兜底 windows.lastObject
+//
+// v1.0.5（拦截链路 HID 化）：
+//   - 运行模式特征提取搬到 _UIUpdateHIDDigitizerInput -addEvent:
+//     （IOHIDEvent 层直接读相对位移 0x23/0x24），已学 sender 直接吞并执行映射
+//   - 录制端同步搬到 addEvent 层（两端同源同口径）+ 结算竞态修复
+//   - 新增调试日志页（保留）
 //
 // v1.0.1 架构修正（用户定稿）：
 //   - 所有 UI（方案列表/方案页/学习页/动作设置）在【系统设置 → PageTurner 设置页】，
@@ -16,12 +23,8 @@
 //     不注入系统 App，tweak 不参与学习收集）
 //
 // 注入范围：仅生效 App（masterEnabled + enabledApps[bundleID]）
-//   - 学习收集：设置页 bundle 自 hook（Preferences 进程）
-//   - 运行拦截：addEvent 层吞已学 sender 事件 → 提取特征 → 匹配 → 执行映射
-//
 // 动作：PTFakeMetaTouch（点击/双击/滑动）+ AVSystemController（静音/音量±）
-// 防递归：gIsInjecting
-// 日志：App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log
+// 防递归：gIsInjecting；日志：App 容器 Documents/PageTurner.log
 // ============================================================
 
 #import <UIKit/UIKit.h>
@@ -167,6 +170,11 @@ static BOOL PTIsLearnedSender(uint64_t s) {
     return NO;
 }
 
+// 进程内最近一次真实手指触摸的 senderID（模拟触摸注入必须用它，否则被系统丢弃）
+uint64_t gInjectSender = 0;
+// 空闲 digitizer sender（无触摸心跳，不算真实触摸）
+#define kIdleDigitizerSender 0x8000000800a15173ull
+
 // ============================================================
 // 按键会话（addEvent 层，IOHIDEvent 相对位移）
 // ============================================================
@@ -308,9 +316,10 @@ static void PTSetVolume(float v) {
     } @catch (NSException *e) {}
 }
 
-// 点击（同步短阻塞，DVT 验证过的方案）
+// 点击（同步短阻塞；keyWindow 兜底 windows.lastObject）
 static void PTFakeTap(CGPoint p) {
     UIWindow *w = [UIApplication sharedApplication].keyWindow;
+    if (!w) w = [[UIApplication sharedApplication].windows lastObject];
     if (!w) return;
     NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
     usleep(30000);
@@ -412,6 +421,31 @@ static void PTExecutePlan(NSString *name) {
 // ============================================================
 // hook
 // ============================================================
+// 调试模式触摸特效（VolumeKeyTapper 式）：点触处闪圆点，独立窗口不挡触摸
+static UIWindow *gFxWindow = nil;
+static void PTShowFx(CGPoint p, BOOL injected) {
+    if (!gFxWindow) {
+        gFxWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        gFxWindow.windowLevel = 10000;
+        gFxWindow.userInteractionEnabled = NO;
+        gFxWindow.backgroundColor = [UIColor clearColor];
+        gFxWindow.hidden = NO;
+    }
+    CGFloat d = injected ? 36 : 16;
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, d, d)];
+    dot.center = p;
+    dot.layer.cornerRadius = d / 2;
+    dot.backgroundColor = injected
+        ? [UIColor colorWithRed:0.15 green:0.85 blue:0.25 alpha:0.9]
+        : [UIColor colorWithRed:0.25 green:0.55 blue:0.95 alpha:0.6];
+    dot.layer.borderWidth = injected ? 2 : 1;
+    dot.layer.borderColor = [UIColor whiteColor].CGColor;
+    [gFxWindow addSubview:dot];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [dot removeFromSuperview];
+    });
+}
+
 static IMP gOrigAddEvent = NULL;
 static void PTImpAddEvent(id self, SEL _cmd, void *event) {
     PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
@@ -427,6 +461,9 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
                 PTPagerAddDelta(dx, dy);
                 return;   // 吞：不调用原实现 → 事件不进入 App（无鼠标行为、无触摸）
             }
+            // 真实手指触摸：记录 senderID 供模拟触摸注入使用（VolumeKeyTapper 实测：
+            // 模拟触摸必须带进程内有效 sender，否则 iOS16 丢弃）
+            if (sender != 0 && sender != kIdleDigitizerSender) gInjectSender = sender;
         }
     }
     ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
@@ -434,20 +471,19 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
 
 static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
+    if (gDebugMode && event) {
+        // 触摸可视化（VolumeKeyTapper 式调试）：注入点触=绿大圆点，真实触摸=蓝小点
+        NSSet *ts = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
+        for (UITouch *t in ts) {
+            if (!t.window) continue;
+            CGPoint p = [t locationInView:t.window];
+            PTShowFx(p, gIsInjecting);
+        }
+    }
     if (gIsInjecting) {
         // PTFakeMetaTouch 注入的触摸事件：放行给 App 处理
         ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
         return;
-    }
-    if (gDebugMode && event) {
-        // 低频摘要：确认 App 侧收到的触摸事件（区分链路）
-        static double sLastDump = 0;
-        double now = PTNow();
-        if (now - sLastDump > 1.0) {
-            sLastDump = now;
-            NSSet *ts = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
-            PTLog(@"[调试] sendEvent 收到 UIEvent touches=%lu", (unsigned long)(ts ? ts.count : 0));
-        }
     }
     ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
