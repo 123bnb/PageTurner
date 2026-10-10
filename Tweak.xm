@@ -176,6 +176,10 @@ typedef struct {
     double dist;
 } PagerFeature;
 
+static void PTExecutePlan(NSString *name);                    // 前向声明（动作执行段定义）
+static NSString *PTMatchPlan(PagerFeature f, uint64_t sender); // 前向声明（事件处理段定义）
+static void PTFinishHIDSession(void);                         // 前向声明
+
 typedef struct {
     BOOL active;
     uint64_t sender;
@@ -186,8 +190,6 @@ typedef struct {
     BOOL settled;   // 已结算防重复
 } PagerHIDSession;
 static PagerHIDSession gHID;
-
-static void PTFinishHIDSession(void);   // 前向声明
 
 // 已学 sender 的 digitizer 事件：提取相对位移并累计
 static void PTPagerAddDelta(double dx, double dy) {
