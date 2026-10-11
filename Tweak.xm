@@ -1,23 +1,30 @@
 // ============================================================
-// PageTurner v1.0.21 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.23 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
-// v1.0.21（本版核心修复，对照 volumekeytapper 私有仓库）：
-//   根因一：dylib 纯手写 method_setImplementation，无 %hook / _MSHookMessageEx
-//   符号 → ellekit/roothide 拒载第三方 App，目标 App 根本没被注入
-//   （volumekeytapper 专门留空壳 %hook 生成符号）→ PTHook 改 MSHookMessageEx。
-//   根因二：固定路径 /var/mobile/Library/Preferences 在 roothide 下第三方
-//   App 沙盒读不到 Preferences 进程写的全局配置 → enabledApps 判断失败
-//   → PTGlobalPlistPath() 多路径 + jbroot 提取（照抄 volumekeytapper）。
-//   根因三：注入后无痕，用户无法取证 → 注入标记文件 + 增强启动日志。
-//
+// v1.0.23（本版核心修复，三路实证锁定终极根因）：
+//   根因一【终极】：Filter 空 {} → ellekit 不注入任何进程。
+//     TrollCM deb 拆包：Filter={ Bundles=[com.apple.springboard] } → 注入 SB 成功；
+//     volumekeytapper Makefile：Filter={ Bundles=[com.apple.UIKit] } + dynamic_lookup
+//     → 注入所有 UIKit App 成功（用户实证点击成功）；
+//     PageTurner before-package 一直写 printf '{}' → ellekit 跳过 → 番茄小说
+//     从未被注入 → 16 个版本全部无效。→ Filter 改为 Bundles=(com.apple.UIKit)。
+//   根因二【链接】：v1.0.22 删 dynamic_lookup 后链接失败
+//     "found '_MSHookMessageEx' in CydiaSubstrate.tbd, declaration possibly
+//     missing 'extern \"C\"'" → extern 缺 extern "C" 被 C++ 修饰。
+//     → extern "C" 声明 + 恢复 dynamic_lookup（volumekeytapper 同款，它带这个
+//     且注入成功，证明 dynamic_lookup 本就不是问题）。
+//   根因三【调试可视化】：按用户要求抄 TrollCM 触摸轨迹——本版加入
+//     点触可视化（覆盖 UIWindow 绿点 + 轨迹线 + 翻页器 sender 标记），
+//     设置页「调试可视化」开关控制，显示所有触摸（翻页器+手指+映射执行）。
+// v1.0.21：注入标记 + 跨沙盒多路径读配置（PTGlobalPlistPath 照抄 volumekeytapper）。
 // v1.0.20：运行端统一 sendEvent 会话通道（与测试区同款），命中才吞。
 // v1.0.19：设置端方案页测试区（大白屏 + 绿点可视化），实证"匹配+执行+点触"OK。
 // v1.0.18：运行端双通道（HID 位移通道 + 会话通道）——0x23/0x24 读不到，废弃。
 // v1.0.17：整包回滚到真实 v1.0.4（release tag v1.0.4 = commit 0cd50018）。
 //
-// 注入范围：所有进程（ellekit 黑名单默认）
+// 注入范围：Filter = Bundles com.apple.UIKit（照抄 volumekeytapper，所有 UIKit App）
 //   - Preferences 进程：旁路（学习收集由设置页 bundle 自 hook）
-//   - 其它 App：运行时检查 masterEnabled + enabledApps[bundleID] 才 hook
+//   - 其它 App：运行时检查 masterEnabled + enabledApps[bundleID] 才执行映射
 //
 // 事件链路：
 //   addEvent（IOHIDEvent 层）：已学 sender → 开窗口 + 放行（不吞）
@@ -45,9 +52,10 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <mach-o/dyld.h>
-// MSHookMessageEx 由 -lsubstrate（ellekit substrate 兼容库）提供；
-// 只要 dylib 调用它，符号表必含 _MSHookMessageEx → ellekit 认可注入
-extern void MSHookMessageEx(Class _cls, SEL _name, IMP _imp, IMP *_orig);
+// MSHookMessageEx 由 -lsubstrate（ellekit substrate 兼容库）提供。
+// 必须 extern "C"：Tweak.xm 由 clang++ 编译，缺 extern "C" 会被 C++ 名字修饰，
+// 链接器找不到 _MSHookMessageEx（v1.0.22 链接失败实证）。
+extern "C" void MSHookMessageEx(Class _cls, SEL _name, IMP _imp, IMP *_orig);
 #import "ptftouch/PTFakeMetaTouch.h"
 
 // ============================================================
@@ -96,6 +104,7 @@ static double gConfigMtime = 0;
 static BOOL gMasterEnabled = NO;
 static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
+static BOOL gDebugDots = NO;                // v1.0.23：调试可视化（TrollCM 触摸轨迹）
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
 static NSString *gCfgPath = nil;            // 实际读到的 plist 路径（诊断）
@@ -181,6 +190,7 @@ static void PTLoadConfig(BOOL force) {
     gEnabledApps = [NSMutableSet setWithArray:apps ? apps : @[]];
     double db = [gConfig[@"debounceMs"] doubleValue];
     gDebounceMs = (db > 0) ? db : 300;
+    gDebugDots = [gConfig[@"debugDots"] boolValue];
     gPlans = [NSMutableDictionary dictionary];
     gLearnedSenderCount = 0;
     for (NSDictionary *p in gConfig[@"plans"] ?: @[]) {
@@ -374,6 +384,119 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
 }
 
 // ============================================================
+// 调试可视化（v1.0.23 加，按用户要求抄 TrollCM 触摸轨迹思路）
+// 覆盖 UIWindow（level=StatusBar+1）+ 绿点 + 轨迹线；
+// 翻页器 sender 的圆点带 "P" 标记（黑描边绿点）；
+// 显示所有触摸：翻页器、手指、映射执行（gIsInjecting 内的触摸）。
+// ============================================================
+@interface PTDebugDot : NSObject
+@property (nonatomic) CGPoint pos;
+@property (nonatomic) BOOL pager;
+@property (nonatomic, strong) UIView *dotView;
+@property (nonatomic, strong) CAShapeLayer *trailLayer;
+@property (nonatomic, strong) NSMutableArray *trail;   // NSValue<CGPoint>
+@end
+@implementation PTDebugDot
+- (instancetype)initWithPoint:(CGPoint)p pager:(BOOL)pg window:(UIWindow *)w {
+    self = [super init];
+    if (self) {
+        _pos = p; _pager = pg;
+        _trail = [NSMutableArray array];
+        [_trail addObject:[NSValue valueWithCGPoint:p]];
+        _dotView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
+        _dotView.center = p;
+        _dotView.layer.cornerRadius = 22;
+        _dotView.layer.borderWidth = 2;
+        _dotView.layer.borderColor = [UIColor colorWithRed:0 green:0 blue:0 alpha:0.8].CGColor;
+        _dotView.backgroundColor = [UIColor colorWithRed:0.2 green:0.95 blue:0.3 alpha:0.85];
+        if (pg) {
+            UILabel *lb = [[UILabel alloc] initWithFrame:_dotView.bounds];
+            lb.text = @"P";
+            lb.font = [UIFont boldSystemFontOfSize:20];
+            lb.textColor = [UIColor blackColor];
+            lb.textAlignment = NSTextAlignmentCenter;
+            [_dotView addSubview:lb];
+        }
+        _trailLayer = [CAShapeLayer layer];
+        _trailLayer.strokeColor = [UIColor colorWithRed:0.2 green:0.95 blue:0.3 alpha:0.7].CGColor;
+        _trailLayer.fillColor = [UIColor clearColor].CGColor;
+        _trailLayer.lineWidth = 4;
+        _trailLayer.lineCap = kCALineCapRound;
+        [w.layer addSublayer:_trailLayer];
+        [w addSubview:_dotView];
+    }
+    return self;
+}
+- (void)moveTo:(CGPoint)p {
+    _pos = p;
+    _dotView.center = p;
+    [_trail addObject:[NSValue valueWithCGPoint:p]];
+    if (_trail.count > 80) [_trail removeObjectAtIndex:0];
+    CGMutablePathRef path = CGPathCreateMutable();
+    BOOL first = YES;
+    for (NSValue *v in _trail) {
+        CGPoint q = v.CGPointValue;
+        if (first) { CGPathMoveToPoint(path, NULL, q.x, q.y); first = NO; }
+        else CGPathAddLineToPoint(path, NULL, q.x, q.y);
+    }
+    _trailLayer.path = path;
+    CGPathRelease(path);
+}
+- (void)fadeOut {
+    [_dotView.layer removeAllAnimations];
+    [UIView animateWithDuration:0.5 animations:^{
+        _dotView.alpha = 0.15;
+    } completion:^(BOOL f) {
+        [_dotView removeFromSuperview];
+    }];
+    CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+    fade.toValue = @(0.0);
+    fade.duration = 0.5;
+    fade.removedOnCompletion = NO;
+    fade.fillMode = kCAFillModeForwards;
+    [_trailLayer addAnimation:fade forKey:@"fade"];
+}
+@end
+
+static UIWindow *gDotWindow = nil;
+static NSMutableDictionary *gDotViews = nil;   // key=UITouch 指针字符串
+
+static void PTDebugEnsureWindow(void) {
+    if (gDotWindow) return;
+    UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    w.windowLevel = UIWindowLevelStatusBar + 1;   // 置顶覆盖一切
+    w.userInteractionEnabled = NO;                // 纯显示，不拦截触摸
+    w.backgroundColor = [UIColor clearColor];
+    UIViewController *vc = [[UIViewController alloc] init];
+    vc.view.backgroundColor = [UIColor clearColor];
+    w.rootViewController = vc;
+    w.hidden = NO;                                // 非 key 窗口直接显示
+    gDotWindow = w;
+    gDotViews = [NSMutableDictionary dictionary];
+}
+
+static void PTDebugUpdate(void *touchPtr, CGPoint p, UITouchPhase phase, BOOL pager) {
+    if (!gDebugDots) return;
+    if (![NSThread isMainThread]) return;
+    PTDebugEnsureWindow();
+    NSString *key = [NSString stringWithFormat:@"%p", touchPtr];
+    PTDebugDot *dot = gDotViews[key];
+    if (phase == UITouchPhaseBegan) {
+        if (dot) return;
+        dot = [[PTDebugDot alloc] initWithPoint:p pager:pager window:gDotWindow];
+        gDotViews[key] = dot;
+    } else if (phase == UITouchPhaseMoved) {
+        if (dot) [dot moveTo:p];
+    } else if (phase == UITouchPhaseEnded || phase == UITouchPhaseCancelled) {
+        if (dot) {
+            [dot moveTo:p];
+            [dot fadeOut];
+            [gDotViews removeObjectForKey:key];
+        }
+    }
+}
+
+// ============================================================
 // 动作执行（PTFakeMetaTouch + AVSystemController）
 // ============================================================
 static BOOL gIsInjecting = NO;
@@ -522,6 +645,13 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
 static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
+    // 调试可视化（v1.0.23）：所有触摸——翻页器（gCurSender≠0）、手指、映射执行
+    if (gDebugDots && event) {
+        for (UITouch *t in event.allTouches) {
+            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+            PTDebugUpdate((__bridge void *)t, p, t.phase, (gCurSender != 0));
+        }
+    }
     if (gIsInjecting) {
         ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
         return;
@@ -584,7 +714,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.22 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.23 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
