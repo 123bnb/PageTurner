@@ -73,7 +73,6 @@
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) NSMutableArray *mem;
 @property (nonatomic, assign) BOOL finished;
-@property (nonatomic, strong) UIView *traceView;   // 轨迹 overlay（全屏透明，不挡触摸）
 @end
 
 @interface PTActionVC : PSViewController
@@ -126,55 +125,43 @@ static double PTNowC(void) {
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
-// 录制端日志（内存 + 文件双写）——
-// ① 内存数组：日志页直接显示，不依赖文件系统，100% 可见
-// ② 文件：从多个候选路径里挑第一个可写的（不同 iOS 环境 NSHomeDirectory()
-//    返回值不同，有的返回 /var/mobile 导致写失败 —— 逐个尝试，总能找到一个）
-static NSMutableArray *sLogLines = nil;   // 内存日志（本次进程会话）
-static NSString *sLogPath = nil;          // 实际可写的文件路径（nil=所有候选都失败）
+// ---------- 日志系统（v1.0.16 加：内存+文件双写，只观察不改采集逻辑）----------
+static NSMutableArray *sLogLines = nil;      // 内存日志（日志页直接显示，100% 可见）
+static NSString *sLogPath = nil;             // 文件日志实际路径（nil=全部不可写）
+static NSString *SLogProbePath(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *cands = @[
+        [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject],
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
+        NSTemporaryDirectory(),
+        @"/var/mobile/Documents",
+    ];
+    for (NSString *d in cands) {
+        if (!d.length) continue;
+        if (![fm fileExistsAtPath:d]) [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+        if ([fm isWritableFileAtPath:d]) return [d stringByAppendingPathComponent:@"PageTurner.log"];
+    }
+    return nil;
+}
 static void SLog(NSString *fmt, ...) {
+    if (!sLogLines) sLogLines = [NSMutableArray array];
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
-    NSString *line = [NSString stringWithFormat:@"%@ %@", [NSDate date], msg];
-    // ① 内存（永不失败）
-    if (!sLogLines) sLogLines = [NSMutableArray array];
+    struct timeval tv; gettimeofday(&tv, NULL);
+    time_t sec = tv.tv_sec; struct tm tmv; localtime_r(&sec, &tmv);
+    char tbuf[64]; strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tmv);
+    NSString *line = [NSString stringWithFormat:@"%s.%03d %@", tbuf, (int)(tv.tv_usec/1000), msg];
+    if (sLogLines.count > 6000) [sLogLines removeObjectsInRange:NSMakeRange(0, 2000)];
     [sLogLines addObject:line];
-    if (sLogLines.count > 500) {
-        [sLogLines removeObjectsInRange:NSMakeRange(0, sLogLines.count - 500)];
+    if (!sLogPath) sLogPath = SLogProbePath();
+    if (sLogPath) {
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
+        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; } @catch (NSException *e) {} }
+    } else {
+        static BOOL sWarned = NO;
+        if (!sWarned) { sWarned = YES; [sLogLines addObject:@"[SLog] ⚠️ 所有候选路径都不可写（仅内存日志）"]; }
     }
-    // ② 文件：首次调用时探测可写路径
-    if (!sLogPath) {
-        NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        NSString *docDir = docs.count ? docs.firstObject : nil;
-        NSArray *cands = @[
-            docDir.length ? [docDir stringByAppendingPathComponent:@"PageTurner.log"] : @"",
-            [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/PageTurner.log"],
-            [NSTemporaryDirectory() stringByAppendingPathComponent:@"PageTurner.log"],
-            @"/var/mobile/Documents/PageTurner.log",
-        ];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        for (NSString *p in cands) {
-            if (!p.length) continue;
-            NSString *parent = [p stringByDeletingLastPathComponent];
-            if (![fm fileExistsAtPath:parent]) {
-                [fm createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:nil];
-            }
-            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
-            if (fh) { [fh closeFile]; sLogPath = p; break; }
-        }
-        if (!sLogPath) {
-            static BOOL sWarned = NO;
-            if (!sWarned) {
-                sWarned = YES;
-                [sLogLines addObject:@"[SLog] ⚠️ 所有候选路径都不可写（仅内存日志）"];
-            }
-            return;
-        }
-        [sLogLines addObject:[NSString stringWithFormat:@"[SLog] 日志文件: %@", sLogPath]];
-    }
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
-    if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; } @catch (NSException *e) {} }
 }
 
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
@@ -185,8 +172,8 @@ static IOHIDEventGetSenderID_t sGetSender = NULL;
 static IOHIDEventGetFloatValue_t sGetFloat = NULL;
 static uint64_t sCurSender = 0;
 static BOOL sHooked = NO;
-static BOOL sCollectArmed = NO;      // 学习页打开时置 YES（v1.0.4：进入即 armed，无延迟）
-// 学习会话（v1.0.4 原版：addEvent 层读 IOHIDEvent 相对位移 0x23/0x24，无任何设备过滤）
+static BOOL sCollectArmed = NO;      // 学习页打开时置 YES
+// 学习会话（与运行端 Tweak.xm 同口径：addEvent 层读 IOHIDEvent 相对位移 0x23/0x24）
 static BOOL sSessActive = NO;
 static uint64_t sSessSender = 0;
 static double sSessLastAt = 0;
@@ -194,30 +181,7 @@ static double sSessDist = 0, sSessFirstDir = 0;
 static BOOL sSessHasMove = NO;
 static BOOL sSessSettled = NO;
 static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊断用）
-// 轨迹（学习页可视化）：最近一次按键的相对位移累积路径（起点=屏幕中心）
-static NSMutableArray *sTracePoints = nil;   // NSValue(CGPoint) 相对坐标
-static double sTraceX = 0, sTraceY = 0;      // 相对位移累计
-static BOOL sTraceHas = NO;
 static IMP gOrigAddEvent = NULL;
-static uint64_t sLastAddSender = 0;      // addEvent 层最近收到的 sender（sendEvent 关联用）
-static double sLastAddSenderAt = 0;
-
-// 从 UIEvent/UITouch 内部取回 IOHIDEvent 并读 sender（与运行端 Tweak.xm 同款：
-// 手指触摸 sender=0，外部 HID（翻页器）sender≠0 —— 天然区分设备）
-static uint64_t SSEventSender(UIEvent *event) {
-    if (!event || !sGetSender) return 0;
-    id hid = nil;
-    @try { hid = [event valueForKey:@"_hidEvent"]; } @catch (NSException *e) {}
-    if (!hid) { @try { hid = [event valueForKey:@"hidEvent"]; } @catch (NSException *e) {} }
-    if (!hid) {
-        for (UITouch *t in event.allTouches) {
-            @try { hid = [t valueForKey:@"_hidEvent"]; } @catch (NSException *e) {}
-            if (hid) break;
-        }
-    }
-    if (!hid) return 0;
-    @try { return sGetSender((__bridge void *)hid); } @catch (NSException *e) { return 0; }
-}
 
 static void SAppendSample(int phase, double dir, double dist) {
     NSMutableDictionary *cfg = PTRead();
@@ -234,162 +198,67 @@ static void SAppendSample(int phase, double dir, double dist) {
 
 static void SFinishSession(void);   // 前向声明
 
-// ============================================================
-// 采集（v1.0.14 双通道，根治"位移丢失 + 心跳污染"）
-//   - addEvent 层（_UIUpdateHIDDigitizerInput -addEvent:）：只收【位移事件】
-//     （dx≠0 或 dy≠0）。空闲心跳 dx=0 dy=0 一律跳过 —— 心跳不再污染样本
-//   - sendEvent 层（UIApplication -sendEvent:）：收翻页器【合成触摸】
-//     （UIKit 把翻页器鼠标位移合成为触摸，UITouch 屏幕坐标增量 = 真实位移；
-//     点击键坐标不变 = 点击特征）。手指触摸 sender=0 天然忽略；
-//     空闲心跳无触摸、不合成 —— sendEvent 层根本不存在心跳
-//   - 双通道 8ms 同 sender 去重：同一按键的位移事件可能两通道都收到，
-//     只计先到的那个（保留 250ms 结算逻辑不变）
-// ============================================================
-
-// 从 UIEvent/UITouch 内部取回 IOHIDEvent 并读 sender（与运行端 Tweak.xm 同款：
-// 手指触摸 sender=0，外部 HID（翻页器）sender≠0 —— 天然区分设备）
-static uint64_t SSEventSender(UIEvent *event) {
-    if (!event || !sGetSender) return 0;
-    id hid = nil;
-    @try { hid = [event valueForKey:@"_hidEvent"]; } @catch (NSException *e) {}
-    if (!hid) { @try { hid = [event valueForKey:@"hidEvent"]; } @catch (NSException *e) {} }
-    if (!hid && event.type == UIEventTypeTouches) {
-        UITouch *t = [event.allTouches anyObject];
-        if (t) { @try { hid = [t valueForKey:@"_hidEvent"]; } @catch (NSException *e) {} }
-    }
-    if (!hid) return 0;
-    @try { return sGetSender((__bridge void *)hid); } @catch (NSException *e) { return 0; }
-}
-
-static double sLastFeedAt = 0;   // 最近一次喂会话时间（双通道去重）
-
-// 公共喂样本逻辑（两通道共用）：位移增量喂会话
-static void SFeedSample(uint64_t sender, double dx, double dy, const char *src) {
-    double now = PTNowC();
-    // 8ms 去重：同一按键两通道（addEvent 位移 + sendEvent 触摸）只计一次
-    if (sSessActive && sSessSender == sender && now - sLastFeedAt < 0.008) {
-        SLog(@"feed(%s): sender=0x%llx dx=%.1f dy=%.1f (8ms内重复，跳过)", src, sender, dx, dy);
-        return;
-    }
-    sLastFeedAt = now;
-    if (sSessActive && now - sSessLastAt > 0.15) SFinishSession();
-    if (!sSessActive) {
-        sSessActive = YES;
-        sSessSender = sender;
-        sSessDist = 0; sSessFirstDir = 0;
-        sSessHasMove = NO; sSessSettled = NO;
-        // 新会话：轨迹重置到中心
-        sTracePoints = [NSMutableArray array];
-        sTraceX = 0; sTraceY = 0;
-        sTraceHas = YES;
-        [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(0, 0)]];
-        SLog(@"feed(%s): sender=0x%llx dx=%.1f dy=%.1f (会话开始)", src, sender, dx, dy);
-    } else if (sender != sSessSender) {
-        SLog(@"feed(%s): sender=0x%llx (!!! 与当前会话 sender=0x%llx 不同，强制开新会话)", src, sender, sSessSender);
-        SFinishSession();
-        sSessActive = YES;
-        sSessSender = sender;
-        sSessDist = 0; sSessFirstDir = 0;
-        sSessHasMove = NO; sSessSettled = NO;
-        sTracePoints = [NSMutableArray array];
-        sTraceX = 0; sTraceY = 0;
-        sTraceHas = YES;
-        [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(0, 0)]];
-        SLog(@"feed(%s): sender=0x%llx dx=%.1f dy=%.1f (会话开始/换sender)", src, sender, dx, dy);
-    } else {
-        SLog(@"feed(%s): sender=0x%llx dx=%.1f dy=%.1f", src, sender, dx, dy);
-    }
-    sSessLastAt = now;
-    double seg = hypot(dx, dy);
-    if (seg > 0) {
-        sSessDist += seg;
-        if (!sSessHasMove && sSessDist > 5) {
-            sSessHasMove = YES;
-            sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
-        }
-        // 轨迹累积（相对路径）
-        sTraceX += dx; sTraceY += dy;
-        [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(sTraceX, sTraceY)]];
-    }
-    // 事件流停止 250ms 后结算样本
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        SFinishSession();
-    });
-}
-
-// 通道①：addEvent 层 —— 所有 type 都读（方向键可能是非 type=11 的鼠标/其他 type）
-// 位移从多个候选字段取（0x23/0x24 相对位移、0x04/0x05 绝对坐标、0x3B/0x3C 滚轮），
-// 任一非 0 即视为位移事件喂会话；全 0 = 心跳/点击，交给 sendEvent 通道（坐标不变=点击）
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
     @try {
-        if (sGetType && sGetSender && event && sCollectArmed) {
+        if (sGetType && sGetSender && event) {
             uint32_t type = sGetType(event);
-            uint64_t sender = sGetSender(event);
-            if (sender != 0) { sLastAddSender = sender; sLastAddSenderAt = PTNowC(); }
-            double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
-            double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
-            if (dx == 0 && dy == 0 && sGetFloat) {
-                dx = sGetFloat(event, 0x04); dy = sGetFloat(event, 0x05);
+            // [日志观察] 打印每个事件的关键字段（只打印，不参与采集）
+            uint64_t dbgSender = sGetSender(event);
+            double dbg23 = sGetFloat ? sGetFloat(event, 0x23) : 0;
+            double dbg24 = sGetFloat ? sGetFloat(event, 0x24) : 0;
+            double dbg04 = sGetFloat ? sGetFloat(event, 0x04) : 0;
+            double dbg05 = sGetFloat ? sGetFloat(event, 0x05) : 0;
+            double dbg3B = sGetFloat ? sGetFloat(event, 0x3B) : 0;
+            double dbg3C = sGetFloat ? sGetFloat(event, 0x3C) : 0;
+            double dbg2F = sGetFloat ? sGetFloat(event, 0x2F) : -1;
+            BOOL allZero = (dbg23==0 && dbg24==0 && dbg04==0 && dbg05==0 && dbg3B==0 && dbg3C==0 && dbg2F<=0);
+            if (allZero && dbgSender != 0) {
+                // 无位移事件（空闲心跳等）：同 sender 1 秒内折叠成一条，防刷屏
+                static uint64_t sIdleSender = 0; static double sIdleFirstAt = 0; static int sIdleCount = 0;
+                double now = PTNowC();
+                if (dbgSender == sIdleSender && now - sIdleFirstAt < 1.0) { sIdleCount++; }
+                else {
+                    if (sIdleCount > 0) SLog(@"ev: …同 sender 无位移事件 %d 条（已折叠）", sIdleCount);
+                    SLog(@"ev: type=%u sender=0x%llx 全0（无位移，疑空闲心跳）", type, dbgSender);
+                    sIdleSender = dbgSender; sIdleFirstAt = now; sIdleCount = 0;
+                }
+            } else {
+                SLog(@"ev: type=%u sender=0x%llx 23/24=%.1f/%.1f 04/05=%.1f/%.1f 3B/3C=%.1f/%.1f btn=%.0f",
+                     type, dbgSender, dbg23, dbg24, dbg04, dbg05, dbg3B, dbg3C, dbg2F);
             }
-            if (dx == 0 && dy == 0 && sGetFloat) {
-                dx = sGetFloat(event, 0x3B); dy = sGetFloat(event, 0x3C);
-            }
-            if (dx != 0 || dy != 0) {
-                SFeedSample(sender, dx, dy, "addEvent");
-            } else if (type != 11 || sender != 0) {
-                // 全 0：心跳（0x8000000800a15173）或点击键 → 记录最近 sender 供关联，
-                // 不喂会话（点击键由 sendEvent 通道收；心跳在 sendEvent 层不存在）
-                if (sSessActive && sender == sSessSender && PTNowC() - sSessLastAt > 0.15) SFinishSession();
+            if (type == 11 && sCollectArmed) {
+                // ===== v1.0.4 原版采集（一字未动）=====
+                uint64_t sender = sGetSender(event);
+                double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
+                double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
+                double now = PTNowC();
+                if (sSessActive && now - sSessLastAt > 0.15) SFinishSession();
+                if (!sSessActive) {
+                    sSessActive = YES;
+                    sSessSender = sender;
+                    sSessDist = 0; sSessFirstDir = 0;
+                    sSessHasMove = NO; sSessSettled = NO;
+                }
+                sSessLastAt = now;
+                double seg = hypot(dx, dy);
+                if (seg > 0) {
+                    sSessDist += seg;
+                    if (!sSessHasMove && sSessDist > 5) {
+                        sSessHasMove = YES;
+                        sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
+                    }
+                }
+                // 事件流停止 250ms 后结算样本（同运行端）
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    SFinishSession();
+                });
             }
         }
     } @catch (NSException *e) {}
     if (gOrigAddEvent) ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
 }
 
-static IMP gOrigSendEvent = NULL;
-
-// 通道②：sendEvent 层 —— 翻页器合成触摸/hover（UIKit 层真实坐标）
-// 手指（sender=0）放行；翻页器（sender≠0）按坐标增量喂会话
-// sender 溯源失败时用最近 30ms addEvent 层 sender 关联（点击键 addEvent 层必有）
-static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
-    @try {
-        if (event && sCollectArmed) {
-            UIEventType et = event.type;
-            // touches=0（点击/拖动）、hover=11（鼠标移动=方向键）都收
-            if (et == UIEventTypeTouches || et == (UIEventType)11) {
-                uint64_t sender = SSEventSender(event);
-                if (sender == 0 && sLastAddSenderAt > 0 && PTNowC() - sLastAddSenderAt < 0.03) {
-                    sender = sLastAddSender;   // addEvent 关联兜底
-                }
-                UITouch *t = [event.allTouches anyObject];
-                if (sender != 0 && t) {
-                    CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:nil];
-                    // 上一次该 sender 的触摸坐标（跨事件保留，算增量）
-                    static uint64_t sLastSender = 0;
-                    static CGPoint sLastPt = {0, 0};
-                    double dx = 0, dy = 0;
-                    if (sLastSender == sender && !CGPointEqualToPoint(sLastPt, p)) {
-                        dx = p.x - sLastPt.x;
-                        dy = p.y - sLastPt.y;
-                    }
-                    sLastSender = sender;
-                    sLastPt = p;
-                    if (dx != 0 || dy != 0) {
-                        SFeedSample(sender, dx, dy, "sendEvent");
-                    } else {
-                        // 坐标不变 = 点击键（合成触摸按下）
-                        SFeedSample(sender, 0, 0, "sendEvent");
-                    }
-                } else if (sender == 0 && t) {
-                    SLog(@"sendEvent: 触摸到了但 sender=0（溯源失败，未采集）type=%d", (int)et);
-                }
-            }
-        }
-    } @catch (NSException *e) {}
-    if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
-}
-
-// 结算按键会话 → append 样本（v1.0.4 原版，含停止校验）
+// 结算按键会话 → append 样本（与运行端 PTFinishHIDSession 同构，含停止校验）
 static void SFinishSession(void) {
     if (!sSessActive || sSessSettled) return;
     if (PTNowC() - sSessLastAt < 0.25) {
@@ -402,8 +271,8 @@ static void SFinishSession(void) {
     int phase = (sSessDist < 30.0) ? 0 : 1;
     double dir = sSessHasMove ? sSessFirstDir : 0;
     sCurSender = sSessSender;
+    SLog(@"settle: sender=0x%llx phase=%d dir=%.1f dist=%.1f hasMove=%d", sSessSender, phase, dir, sSessDist, sSessHasMove);
     sSessActive = NO;
-    SLog(@"settle: sender=0x%llx phase=%d dir=%.1f dist=%.1f", sSessSender, phase, dir, sSessDist);
     SAppendSample(phase, dir, sSessDist);
 }
 
@@ -416,20 +285,13 @@ static void SCollectHook(void) {
             sGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
             sGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
-        // 通道①：_UIUpdateHIDDigitizerInput -addEvent:（位移）
         Class addCls = NSClassFromString(@"_UIUpdateHIDDigitizerInput");
         SEL addSel = sel_registerName("addEvent:");
         Method am = addCls ? class_getInstanceMethod(addCls, addSel) : NULL;
         if (am) { gOrigAddEvent = method_getImplementation(am); method_setImplementation(am, (IMP)SImpAddEvent); }
-        // 通道②：UIApplication -sendEvent:（合成触摸）
-        Class appCls = NSClassFromString(@"UIApplication");
-        SEL seSel = sel_registerName("sendEvent:");
-        Method sm = appCls ? class_getInstanceMethod(appCls, seSel) : NULL;
-        if (sm) { gOrigSendEvent = method_getImplementation(sm); method_setImplementation(sm, (IMP)SImpSendEvent); }
 
-        sHooked = (gOrigAddEvent != NULL && gOrigSendEvent != NULL && sGetType != NULL && sGetSender != NULL);
-        SLog(@"collect: sHooked=%d addEvent=%p sendEvent=%p getType=%p getSender=%p getFloat=%p (armed=%d)",
-             sHooked, gOrigAddEvent, gOrigSendEvent, sGetType, sGetSender, sGetFloat, sCollectArmed);
+        sHooked = (gOrigAddEvent != NULL && sGetType != NULL && sGetSender != NULL);
+        SLog(@"collect: sHooked=%d getType=%d getSender=%d getFloat=%d", sHooked, sGetType!=NULL, sGetSender!=NULL, sGetFloat!=NULL);
     }
 }
 
@@ -1048,13 +910,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.mem = [NSMutableArray array];
 
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-    // 状态提示：大高度 + 自动换行（内容长时不顶到屏幕边缘，碰边换行）
-    self.status = [[UILabel alloc] initWithFrame:CGRectMake(24, h * 0.14, w - 48, h * 0.34)];
-    self.status.text = @"请切换到任意 App（如番茄小说/备忘录）\n连续按同一个键，直到提示特征已稳定\n再回到本页";
+    self.status = [[UILabel alloc] initWithFrame:CGRectMake(24, h * 0.22, w - 48, 60)];
+    self.status.text = @"请一直重复按同一个键\n直到提示特征已稳定";
     self.status.numberOfLines = 0;
-    self.status.lineBreakMode = NSLineBreakByWordWrapping;
     self.status.textAlignment = NSTextAlignmentCenter;
-    self.status.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+    self.status.font = [UIFont systemFontOfSize:20 weight:UIFontWeightMedium];
     [self.view addSubview:self.status];
 
     self.countLabel = [[UILabel alloc] initWithFrame:CGRectMake(24, h * 0.4, w - 48, 30)];
@@ -1076,20 +936,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.view addSubview:self.distLabel];
 
     PTSetLearningLocal(YES);
-    // 会话状态全复位（防上次录制残留：录一半退出后 sSessActive 残留 → 新会话永不开始）
-    sSessActive = NO; sSessSettled = NO;
-    sSessSender = 0; sSessDist = 0; sSessFirstDir = 0; sSessHasMove = NO;
-    sTraceHas = NO; sTraceX = 0; sTraceY = 0; sTracePoints = nil;
+    sCollectArmed = YES;
     sLastSampleAt = PTNowC();
-    sCollectArmed = YES;   // v1.0.4 原版：进入即 armed（无武装延迟）
     SCollectHook();
-    SLog(@"learn: viewDidLoad 会话已复位，armed=YES（App 进程采集已就绪）");
-    // 轨迹 overlay（全屏透明，显示最近一次按键的相对位移路径）
-    self.traceView = [[UIView alloc] initWithFrame:self.view.bounds];
-    self.traceView.userInteractionEnabled = NO;
-    self.traceView.backgroundColor = [UIColor clearColor];
-    self.traceView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:self.traceView];
+    SLog(@"learn: viewDidLoad 会话已复位，armed=YES");
     self.timer = [NSTimer scheduledTimerWithTimeInterval:0.3 target:self selector:@selector(poll) userInfo:nil repeats:YES];
 }
 
@@ -1098,7 +948,6 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.timer invalidate];
     self.timer = nil;
     sCollectArmed = NO;
-    sSessActive = NO; sSessSettled = NO;   // 会话复位，防止下次进入残留
     PTSetLearningLocal(NO);
 }
 
@@ -1106,15 +955,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.navigationController popViewControllerAnimated:YES];
 }
 
-// 轮询 plist：读走新样本（App 进程采集写回）→ 判定；刷新轨迹 overlay
+// 轮询 plist：读走新样本 → 判定
 - (void)poll {
-    [self drawTrace];
     NSMutableDictionary *cfg = PTRead();
     NSArray *samples = cfg[@"learningSamples"] ?: @[];
-    if (samples.count) {
-        cfg[@"learningSamples"] = @[];   // 只读走非空样本（避免空写覆盖 App 进程刚写入）
-        PTWrite(cfg);
-    }
+    cfg[@"learningSamples"] = @[];   // 清空已读
+    PTWrite(cfg);
     if (!samples.count) {
         // 诊断：一直没收到翻页器事件
         if (!self.finished && self.mem.count == 0 && PTNowC() - sLastSampleAt > 1.5) {
@@ -1127,96 +973,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     for (NSDictionary *s in samples) [self judge:s];
 }
 
-// 画最近一次按键的轨迹（相对位移路径）：起点=屏幕中心绿圈 → 沿线绿点 → 终点红点 + 蓝位移线
-// 数据源：优先 App 进程采集写回的 learningTrace（字符串 "x,y" 相对点）；空则用本地会话轨迹
-- (void)drawTrace {
-    for (UIView *v in self.traceView.subviews) [v removeFromSuperview];
-    for (CALayer *l in [self.traceView.layer.sublayers copy]) [l removeFromSuperlayer];
-    NSMutableArray *pts = [NSMutableArray array];
-    BOOL has = NO;
-    double tx = 0, ty = 0;
-    @try {
-        NSArray *lt = PTRead()[@"learningTrace"] ?: @[];
-        if (lt.count) {
-            for (NSString *s in lt) {
-                NSArray *xy = [s componentsSeparatedByString:@","];
-                if (xy.count == 2) {
-                    [pts addObject:[NSValue valueWithCGPoint:CGPointMake([xy[0] doubleValue], [xy[1] doubleValue])]];
-                    tx = [xy[0] doubleValue]; ty = [xy[1] doubleValue];
-                }
-            }
-            has = YES;
-        }
-    } @catch (NSException *e) {}
-    if (!has) {
-        if (!sTraceHas || !sTracePoints.count) return;
-        pts = sTracePoints;
-        tx = sTraceX; ty = sTraceY;
-    }
-    CGFloat w = self.traceView.bounds.size.width, h = self.traceView.bounds.size.height;
-    CGPoint c = CGPointMake(w / 2, h / 2);
-    CGPoint end = CGPointMake(c.x + tx, c.y + ty);
-    // 位移线：中心 → 终点
-    UIBezierPath *path = [UIBezierPath bezierPath];
-    [path moveToPoint:c];
-    [path addLineToPoint:end];
-    CAShapeLayer *line = [CAShapeLayer layer];
-    line.path = path.CGPath;
-    line.strokeColor = [UIColor systemBlueColor].CGColor;
-    line.lineWidth = 3;
-    line.fillColor = [UIColor clearColor].CGColor;
-    line.lineCap = kCALineCapRound;
-    [self.traceView.layer addSublayer:line];
-    // 沿线触摸点（绿小点，相对坐标偏移）
-    for (NSValue *v in sTracePoints) {
-        CGPoint rel = v.CGPointValue;
-        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 8)];
-        dot.center = CGPointMake(c.x + rel.x, c.y + rel.y);
-        dot.layer.cornerRadius = 4;
-        dot.backgroundColor = [UIColor systemGreenColor];
-        [self.traceView addSubview:dot];
-    }
-    // 起点（绿空心圈，屏幕中心） + 终点（红实心）
-    UIView *s0 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 18, 18)];
-    s0.center = c;
-    s0.layer.cornerRadius = 9;
-    s0.layer.borderWidth = 3;
-    s0.layer.borderColor = [UIColor systemGreenColor].CGColor;
-    s0.backgroundColor = [UIColor clearColor];
-    [self.traceView addSubview:s0];
-    UIView *e0 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 18, 18)];
-    e0.center = end;
-    e0.layer.cornerRadius = 9;
-    e0.backgroundColor = [UIColor systemRedColor];
-    [self.traceView addSubview:e0];
-    // 位移标注（底部）
-    UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(12, h - 44, w - 24, 30)];
-    lb.text = [NSString stringWithFormat:@"位移 Δ(%.0f, %.0f) pt", sTraceX, sTraceY];
-    lb.font = [UIFont systemFontOfSize:13];
-    lb.textColor = [UIColor secondaryLabelColor];
-    lb.textAlignment = NSTextAlignmentCenter;
-    [self.traceView addSubview:lb];
-}
-
 - (void)judge:(NSDictionary *)s {
     if (self.finished) return;
     NSArray *plans = PTRead()[@"plans"] ?: @[];
     // 去重：与已有方案高度相似 → 拒绝
     NSString *dup = PTDuplicate(s, plans);
     if (dup) {
-        // 找到冲突方案特征，展示对比（确认是不是误判）
-        NSDictionary *dupFt = nil;
-        for (NSDictionary *p in plans) if ([p[@"name"] isEqualToString:dup]) { dupFt = p[@"feature"]; break; }
-        int p1 = [s[@"phase"] intValue], p2 = [dupFt[@"phase"] intValue];
-        double d1 = [s[@"direction"] doubleValue], d2 = [dupFt[@"direction"] doubleValue];
-        double x1 = [s[@"dist"] doubleValue], lo2 = [dupFt[@"distMin"] doubleValue], hi2 = [dupFt[@"distMax"] doubleValue];
-        SLog(@"judge: REJECT duplicate with '%@' — new{sender=%@ phase=%d dir=%.1f dist=%.1f} old{sender=%@ phase=%d dir=%.1f dist=%.0f~%.0f}",
-             dup, s[@"sender"], p1, d1, x1, dupFt[@"sender"], p2, d2, lo2, hi2);
-        self.status.text = [NSString stringWithFormat:
-            @"⚠️ 与『%@』高度相似\n你的键: %@ %@ dist=%.0f\n已有: %@ %@ dist=%.0f~%.0f\n可能按错键，换一个键试试",
-            dup,
-            (p1 == 1 ? PTDirName(d1) : @"点击"), s[@"sender"], x1,
-            (p2 == 1 ? PTDirName(d2) : @"点击"), dupFt[@"sender"], lo2, hi2];
+        SLog(@"judge: REJECT duplicate with '%@' — new{sender=%@ phase=%d dir=%.1f dist=%.1f}",
+             dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]);
+        self.status.text = [NSString stringWithFormat:@"⚠️ 与已有方案『%@』高度相似\n可能按错了键，请换一个键", dup];
         self.status.textColor = [UIColor systemRedColor];
         [self.mem removeAllObjects];
         self.countLabel.text = @"已录：0 次";
@@ -1232,6 +997,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     // 同 sender 计数
     int count = 0;
     for (NSDictionary *m in self.mem) if ([m[@"sender"] isEqualToString:sender]) count++;
+    SLog(@"judge: ACCEPT sender=%@ phase=%d dir=%.1f dist=%.1f count=%d", sender, [s[@"phase"] intValue], dir, dist, count);
     self.countLabel.text = [NSString stringWithFormat:@"已录：%d 次（来源 %@）", count, sender];
     self.dirLabel.text = [NSString stringWithFormat:@"方向：%@（%.0f°）", PTDirName(dir), dir];
     if ([s[@"phase"] intValue] == 1) self.distLabel.text = [NSString stringWithFormat:@"位移：%.0f pt", dist];
@@ -1477,27 +1243,23 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
         style:UIBarButtonItemStyleDone target:self action:@selector(copyLog)];
 
-    NSMutableString *out = [NSMutableString string];
-    if (sLogPath) [out appendFormat:@"日志路径: %@\n\n", sLogPath];
-    // 内存日志尾部 200 行（优先，100% 有内容）
+    NSString *path = @"/var/mobile/Documents/PageTurner.log";
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    // 优先内存日志（100% 可见，不受文件可写限制）
     if (sLogLines.count) {
-        NSInteger n = (NSInteger)sLogLines.count;
-        NSInteger from = MAX(0, n - 200);
-        NSArray *tail = [sLogLines subarrayWithRange:NSMakeRange(from, n - from)];
-        [out appendString:[tail componentsJoinedByString:@"\n"]];
+        NSArray *lines = sLogLines;
+        NSUInteger n = lines.count;
+        NSUInteger from = n > 200 ? n - 200 : 0;
+        tv.text = [[lines subarrayWithRange:NSMakeRange(from, n - from)] componentsJoinedByString:@"\n"];
+    } else if (content.length) {
+        NSArray *lines = [content componentsSeparatedByString:@"\n"];
+        NSUInteger n = lines.count;
+        NSUInteger from = n > 200 ? n - 200 : 0;
+        NSArray *tail = [lines subarrayWithRange:NSMakeRange(from, n - from)];
+        tv.text = [tail componentsJoinedByString:@"\n"];
+    } else {
+        tv.text = @"日志为空。\n\n进入「记录与映射」→ 点进方案 → 新增记录（大白屏录制页）后按翻页器同一键，日志会实时写入此页。";
     }
-    // 文件内容（若与内存不同则追加）
-    if (sLogPath) {
-        NSString *fc = [NSString stringWithContentsOfFile:sLogPath encoding:NSUTF8StringEncoding error:nil];
-        if (fc.length) {
-            NSArray *fl = [fc componentsSeparatedByString:@"\n"];
-            if (fl.count > 200) {
-                NSArray *tail = [fl subarrayWithRange:NSMakeRange(fl.count - 200, 200)];
-                [out appendFormat:@"\n--- 文件尾部 ---\n%@", [tail componentsJoinedByString:@"\n"]];
-            }
-        }
-    }
-    tv.text = out.length ? out : @"日志为空。\n\n打开「新增记录」并按翻页器键后，回到这里刷新即可看到每次事件的 sender/位移/结算/判重。";
 }
 
 - (void)copyLog {
