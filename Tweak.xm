@@ -1,7 +1,23 @@
 // ============================================================
-// PageTurner v1.0.13 —— 录制日志"内存+文件"双写（日志页 100% 可见）
+// PageTurner v1.0.14 —— 录制端双通道采集（根治"位移丢失 + 心跳污染"）
 //
-// v1.0.13（日志页不再可能空白 + 冲突提示自动换行）：
+// v1.0.14（日志实证后的决定性修复 —— 你给的日志是铁证）：
+//   - 【根因】日志显示：录制时只有空闲心跳（sender=0x8000000800a15173 dx=0 dy=0
+//     每秒几十条）涌入 addEvent 层，方向键位移（dx≠0）一个都没有 ——
+//     addEvent 层（HID 原始层）现在读不出方向键位移，所有键都收敛成"点击"，
+//     判重必然全拒。心跳也被当成"点击"样本录进去（你截图三个方案 sender
+//     全是心跳就是这个原因）
+//   - 【修复】采集改双通道：
+//     ① addEvent 层只收【位移事件】（dx≠0||dy≠0）；dx=0 的心跳/点击一律跳过
+//     ② 新增 sendEvent 层（UIApplication -sendEvent:）：收翻页器【合成触摸】
+//        —— UIKit 把翻页器鼠标位移合成触摸，UITouch 屏幕坐标增量=真实位移
+//        （运行端 v1.0.8+ 和画布实测都证明这个层位移真实）；
+//        点击键坐标不变=点击特征；手指触摸 sender=0 天然忽略；
+//        空闲心跳不合成触摸，sendEvent 层根本不存在心跳
+//     ③ 双通道 8ms 同 sender 去重：同一按键两通道都收到时只计一次
+//   - 判重/结算/阈值不变
+//
+// v1.0.13（录制日志"内存+文件"双写 —— 日志页 100% 可见）：
 //   - 【日志双写】上一版改到 NSHomeDirectory()/Documents 仍空白 —— 不同 iOS
 //     环境 NSHomeDirectory() 返回值不同（有的返回 /var/mobile 导致写失败）。
 //     本版 SLog 改为：① 内存数组（日志页直接显示，不依赖文件系统，100% 可见）
@@ -589,7 +605,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.13 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.14 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d 调试=%d",
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount, gDebugMode);
