@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.26-roothide.deb
+          DEB=PageTurner-1.0.27-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.26
-          NOTES=$'PageTurner v1.0.26（roothide 直装）—— 总开关=总闸：探针/提醒条/调试可视化全纳入\n\n【v1.0.26 改了什么】\n1. 总开关接管一切：关闭总开关 → 注入探针不再弹、提醒条不显示、调试可视化不画、拦截不生效（之前探针是独立的，只要注入成功任何第三方 App 都弹）\n2. 调试可视化纳入总开关：总开关关掉后即使 debugDots 开着也不画\n\n【怎么测】\n1. 装 v1.0.26 → 注销\n2. 总开关开：打开番茄 → 2.5s 弹探针；勾选的 App 有黄边框提醒条；开调试可视化按翻页器有绿点\n3. 总开关关：以上全部消失，插件完全静默\n\n（v1.0.25 已修跨沙盒配置读写：设置页同时写 jbroot 路径，App 侧读得到）'
+          TAG=v1.0.27
+          NOTES=$'PageTurner v1.0.27（roothide 直装）—— 触摸 sender 诊断：实测证明手指≠翻页器\n\n【v1.0.27 改了什么】\n1. 新增诊断日志：每个触摸会话 Began 打一行 [touch] sender=0x... phase=Began pos=(x,y)（手指、翻页器都记）\n2. 目的：方案 A（整段吞翻页器会话）的前置验证——用日志实测手指 sender 和翻页器 sender 是否不同，证明不会误吞手指\n\n【怎么测】\n1. 装 v1.0.27 → 注销 → 打开番茄小说（或其他 App）\n2. 用手指点屏幕 3 下（间隔 2 秒）\n3. 用翻页器按 3 次点击键、3 次方向键（间隔 2 秒）\n4. 把 /var/mobile/Documents/PageTurner.log 完整发我\n\n（v1.0.26 已修：总开关=总闸，探针/提醒条/调试可视化全纳入）'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.26" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.27" --notes "$NOTES"
           fi

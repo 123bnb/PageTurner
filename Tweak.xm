@@ -1,5 +1,5 @@
 // ============================================================
-// PageTurner v1.0.26 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.27 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.24（注入可视化，照抄 volumekeytapper）：用户要求"打开 App 一眼看出注入成功没"
 //   - 提醒条（勾选生效 App）：黑底白字+黄边框、屏幕中上方、2 秒——
@@ -738,6 +738,16 @@ static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
         ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
         return;
     }
+    // v1.0.27 诊断：所有触摸会话 Began 打一行 sender（手指/翻页器都记），
+    // 用于实测证明手指 sender ≠ 翻页器 sender（方案 A 安全前置验证）
+    if (event) {
+        for (UITouch *t in event.allTouches) {
+            if (t.phase == UITouchPhaseBegan) {
+                CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+                PTLog(@"[touch] sender=0x%llx phase=Began pos=(%.1f,%.1f)", gCurSender, p.x, p.y);
+            }
+        }
+    }
     if (event && PTNow() < gPagerWindowUntil) {
         if (PTHandlePagerEvent(event)) return;
     }
@@ -796,7 +806,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.26 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.27 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
