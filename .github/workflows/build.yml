@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.20-roothide.deb
+          DEB=PageTurner-1.0.21-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.20
-          NOTES=$'PageTurner v1.0.20（roothide 直装）—— 运行端改测试区同款会话链路，命中才吞、未命中放行\n\n【v1.0.20 改了什么】\n1. 废弃 HID 0x23/0x24 位移通道（iOS 16 实测读不到位移，v1.0.18 双通道目标 App 无效）\n2. 运行端统一走 sendEvent UITouch 会话通道 = 设置 App 测试区已验证成功的同款链路\n   （方向键：Began→Moved→Ended 结算 dist/dir → sender+phase+方向±15°+dist 区间匹配 → 执行）\n3. 命中才吞事件（防 App 同时收到翻页器滚动）；未命中放行（App 保留原行为，方便区分映射是否生效）\n4. 0x23/0x24 仅日志观察（判断目标 App HID 位移是否存在）\n5. 日志：目标 App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log\n\n【怎么测（关键：必须回传目标 App 日志）】\n1. 装 v1.0.20 → 注销\n2. 设置 → PageTurner → 总开关开 → 指定 App 生效勾选番茄小说\n3. 打开番茄小说 → 按翻页器录过特征的键（如左键，映射了点击）\n4. 观察：若映射的点击生效（有绿点调试更直观），成功；若翻页器自己还能翻页说明未命中\n5. Filza 打开 /var/mobile/Documents/PageTurner.log，完整复制发我（这是定位关键，务必拿到）\n   日志看三段：[addEvent] 已学 sender → [会话] 结算 → [会话] 命中/未命中 → [执行]'
+          TAG=v1.0.21
+          NOTES=$'PageTurner v1.0.21（roothide 直装）—— 修复目标 App 不生效的终极根因（对照 volumekeytapper）\n\n【三个根因（全部来自对比 123bnb/volumekeytapper 私有仓库）】\n1. 【ellekit 拒载】dylib 纯手写 method_setImplementation，没有 %hook/_MSHookMessageEx 符号 → ellekit/roothide 拒绝注入第三方 App → 番茄小说根本没被注入（volumekeytapper 专门留空壳 %hook 生成符号）。修复：PTHook 改用 MSHookMessageEx（-lsubstrate 提供），符号表必含 _MSHookMessageEx\n2. 【跨沙盒读不到配置】固定路径 /var/mobile/Library/Preferences 在 roothide 下第三方 App 沙盒读不到 Preferences 进程写的全局配置 → enabledApps 判断永远失败 → 即使注入了也不 hook。修复：PTGlobalPlistPath() 多路径 + 从 dylib 镜像提取 .jbroot-XXX 根拼接真实路径（照抄 volumekeytapper VKTJbrootRoot/VKTGlobalPlistPath）\n3. 【注入无痕】无法取证。修复：constructor 无条件写注入标记 /var/mobile/Documents/PageTurner-injected-<bid>.txt，Filza 一眼判断注入成功与否\n\n【怎么测（按顺序排查）】\n1. 装 v1.0.21 → 注销\n2. Filza 打开 /var/mobile/Documents/ 看有没有 PageTurner-injected-com.dragon.read.txt（番茄小说）——没有 = 仍没注入（马上发我日志）；有 = 注入 OK\n3. 设置 → PageTurner → 总开关开 → 指定 App 勾番茄小说 → 打开番茄小说\n4. 按录过特征的键（如左键映射点击）：映射点击生效 = 成了；翻页器还能翻 = 未命中\n5. Filza 打开 /var/mobile/Documents/PageTurner.log 完整发我（启动两行 + 按键三段：addEvent 已学 sender → 会话结算 → 命中/未命中 → 执行）'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.20" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.21" --notes "$NOTES"
           fi
