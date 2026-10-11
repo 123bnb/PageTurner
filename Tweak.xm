@@ -1,5 +1,14 @@
 // ============================================================
-// PageTurner v1.0.29 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.30 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.30（v1.0.29 实测日志定位的双动作根因）：
+//   1. 窗口 50ms → 0.4s：翻页器按键起始 HID 事件有空隙（实测 73ms），
+//      旧窗口下 sendEvent 的 Began 到达时窗口已过期 → 整段会话放行 →
+//      App 收到翻页器原始滑动 = 双动作。窗口只由已学 sender 的 addEvent 刷新。
+//   2. PTHandlePagerEvent 加 sender 校验：窗口期内手指触摸会把 gCurSender
+//      覆盖成手指 sender，必须放行（防误吞手指触摸导致手机无法操作）
+//   3. 映射执行中（gIsInjecting）不走 PTHandlePagerEvent：注入触摸没有 addEvent、
+//      gCurSender 残留翻页器 sender，若吞会丢映射触摸的 Began → 映射失效
 //
 // v1.0.29（用户定稿 + 实测反馈）：
 //   1. 拦截修复（问题5/7）：窗口/会话判断优先于 gIsInjecting——
@@ -92,7 +101,9 @@ extern "C" void MSHookMessageEx(Class _cls, SEL _name, IMP _imp, IMP *_orig);
 // ============================================================
 static NSString *kPrefPath = @"/var/mobile/Library/Preferences/com.yourname.pageturner.plist";
 static NSString *kPrefsBundleID = @"com.apple.Preferences";
-static const double kPagerWindowSec = 0.05;      // HID 事件 → UIEvent 分发窗口
+static const double kPagerWindowSec = 0.4;       // v1.0.30：窗口 0.4s——翻页器按键起始 HID 事件有空隙（实测 73ms）
+                                                 // 旧 0.05s 窗口：Began 到达时窗口已过期 → 整段放行 → 双动作。
+                                                 // 窗口只由「已学 sender 的 addEvent」刷新，加长不误吞（PTHandlePagerEvent 有 sender 校验）
 static const double kTapDistThreshold = 30.0;    // 位移 <30pt 判定 tap
 static const double kDirTolerance = 15.0;        // 方向容差 ±15°
 static const double kDistSlack = 30.0;           // 位移区间匹配裕度
@@ -384,6 +395,10 @@ static NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
 static NSMutableArray *gSessTrail = nil;   // 当前会话轨迹点（NSValue<CGPoint>）
 
 static BOOL PTHandlePagerEvent(UIEvent *event) {    if (![event respondsToSelector:@selector(allTouches)]) return NO;
+    // v1.0.30：窗口开着也不能吞手指——窗口由「已学 sender 的 addEvent」打开，
+    // 但窗口期内手指触摸的 addEvent 会把 gCurSender 覆盖成手指 sender（type=11 全记），
+    // 此时必须放行（return NO），否则手指触摸的 Began 会被吞导致手机无法操作
+    if (!PTIsLearnedSender(gCurSender)) return NO;
     NSSet *touches = event.allTouches;
     if (!touches.count) return NO;
     UITouch *t = [touches anyObject];
@@ -836,10 +851,12 @@ static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
             PTDebugUpdate((__bridge void *)t, p, t.phase, (gCurSender != 0));
         }
     }
-    // v1.0.29（问题5/7）：窗口/会话判断优先于 gIsInjecting——
-    // 已学 sender 会话无视 gIsInjecting 继续吞+执行（修双动作：映射序列执行中按键不再放行原始滑动）；
-    // 注入触摸 sender 不是已学 sender（addEvent 不开窗），正常走下方 gIsInjecting 放行防递归
-    if (event && (PTNow() < gPagerWindowUntil || gSession.active)) {
+    // v1.0.30：窗口/会话判断优先于 gIsInjecting（v1.0.29 已反转）——
+    // 已学 sender 会话无视 gIsInjecting 继续吞+执行（修双动作）；
+    // 但映射执行中（gIsInjecting=YES）注入触摸必须放行：注入触摸没有对应 addEvent、
+    // gCurSender 残留翻页器 sender，若走 PTHandlePagerEvent 会把映射触摸的 Began 吞掉→映射失效。
+    // 执行中按键（间隔>防抖）会中断旧序列重启新序列，放行一次原始滑动可接受。
+    if (event && !gIsInjecting && (PTNow() < gPagerWindowUntil || gSession.active)) {
         if (PTHandlePagerEvent(event)) return;
     }
     if (gIsInjecting) {
@@ -919,7 +936,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.29 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.30 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,

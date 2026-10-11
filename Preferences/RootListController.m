@@ -1,5 +1,10 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.29）
+// RootListController.m —— PageTurner 设置页（v1.0.30）
+//
+// v1.0.30（实测反馈修正）：
+//   1. 特征稳定后不再禁止继续录——背景绿提示 + 右上角保存自己点；
+//      稳定后继续按同一个键 = 增强特征（样本继续累积、轨迹继续画、
+//      位移区间实时刷新，保存时用最新样本）；误按别的键只提示不混入
 //
 // v1.0.29（用户定稿 + 实测反馈）：
 //   1. 学习页：特征稳定后不再弹命名框——背景变绿色提示「特征已稳定」，
@@ -1343,7 +1348,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 // 轮询 plist：读走新样本 → 判定
 - (void)poll {
     // v1.0.28 BUG-1：波动太大弹窗期间暂停收集（sCollectArmed=NO），不读样本不误报
-    if (!sCollectArmed || self.finished) return;
+    // v1.0.30（用户问题1）：稳定后不暂停——继续录增强特征，直到自己点保存
+    if (!sCollectArmed) return;
     NSMutableDictionary *cfg = PTRead();
     NSArray *samples = cfg[@"learningSamples"] ?: @[];
     cfg[@"learningSamples"] = @[];   // 清空已读
@@ -1361,7 +1367,41 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 
 - (void)judge:(NSDictionary *)s {
-    if (self.finished) return;
+    // v1.0.30（用户问题1）：稳定后仍可继续录（增强精准性）——不再 return；
+    // 只接受同一个 sender 继续累积，误按别的键给提示不混入
+    if (self.finished) {
+        if (![s[@"sender"] isEqualToString:self.readyFt[@"sender"]]) {
+            [self appendLog:[NSString stringWithFormat:@"⚠ 正在增强当前特征，请继续按同一个键（当前来源 %@）",
+                self.readyFt[@"sender"]]];
+            return;
+        }
+        [self.mem addObject:s];
+        NSString *sender = s[@"sender"];
+        double dir = [s[@"direction"] doubleValue];
+        double dist = [s[@"dist"] doubleValue];
+        int count = 0;
+        for (NSDictionary *m in self.mem) if ([m[@"sender"] isEqualToString:sender]) count++;
+        self.countLabel.text = [NSString stringWithFormat:@"已录：%d 次（来源 %@）", count, sender];
+        self.dirLabel.text = [NSString stringWithFormat:@"方向：%@（%.0f°）", PTDirName(dir), dir];
+        if ([s[@"phase"] intValue] == 1) self.distLabel.text = [NSString stringWithFormat:@"位移：%.0f pt", dist];
+        else self.distLabel.text = @"位移：点击（无滑动）";
+        [self appendLog:[NSString stringWithFormat:@"✓ 增强 %d 次  sender=%@ phase=%d dir=%.1f° dist=%.1f",
+            count, sender, [s[@"phase"] intValue], dir, dist]];
+        [self drawTrailWithDirection:dir dist:dist phase:[s[@"phase"] intValue]];
+        // 实时刷新特征区间（保存时用最新样本，录得越多越准）
+        double lo = DBL_MAX, hi = 0;
+        for (NSDictionary *m in self.mem) {
+            if (![m[@"sender"] isEqualToString:sender]) continue;
+            double v = [m[@"dist"] doubleValue];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        NSMutableDictionary *ft = [NSMutableDictionary dictionaryWithDictionary:self.readyFt];
+        ft[@"distMin"] = @(lo);
+        ft[@"distMax"] = @(hi);
+        self.readyFt = ft;
+        return;
+    }
     NSArray *plans = PTRead()[@"plans"] ?: @[];
     // 去重：与已有方案高度相似 → 拒绝
     NSString *dup = PTDuplicate(s, plans);
@@ -1432,8 +1472,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.view.backgroundColor = [UIColor systemGreenColor];
     self.logView.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0];
     self.navigationItem.rightBarButtonItem.enabled = YES;
-    sCollectArmed = NO;   // 稳定后暂停收集（防误录）
-    SLog(@"learn: 特征已稳定（不弹框），等右上角保存 sender=%@ phase=%d dir=%.1f dist=%.0f~%.0f", sender, phase, dir, lo, hi);
+    // v1.0.30（用户问题1）：稳定后不暂停收集——你还能继续按同一个键增强特征，
+    // 按够了再点右上角「保存」；保存时用最新样本重算位移区间
+    SLog(@"learn: 特征已稳定（不弹框），可继续录或点右上角保存 sender=%@ phase=%d dir=%.1f dist=%.0f~%.0f", sender, phase, dir, lo, hi);
 }
 
 // v1.0.29：右上角保存——默认名「新方案N」（N 跳过重名），保存后回记录与映射列表
