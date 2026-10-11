@@ -45,10 +45,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.30-roothide.deb
+          DEB=PageTurner-1.0.31-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.30
-          NOTES=$'PageTurner v1.0.30（roothide 直装）—— 双动作根因修复 + 稳定后继续录\n\n【v1.0.30 改了什么】\n1. 拦截窗口 50ms→400ms（双动作根因）：翻页器按键起始 HID 事件流有 73ms 空隙，旧 50ms 窗口下 Began 到达时窗口已过期 → 整个会话放行 → App 收到翻页器原始滑动=第一重动作。现在窗口 0.4s，Began 必落窗内，整段吞\n2. 拦截加 sender 校验：窗口期内手指触摸会把 gCurSender 覆盖成手指 sender，校验后放行——不误吞手指（手机不会被锁死）\n3. 映射执行中放行注入触摸：注入触摸没有 addEvent、sender 残留翻页器，若走拦截会丢映射触摸 Began → 映射失效。现在执行中映射触摸正常生效\n4. 特征稳定后可以继续录：背景绿提示+右上角保存自己点；继续按同一个键=增强特征（样本累积、轨迹继续画、位移区间实时刷新，保存用最新样本）；误按别的键只提示不混入\n\n【怎么测】\n1. 装 v1.0.30 → 注销\n2. 番茄小说实测：按翻页器键 → 应只有映射动作，翻页器原始滑动消失（不再双重）\n3. 学习页：录稳后继续按几下再点保存，特征更准\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.31
+          NOTES=$'PageTurner v1.0.31（roothide 直装）—— 深色模式适配\n\n【v1.0.31 改了什么】\n1. 学习页大白屏：白底改系统自适应背景——深色模式下黑底白字，不再白底白字看不清\n2. 学习页/测试页实时记录区：浅灰底改系统次级背景（深色模式可读）\n\n【怎么测】\n1. 装 v1.0.31 → 注销 → 夜晚/深色模式下打开设置→PageTurner 各页应清晰可读\n2. 番茄小说双动作问题已在前版修（窗口 0.4s），如仍异常把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else

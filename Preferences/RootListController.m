@@ -1,5 +1,10 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.30）
+// RootListController.m —— PageTurner 设置页（v1.0.31）
+//
+// v1.0.31（深色模式适配）：
+//   1. 学习页大白屏 whiteColor → systemBackgroundColor（深色模式黑底白字，不再白底白字看不清）
+//   2. 学习页/测试页实时记录区 colorWithWhite:0.95/0.9 → secondarySystemBackgroundColor
+//      （深色模式下浅灰底+白字看不清）
 //
 // v1.0.30（实测反馈修正）：
 //   1. 特征稳定后不再禁止继续录——背景绿提示 + 右上角保存自己点；
@@ -1280,7 +1285,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"录制特征";
-    self.view.backgroundColor = [UIColor whiteColor];
+    // v1.0.31：深色模式适配——大白屏改系统自适应背景（浅色=白底黑字，深色=黑底白字）
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"返回" style:UIBarButtonItemStylePlain target:self action:@selector(back)];
     // v1.0.29：右上角「保存」（录稳后变可点），名字用默认名以后再改
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存"
@@ -1319,7 +1325,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.logView = [[UITextView alloc] initWithFrame:CGRectMake(16, h * 0.4 + 106, w - 32, h - (h * 0.4 + 106) - 30)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
-    self.logView.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0];
+    self.logView.backgroundColor = [UIColor secondarySystemBackgroundColor];
     self.logView.layer.cornerRadius = 10;
     self.logView.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
     [self.view addSubview:self.logView];
@@ -1470,7 +1476,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.status.text = [NSString stringWithFormat:@"✅ 特征已稳定\n来源 %@｜方向 %@｜位移 %.0f~%.0f pt\n\n点右上角「保存」完成录制", sender, PTDirName(dir), lo, hi];
     self.status.textColor = [UIColor whiteColor];
     self.view.backgroundColor = [UIColor systemGreenColor];
-    self.logView.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0];
+    // v1.0.31：深色模式适配——日志底改系统次级背景（绿底上白字保持）
+    self.logView.backgroundColor = [UIColor secondarySystemBackgroundColor];
     self.navigationItem.rightBarButtonItem.enabled = YES;
     // v1.0.30（用户问题1）：稳定后不暂停收集——你还能继续按同一个键增强特征，
     // 按够了再点右上角「保存」；保存时用最新样本重算位移区间
@@ -1910,7 +1917,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.logView = [[UITextView alloc] initWithFrame:CGRectMake(12, h - 210, w - 24, 190)];
     self.logView.editable = NO;
     self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-    self.logView.backgroundColor = [UIColor colorWithWhite:0.9 alpha:1.0];
+    // v1.0.31：深色模式适配——浅灰底改系统次级背景
+    self.logView.backgroundColor = [UIColor secondarySystemBackgroundColor];
     self.logView.layer.cornerRadius = 10;
     self.logView.textContainerInset = UIEdgeInsetsMake(8, 8, 8, 8);
     [self.view addSubview:self.logView];
