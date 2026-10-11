@@ -1,5 +1,5 @@
 // ============================================================
-// PageTurner v1.0.18 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.19 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.18：运行端双通道（修复"映射执行不到"）：
 //   方向键 = addEvent 层读 HID 相对位移（0x23/0x24）匹配（sender+方向±15°，
@@ -601,7 +601,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.18 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.19 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
