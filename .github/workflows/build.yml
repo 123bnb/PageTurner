@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.21-roothide.deb
+          DEB=PageTurner-1.0.22-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.21
-          NOTES=$'PageTurner v1.0.21（roothide 直装）—— 修复目标 App 不生效的终极根因（对照 volumekeytapper）\n\n【三个根因（全部来自对比 123bnb/volumekeytapper 私有仓库）】\n1. 【ellekit 拒载】dylib 纯手写 method_setImplementation，没有 %hook/_MSHookMessageEx 符号 → ellekit/roothide 拒绝注入第三方 App → 番茄小说根本没被注入（volumekeytapper 专门留空壳 %hook 生成符号）。修复：PTHook 改用 MSHookMessageEx（-lsubstrate 提供），符号表必含 _MSHookMessageEx\n2. 【跨沙盒读不到配置】固定路径 /var/mobile/Library/Preferences 在 roothide 下第三方 App 沙盒读不到 Preferences 进程写的全局配置 → enabledApps 判断永远失败 → 即使注入了也不 hook。修复：PTGlobalPlistPath() 多路径 + 从 dylib 镜像提取 .jbroot-XXX 根拼接真实路径（照抄 volumekeytapper VKTJbrootRoot/VKTGlobalPlistPath）\n3. 【注入无痕】无法取证。修复：constructor 无条件写注入标记 /var/mobile/Documents/PageTurner-injected-<bid>.txt，Filza 一眼判断注入成功与否\n\n【怎么测（按顺序排查）】\n1. 装 v1.0.21 → 注销\n2. Filza 打开 /var/mobile/Documents/ 看有没有 PageTurner-injected-com.dragon.read.txt（番茄小说）——没有 = 仍没注入（马上发我日志）；有 = 注入 OK\n3. 设置 → PageTurner → 总开关开 → 指定 App 勾番茄小说 → 打开番茄小说\n4. 按录过特征的键（如左键映射点击）：映射点击生效 = 成了；翻页器还能翻 = 未命中\n5. Filza 打开 /var/mobile/Documents/PageTurner.log 完整发我（启动两行 + 按键三段：addEvent 已学 sender → 会话结算 → 命中/未命中 → 执行）'
+          TAG=v1.0.22
+          NOTES=$'PageTurner v1.0.22（roothide 直装）—— 真正修复 ellekit 拒载：删除 dynamic_lookup，恢复 _MSHookMessageEx import\n\n【终极根因（本轮用 deb 拆包二进制级实证）】\n- Makefile 里 -Wl,-undefined,dynamic_lookup 会把 MSHookMessageEx 变成「运行时动态查找」符号，不写入 dylib 的 import 表\n- ellekit/roothide 扫描 dylib 时看不到 _MSHookMessageEx → 判定非 substrate 插件 → 拒载 → 番茄小说进程根本没被注入（/var/mobile/Documents/ 里没有 PageTurner-injected-com.dragon.read.txt 就是证据）\n- 二进制对比实证：TrollCM.dylib 含 _MSHookMessageEx 符号×4；PageTurner 之前 0 次（只剩日志字符串）\n- v1.0.21 用 extern 声明+调用 MSHookMessageEx 没用——符号被 dynamic_lookup 吞掉了\n\n【v1.0.22 改了什么】\n1. 删除 -Wl,-undefined,dynamic_lookup → MSHookMessageEx 正常 import libsubstrate → ellekit 认可注入\n2. 补 -framework IOKit（ptftouch 引用 IOHIDEvent* 5 个 C 函数，删除 dynamic_lookup 后需要显式链接）\n3. 保留：跨沙盒多路径读配置（jbroot 提取）、注入标记文件、命中才吞/未命中放行、会话通道\n\n【怎么测】\n1. 装 v1.0.22 → 注销\n2. Filza 打开 /var/mobile/Documents/ 看有没有 PageTurner-injected-com.dragon.read.txt —— 有 = 注入修复成功！没有 = 发我日志\n3. 设置 → PageTurner → 总开关开 → 指定 App 勾番茄小说 → 打开番茄小说按录过特征的键\n4. 映射点击生效 = 成；翻页器还能翻 = 未命中（发日志）\n5. /var/mobile/Documents/PageTurner.log 完整发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.21" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.22" --notes "$NOTES"
           fi
