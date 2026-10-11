@@ -175,11 +175,6 @@ IOHIDEventRef kif_IOHIDEventWithTouches(NSArray *touches) {
         IOHIDEventAppendEvent(handEvent, fingerEvent);
         CFRelease(fingerEvent);
     }
-    // 关键：模拟触摸必须带目标 App 进程内有效的 senderID，否则 iOS 16 丢弃注入
-    // （VolumeKeyTapper 实测结论：senderID 进程相关，必须用进程内捕获的真实触摸 sender）
-    if (gInjectSender != 0) {
-        IOHIDEventSetSenderID(handEvent, gInjectSender);
-    }
     return handEvent;
 }
 
