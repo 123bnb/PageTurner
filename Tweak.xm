@@ -1,7 +1,14 @@
 // ============================================================
-// PageTurner v1.0.23 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.24 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
-// v1.0.23（本版核心修复，三路实证锁定终极根因）：
+// v1.0.24（注入可视化，照抄 volumekeytapper）：用户要求"打开 App 一眼看出注入成功没"
+//   - 提醒条（勾选生效 App）：黑底白字+黄边框、屏幕中上方、2 秒——
+//     「PageTurner 注入成功 · 翻页键映射生效中」，打勾的 App 打开就有，
+//     有提醒条 = 注入成功
+//   - 注入探针（照抄 VKT ShowProbeAlert）：第三方 App 启动 2.5s 弹窗显示
+//     本App / 注入✅ / 全局配置(文件可读?) / 总开关 / crashTest / 勾选App数 /
+//     本App被勾选 —— 打开番茄小说一眼看出注入和勾选状态
+// v1.0.23（上一版核心修复，三路实证锁定终极根因）：
 //   根因一【终极】：Filter 空 {} → ellekit 不注入任何进程。
 //     TrollCM deb 拆包：Filter={ Bundles=[com.apple.springboard] } → 注入 SB 成功；
 //     volumekeytapper Makefile：Filter={ Bundles=[com.apple.UIKit] } + dynamic_lookup
@@ -105,6 +112,7 @@ static BOOL gMasterEnabled = NO;
 static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
 static BOOL gDebugDots = NO;                // v1.0.23：调试可视化（TrollCM 触摸轨迹）
+static BOOL gCrashTest = NO;                // v1.0.24：注入测试（探针字段，照抄 VKT）
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
 static NSString *gCfgPath = nil;            // 实际读到的 plist 路径（诊断）
@@ -191,6 +199,7 @@ static void PTLoadConfig(BOOL force) {
     double db = [gConfig[@"debounceMs"] doubleValue];
     gDebounceMs = (db > 0) ? db : 300;
     gDebugDots = [gConfig[@"debugDots"] boolValue];
+    gCrashTest = (gConfig[@"crashTest"] == nil) ? NO : [gConfig[@"crashTest"] boolValue];
     gPlans = [NSMutableDictionary dictionary];
     gLearnedSenderCount = 0;
     for (NSDictionary *p in gConfig[@"plans"] ?: @[]) {
@@ -497,6 +506,79 @@ static void PTDebugUpdate(void *touchPtr, CGPoint p, UITouchPhase phase, BOOL pa
 }
 
 // ============================================================
+// 注入可视化（v1.0.24，照抄 volumekeytapper）：
+//   PTShowToast —— 黑底白字+黄边框提醒条（勾选生效 App 启动显示，2 秒）
+//   PTShowProbeAlert —— 注入探针弹窗（第三方 App 启动 2.5s 后弹）
+// ============================================================
+static UIWindow *PTFindKeyWindow(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (app.connectedScenes) {
+        for (UIScene *scene in app.connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *ws = (UIWindowScene *)scene;
+                if (ws.activationState != UISceneActivationStateForegroundActive) continue;
+                for (UIWindow *w in ws.windows) if (w.isKeyWindow) return w;
+                return [ws.windows firstObject];
+            }
+        }
+    }
+    return app.keyWindow ?: app.windows.firstObject;
+}
+
+static void PTShowToast(NSString *msg) {
+    @try {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIWindow *w = PTFindKeyWindow();
+            if (!w) return;
+            // 大而醒目的黑底白字圆角条，屏幕中上方，停留 2 秒（照抄 VKT ShowToast）
+            UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(w.bounds.size.width/2 - 160, 200, 320, 64)];
+            l.text = msg;
+            l.textColor = [UIColor whiteColor];
+            l.textAlignment = NSTextAlignmentCenter;
+            l.font = [UIFont boldSystemFontOfSize:18];
+            l.numberOfLines = 2;
+            l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.9];
+            l.layer.cornerRadius = 12;
+            l.layer.masksToBounds = YES;
+            l.layer.borderWidth = 2;
+            l.layer.borderColor = [UIColor systemYellowColor].CGColor;
+            [w addSubview:l];
+            [w bringSubviewToFront:l];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [l removeFromSuperview]; });
+        });
+    } @catch (NSException *e) {}
+}
+
+static void PTShowProbeAlert(void) {
+    @try {
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"?";
+        if ([bid hasPrefix:@"com.apple."]) return;   // 只对第三方 App 弹，避免骚扰系统进程
+        BOOL selected = [gEnabledApps containsObject:bid];
+        BOOL cfgReadable = [NSFileManager.defaultManager fileExistsAtPath:gCfgPath ?: @""];
+        NSString *msg = [NSString stringWithFormat:
+            @"本App: %@\n注入: ✅ 成功\n全局配置: %@\n总开关enabled: %@\n注入测试crashTest: %@\n勾选App数: %lu  本App被勾选: %@",
+            bid,
+            cfgReadable ? [NSString stringWithFormat:@"文件可读 %@", gCfgPath] : [NSString stringWithFormat:@"文件不可读 %@", gCfgPath],
+            gMasterEnabled ? @"开" : @"关",
+            gCrashTest ? @"开" : @"关",
+            (unsigned long)gEnabledApps.count,
+            selected ? @"是✅" : @"否❌"];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIWindow *w = PTFindKeyWindow();
+            UIViewController *vc = w.rootViewController;
+            while (vc.presentedViewController) vc = vc.presentedViewController;
+            if (!vc) return;
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"PageTurner 注入探针"
+                                                                       message:msg
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+            [vc presentViewController:a animated:YES completion:nil];
+        });
+    } @catch (NSException *e) {}
+}
+
+// ============================================================
 // 动作执行（PTFakeMetaTouch + AVSystemController）
 // ============================================================
 static BOOL gIsInjecting = NO;
@@ -714,7 +796,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.23 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.24 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
@@ -733,6 +815,19 @@ static void PTInit() {
         } else {
             PTLog(@"旁路：未生效 App（bundleID=%@ 不在列表(%lu)或总开关=%d）",
                   bundleID, (unsigned long)gEnabledApps.count, gMasterEnabled);
+        }
+        // v1.0.24 注入探针（照抄 VKT ShowProbeAlert）：第三方 App 启动 2.5s 弹，
+        // 显示 本App/注入✅/全局配置/总开关/crashTest/勾选App数/本App被勾选 ——
+        // 打开番茄小说一眼看出注入成功没、有没有勾选
+        if (!gIsPreferences && ![bundleID hasPrefix:@"com.apple."]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ PTShowProbeAlert(); });
+        }
+        // v1.0.24 提醒条（勾选生效 App）：黑底白字+黄边框、中上方、2 秒。
+        // 有提醒条 = 注入成功（用户要求：打勾了那这个提醒条就有）
+        if (!gIsPreferences && gMasterEnabled && [gEnabledApps containsObject:bundleID]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ PTShowToast(@"PageTurner 注入成功 · 翻页键映射生效中"); });
         }
         PTLog(@"==================================================");
     }
