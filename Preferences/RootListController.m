@@ -1355,7 +1355,6 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         }
     }
     tv.text = out.length ? out : @"日志为空。\n\n打开「新增记录」并按翻页器键后，回到这里刷新即可看到每次事件的 sender/位移/结算/判重。";
-    }
 }
 
 - (void)copyLog {
