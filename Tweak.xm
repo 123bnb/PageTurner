@@ -1,15 +1,18 @@
 // ============================================================
-// PageTurner v1.0.9 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.10 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
-// v1.0.9（录制回滚 v1.0.4 行为 + 学习轨迹可视化 + 日志修复）：
-//   - 【录制】去掉设备锚定锁定（v1.0.6 引入的 sAnchorSender 把录制锁死的根因，
-//     回滚到 v1.0.4 的"不锁设备"行为）：sender≠0 的外部 HID 事件一律接收，
-//     手指触摸（sender=0）天然排除 —— v1.0.4 是最后一个能正常录翻页器的版本
-//   - 【轨迹】学习页新增全屏轨迹 overlay：录制时显示最近一次按键的触摸轨迹
-//     （起点绿圈 → 沿线绿点 → 终点红点 + 蓝位移线 + 起终点坐标）
-//   - 【日志】PTLog 固定路径 /var/mobile/Documents/ 目录在 iOS 上不存在导致
-//     写入永远失败 → 日志永远空；现自动创建目录，并同时写 App 容器 Documents
+// v1.0.10（录制端真正回滚 v1.0.4 原版 —— 修"v1.0.9 仍录不了"）：
+//   - 【核心】v1.0.9 只是删了锚定，采集层仍是 v1.0.8 的 sendEvent 坐标版，
+//     在 Preferences 进程收不到翻页器 → 还是录不了。本版把录制端 RootListController.m
+//     整段还原成 v1.0.4 原版：hook _UIUpdateHIDDigitizerInput -addEvent:，
+//     type=11 全收（无过滤无锚定），读 IOHIDEvent 相对位移 0x23/0x24 ——
+//     用户实测这是唯一能正常录翻页器的版本
+//   - 【学习页】恢复 v1.0.4 的"进入即 armed"（去掉 v1.0.7 的 1 秒武装延迟）
+//   - 【轨迹】保留可视化（v1.0.9 新增）：按相对位移累积绘制路径，
+//     起点=屏幕中心绿圈 → 沿线绿点 → 终点红点 + 蓝位移线 + Δ(x,y) 标注
+//   - 日志自动建目录修复（v1.0.9）保留
 //
+// v1.0.9（录制回滚 v1.0.4 行为 + 学习轨迹可视化 + 日志修复）：见上，已被 v1.0.10 取代
 // v1.0.8（拦截架构回滚到 sendEvent 层 —— 修复方向键完全没拦的根因）：
 //   - 【核心】v1.0.5 把拦截搬到 _UIUpdateHIDDigitizerInput -addEvent: 读 0x23/0x24
 //     是方向性错误：实测（HIDKeySniffer v1.0.8 日志）翻页器方向键在 addEvent 层
@@ -556,7 +559,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.8 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.10 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d 调试=%d",
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount, gDebugMode);
