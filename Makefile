@@ -7,7 +7,7 @@
 # 日志：App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.16
+PACKAGE_VERSION := 1.0.17
 
 DEBUG = 0
 ARCHS = arm64 arm64e
