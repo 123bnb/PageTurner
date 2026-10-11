@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.17-roothide.deb
+          DEB=PageTurner-1.0.18-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.17
-          NOTES=$'PageTurner v1.0.17（roothide 直装）—— 以真实 v1.0.4 为基底 + 日志系统\n\n【v1.0.17 改了什么】\n1. 整包回滚到【真实 v1.0.4】（release v1.0.4 = commit 0cd50018，用户实测唯一能正常录多个键、有位移数据的版本）。采集链路 = addEvent 拿 sender + 50ms 窗口 → sendEvent UITouch 屏幕坐标会话，位移/方向来自 UITouch 坐标增量\n2. 采集/结算/判重/阈值逐字未动（kDirTol=15 / kDistSlack=30 / kLearnMin=5 / kLearnMax=15 / kConverge=60）\n3. 只加日志系统：内存+文件双写（4 候选路径自动挑可写）；addEvent sender 变化 / sendEvent 窗口内 UITouch 事件 / 样本 / 判重 ACCEPT-REJECT 全打；调试日志页（首页新增）读内存日志 100% 可见 + 一键复制\n4. Tweak.xm 运行端 = 真实 v1.0.4 原版未动\n\n【怎么测（重点）】\n1. 装 v1.0.17 → 注销\n2. 设置 → PageTurner → 记录与映射 → 新增方案 → 进方案页 → 新增记录（大白屏）\n3. 关辅助触控，连续按翻页器同一个键（上/下/左/右/点击任选，多按几次）\n4. 返回 → 设置首页 → 调试日志 → 复制 → 完整发我\n5. 日志关键段：learn: armed=YES → addEvent: sender 变化 → sendEvent: phase/坐标 → end: dist/dir → judge: ACCEPT/REJECT'
+          TAG=v1.0.18
+          NOTES=$'PageTurner v1.0.18（roothide 直装）—— 运行端双通道，修复映射执行不到\n\n【v1.0.18 改了什么】\n1. 运行端双通道：\n   - 方向键 = addEvent 层读 HID 相对位移（0x23/0x24）匹配（sender+方向±15°，跳过 dist 区间：HID 计数与 UITouch pt 量级不同），命中即吞事件 + 执行映射动作，App 不再收到翻页器滚动\n   - 点击键 = sendEvent 层 UITouch 会话匹配（真实 v1.0.4 原链路）\n2. 执行端不变 = PTFakeMetaTouch（与 volumekeytapper 同源 KIF 合成触摸，已验证可点触）\n3. 学习采集端 = 真实 v1.0.4 逐字未动（多键可录、有位移）\n4. App 进程日志全打：[addEvent] 方向键/点击键分流、[HID] 位移累计与结算、[执行] 命中序列\n\n【怎么测（重点）】\n1. 装 v1.0.18 → 注销\n2. 设置 → PageTurner → 指定 App 生效 → 勾选目标 App（如番茄小说）\n3. 打开目标 App → 按翻页器你录过特征的键 → 看是否执行映射动作（点击/双击/滑动）\n4. 若未执行：把 App 容器 Documents/PageTurner.log 完整发我（路径 /var/mobile/Containers/Data/Application/<App>/Documents/PageTurner.log，或 Filza 里搜 PageTurner.log）\n5. 日志关键段：[addEvent] 是否分流 → [HID] 结算 dir 是否在 ±15° → [执行] 是否命中'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.17" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.18" --notes "$NOTES"
           fi
