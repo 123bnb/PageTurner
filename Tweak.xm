@@ -1,5 +1,14 @@
 // ============================================================
-// PageTurner v1.0.11 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.12 —— 录制端日志路径修复（定位"只能录1个后重复录入"）
+//
+// v1.0.12（日志真正能写出来 —— 上一版日志为空是因为写错了路径）：
+//   - 【根因】v1.0.11 的录制日志写 /var/mobile/Documents/PageTurner.log，
+//     但 iOS 沙盒只允许 Preferences 进程写自己的容器（NSHomeDirectory()/Documents），
+//     外部路径打开必失败且错误被忽略 → 日志永远空。设置页"日志"页读的也是
+//     这个死路径 → 用户看到"完全没有日志"
+//   - 【修复】录制日志改写到 Preferences 沙盒容器 NSHomeDirectory()/Documents/PageTurner.log，
+//     设置页"日志"页同步读同一路径 → 日志真正可见可复制
+//   - 录制逻辑仍是 v1.0.4 原版（addEvent 0x23/0x24，无过滤无锚定），没动
 //
 // v1.0.11（录制端加日志 + 会话彻底复位 —— 定位"只能录1个后重复录入"）：
 //   - 【录制端日志】Preferences 进程此前完全没有日志。本版录制全链路写
@@ -570,7 +579,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.11 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.12 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d 调试=%d",
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount, gDebugMode);
