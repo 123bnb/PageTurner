@@ -45,10 +45,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.33-roothide.deb
+          DEB=PageTurner-1.0.34-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.33
-          NOTES=$'PageTurner v1.0.33（roothide 直装）—— 测试区滑动速度修复 + 命中日志加特征\n\n【v1.0.33 改了什么】\n1. 测试区滑动速度 bug：旧代码把 speed 当毫秒时长（固定=速度值毫秒，与滑动距离无关）——距离 200pt 也固定 1 秒，而运行端按真实速度换算只要 0.2s，所以体感"测试区很慢、App 很快"。现在测试区与运行端统一：时长=距离/速度，两边速度一致\n2. 测试区命中日志加特征细节：✓ 命中「右键」→ 映射 N 条动作（sender=… phase=… dir=… dist=…），与未命中格式一致\n\n【怎么测】\n1. 装 v1.0.33 → 注销\n2. 方案页长按滑动动作设速度 → 测试本方案：滑动速度应与 App 内一致\n3. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.34
+          NOTES=$'PageTurner v1.0.34（roothide 直装）—— 多特征方案（增加特征 + 已录入特征列表页）\n\n【v1.0.34 改了什么】\n1. 方案数据结构：单特征 → 特征数组（兼容旧数据自动迁移），一个方案可有多条特征，命中任一都执行同一组映射\n2. 方案页新增【增加特征】按钮（橙色）：录单个特征，按 1 次记录、再按覆盖、以最后一下为准，保存后加 1 条进已录入特征——解决翻页器「启动后第一次按键位移特殊」录不进去的问题（正常录 150pt + 增加特征录首次 50pt，两个都命中）\n3. 新增已录入特征列表页（点【已录制完成】进入）：显示每条特征详情，点击=详情/重新录制（替换），左滑=删除，无新增入口\n4. 匹配/去重全链路支持多特征（设置页测试区 + App 运行端）\n\n【怎么用（针对你的首次 50pt 问题）】\n1. 正常录右键（150pt）→ 特征①\n2. 方案页点【增加特征】→ 只按 1 次右键（启动后首次 = 50pt）→ 保存 → 特征②\n3. 番茄小说实测：第一次按键（50pt）也命中映射，不再漏\n\n【怎么测】\n1. 装 v1.0.34 → 注销\n2. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else

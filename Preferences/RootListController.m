@@ -1,5 +1,15 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.33）
+// RootListController.m —— PageTurner 设置页（v1.0.34）
+//
+// v1.0.34（多特征方案）：
+//   1. 方案数据结构 feature(单条) → features[] 数组（兼容旧数据自动迁移读取）
+//   2. 方案页按键记录区：新增【增加特征】按钮（橙色，紧挨记录按钮）——
+//      进单特征学习页（onceMode）：按 1 次记录、再按覆盖、以最后一下为准、
+//      至少 1 次可保存，保存后加 1 条进当前方案已录入特征（不新建方案）
+//   3. 新增已录入特征列表页 PTFeaturesVC（点【已录制完成】进入）：
+//      行=特征详情；点击=详情弹窗+重新录制（替换该条）；左滑=删除；无新增入口
+//   4. 匹配/去重遍历 features[]（PTTestMatchFeature / PTDuplicate）
+//   5. 学习页保存分流：onceMode→saveOnce；replaceIndex≥0→saveReplace（重录替换）
 //
 // v1.0.33（实测反馈）：
 //   1. 修测试区滑动速度 bug：旧代码把 speed 当毫秒时长（固定=速度值毫秒，与距离无关，
@@ -122,8 +132,17 @@
 @property (nonatomic, strong) NSString *planName;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UILabel *recStatus;
+@property (nonatomic, strong) UILabel *addFeatureBtn;   // v1.0.34：增加特征按钮（紧挨记录按钮）
 @property (nonatomic, strong) UITableView *tv;
 @property (nonatomic, strong) NSMutableArray *actions;
+- (void)reload;
+@end
+
+// v1.0.34：已录入特征列表页（点方案页【已录制完成】进入：点击=详情/重录，左滑=删除，无新增入口）
+@interface PTFeaturesVC : PSViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) NSString *planName;
+@property (nonatomic, strong) NSMutableArray *features;
+@property (nonatomic, strong) UITableView *tv;
 - (void)reload;
 @end
 
@@ -139,6 +158,9 @@
 @property (nonatomic, assign) BOOL finished;
 @property (nonatomic, assign) BOOL limitExceeded;   // v1.0.28：继续录后跳过 15 次上限
 @property (nonatomic, strong) NSDictionary *readyFt;      // v1.0.29：稳定后的特征，等右上角保存
+@property (nonatomic, assign) BOOL onceMode;       // v1.0.34：增加特征模式（按 1 次记录，再按覆盖，以最后为准）
+@property (nonatomic, assign) NSInteger replaceIndex;  // v1.0.34：>=0 = 替换方案第 N 条特征（特征列表重录）
+@property (nonatomic, assign) int onceCount;       // v1.0.34：增加特征模式已记录次数
 @property (nonatomic, strong) CAShapeLayer *trailLayer;   // v1.0.29：调试可视化同款轨迹
 @property (nonatomic, strong) UIView *trailDot;
 @property (nonatomic, strong) UILabel *trailLabel;
@@ -335,28 +357,36 @@ static UIView *sTestDot = nil;        // 测试页绿点视图
 static double sLastTestExec = 0;      // 测试防抖
 static __weak PTTestVC *sTestLogSink = nil;   // v1.0.28：测试页实时记录区（页面销毁即失效）
 
+// v1.0.34：方案特征集合（新格式 features[] 数组；兼容旧格式单条 feature）
+static NSArray *PTFeaturesOfPlan(NSDictionary *p) {
+    if (p[@"features"]) return p[@"features"];
+    if (p[@"feature"]) return @[p[@"feature"]];
+    return @[];
+}
+
 // 匹配（复制 Tweak.xm PTMatchPlan：sender + phase + 方向±15° + dist 区间）
 static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t sender) {
     NSString *best = nil; double bestScore = DBL_MAX;
     for (NSDictionary *p in (PTRead()[@"plans"] ?: @[])) {
-        NSDictionary *ft = p[@"feature"]; if (!ft) continue;
-        if (ft[@"sender"]) {
-            unsigned long long s = 0;
-            NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
-            if (![sc scanHexLongLong:&s] || s != sender) continue;
+        for (NSDictionary *ft in PTFeaturesOfPlan(p)) {
+            if (ft[@"sender"]) {
+                unsigned long long s = 0;
+                NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
+                if (![sc scanHexLongLong:&s] || s != sender) continue;
+            }
+            if ([ft[@"phase"] intValue] != phase) continue;
+            double pd = [ft[@"direction"] doubleValue];
+            double d = fabs(fabs(dir - pd)); if (d > 180) d = 360 - d;
+            if (d > 15.0) continue;
+            double lo = 0, hi = 0;
+            if (phase == 1) {
+                lo = [ft[@"distMin"] doubleValue];
+                hi = [ft[@"distMax"] doubleValue];
+                if (dist < lo - 30.0 || dist > hi + 30.0) continue;
+            }
+            double score = d + (phase == 1 ? fabs(dist - (lo + hi) / 2.0) / 100.0 : 0);
+            if (score < bestScore) { bestScore = score; best = p[@"name"]; }
         }
-        if ([ft[@"phase"] intValue] != phase) continue;
-        double pd = [ft[@"direction"] doubleValue];
-        double d = fabs(fabs(dir - pd)); if (d > 180) d = 360 - d;
-        if (d > 15.0) continue;
-        double lo = 0, hi = 0;
-        if (phase == 1) {
-            lo = [ft[@"distMin"] doubleValue];
-            hi = [ft[@"distMax"] doubleValue];
-            if (dist < lo - 30.0 || dist > hi + 30.0) continue;
-        }
-        double score = d + (phase == 1 ? fabs(dist - (lo + hi) / 2.0) / 100.0 : 0);
-        if (score < bestScore) { bestScore = score; best = p[@"name"]; }
     }
     return best;
 }
@@ -633,25 +663,25 @@ static NSString *PTActionText(NSDictionary *a) {
     return t;
 }
 
-// 与已有方案去重：同 sender + 同相位 + 方向接近 + 位移接近 → 返回方案名
+// 与已有特征去重（v1.0.34：遍历方案所有特征）：同 sender + 同相位 + 方向接近 + 位移接近 → 返回方案名
 static NSString *PTDuplicate(NSDictionary *s, NSArray *plans) {
     NSString *snd = s[@"sender"];
     int phase = [s[@"phase"] intValue];
     double dir = [s[@"direction"] doubleValue];
     double dist = [s[@"dist"] doubleValue];
     for (NSDictionary *p in plans) {
-        NSDictionary *ft = p[@"feature"];
-        if (!ft) continue;
-        if (![ft[@"sender"] isEqualToString:snd]) continue;
-        if ([ft[@"phase"] intValue] != phase) continue;
-        double pd = [ft[@"direction"] doubleValue];
-        double d = fabs(fabs(dir - pd)); if (d > 180) d = 360 - d;
-        if (d > kDirTol) continue;
-        if (phase == 1) {
-            double lo = [ft[@"distMin"] doubleValue], hi = [ft[@"distMax"] doubleValue];
-            if (dist < lo - kDistSlack || dist > hi + kDistSlack) continue;
+        for (NSDictionary *ft in PTFeaturesOfPlan(p)) {
+            if (![ft[@"sender"] isEqualToString:snd]) continue;
+            if ([ft[@"phase"] intValue] != phase) continue;
+            double pd = [ft[@"direction"] doubleValue];
+            double d = fabs(fabs(dir - pd)); if (d > 180) d = 360 - d;
+            if (d > kDirTol) continue;
+            if (phase == 1) {
+                double lo = [ft[@"distMin"] doubleValue], hi = [ft[@"distMax"] doubleValue];
+                if (dist < lo - kDistSlack || dist > hi + kDistSlack) continue;
+            }
+            return p[@"name"];
         }
-        return p[@"name"];
     }
     return nil;
 }
@@ -1068,7 +1098,19 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [self.recStatus addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(recordTapped)]];
         [self.view addSubview:self.recStatus];
 
-        self.tv = [[UITableView alloc] initWithFrame:CGRectMake(0, top + 96, w, self.view.bounds.size.height - top - 96)
+        // v1.0.34：增加特征按钮（紧挨记录按钮下方）——录单个特征，以最后一次为准
+        self.addFeatureBtn = [[UILabel alloc] initWithFrame:CGRectMake(16, top + 96, w - 32, 44)];
+        self.addFeatureBtn.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        self.addFeatureBtn.textColor = [UIColor whiteColor];
+        self.addFeatureBtn.backgroundColor = [UIColor systemOrangeColor];
+        self.addFeatureBtn.textAlignment = NSTextAlignmentCenter;
+        self.addFeatureBtn.layer.cornerRadius = 10;
+        self.addFeatureBtn.clipsToBounds = YES;
+        self.addFeatureBtn.userInteractionEnabled = YES;
+        [self.addFeatureBtn addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(addFeatureTapped)]];
+        [self.view addSubview:self.addFeatureBtn];
+
+        self.tv = [[UITableView alloc] initWithFrame:CGRectMake(0, top + 148, w, self.view.bounds.size.height - top - 148)
             style:UITableViewStylePlain];
         self.tv.dataSource = self;
         self.tv.delegate = self;
@@ -1083,17 +1125,16 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         self.tv.tableHeaderView = hv;
     }
     self.nameLabel.text = [NSString stringWithFormat:@"方案名： %@", self.planName];
-    if (plan[@"feature"]) {
-        NSDictionary *ft = plan[@"feature"];
-        NSString *d = PTDirName([ft[@"direction"] doubleValue]);
-        NSString *ph = [ft[@"phase"] intValue] == 0 ? @"点击" : [NSString stringWithFormat:@"滑动%@", d];
-        self.recStatus.text = [NSString stringWithFormat:@"✅ 已录制：%@（%d次）· 点我清空重录",
-            ph, [ft[@"recordCount"] intValue]];
+    // v1.0.34：已录制显示特征条数，点击进特征列表页；未录显示新增记录
+    NSArray *fts = PTFeaturesOfPlan(plan);
+    if (fts.count) {
+        self.recStatus.text = [NSString stringWithFormat:@"✅ 已录制 %ld 条特征 · 点我查看", (long)fts.count];
         self.recStatus.backgroundColor = [UIColor systemGreenColor];
     } else {
         self.recStatus.text = @"＋ 新增记录（按翻页器同一键录特征）";
         self.recStatus.backgroundColor = [UIColor systemBlueColor];
     }
+    self.addFeatureBtn.text = @"＋ 增加特征（录单个特征，以最后一次为准）";
     [self.tv reloadData];
 }
 
@@ -1131,32 +1172,24 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
         if ([p[@"name"] isEqualToString:self.planName]) { plan = p; break; }
     }
-    if (plan[@"feature"]) {
-        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"重新录制？"
-            message:@"将清空已录制的特征，重新进入录制页" preferredStyle:UIAlertControllerStyleAlert];
-        [al addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-        [al addAction:[UIAlertAction actionWithTitle:@"清空重录" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-            NSMutableDictionary *cfg = PTRead();
-            NSMutableArray *plans = [NSMutableArray array];
-            for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-                if ([p[@"name"] isEqualToString:self.planName]) {
-                    NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
-                    [np removeObjectForKey:@"feature"];
-                    [plans addObject:np];
-                } else [plans addObject:p];
-            }
-            cfg[@"plans"] = plans;
-            PTWrite(cfg);
-            PTLearnVC *vc = [PTLearnVC new];
-            vc.planName = self.planName;
-            [self.navigationController pushViewController:vc animated:YES];
-        }]];
-        [self presentViewController:al animated:YES completion:nil];
+    // v1.0.34：已录制 → 进特征列表页（查看/重录/左滑删）；未录制 → 正常学习页
+    if (PTFeaturesOfPlan(plan).count) {
+        PTFeaturesVC *vc = [PTFeaturesVC new];
+        vc.planName = self.planName;
+        [self.navigationController pushViewController:vc animated:YES];
     } else {
         PTLearnVC *vc = [PTLearnVC new];
         vc.planName = self.planName;
         [self.navigationController pushViewController:vc animated:YES];
     }
+}
+
+// v1.0.34：增加特征——单特征学习页（按 1 次记录，再按覆盖，以最后一下为准），保存后加入已录入特征
+- (void)addFeatureTapped {
+    PTLearnVC *vc = [PTLearnVC new];
+    vc.planName = self.planName;
+    vc.onceMode = YES;
+    [self.navigationController pushViewController:vc animated:YES];
 }
 
 #pragma mark UITableView
@@ -1291,13 +1324,135 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 @end
 
 // ============================================================
+// 已录入特征列表页（v1.0.34：点方案页【已录制完成】进入）
+// 行 = 特征详情；点击 = 详情/重新录制；左滑 = 删除；无新增入口
+// ============================================================
+@implementation PTFeaturesVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"已录入特征";
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
+    self.tv.dataSource = self;
+    self.tv.delegate = self;
+    [self.view addSubview:self.tv];
+    [self reload];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reload];
+}
+
+- (void)reload {
+    NSDictionary *plan = nil;
+    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
+        if ([p[@"name"] isEqualToString:self.planName]) { plan = p; break; }
+    }
+    if (!plan) { [self.navigationController popViewControllerAnimated:YES]; return; }
+    self.features = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(plan)];
+    [self.tv reloadData];
+}
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
+    return MAX((NSInteger)self.features.count, 1);
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    static NSString *cid = @"ft";
+    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cid];
+    if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cid];
+    if (ip.row >= (NSInteger)self.features.count) {
+        c.textLabel.text = @"还没有特征";
+        c.detailTextLabel.text = @"点方案页【＋ 新增记录】正常录，或【＋ 增加特征】录单个";
+        c.textLabel.textColor = [UIColor secondaryLabelColor];
+        c.detailTextLabel.textColor = [UIColor tertiaryLabelColor];
+        c.accessoryType = UITableViewCellAccessoryNone;
+        return c;
+    }
+    NSDictionary *ft = self.features[ip.row];
+    NSString *snd = ft[@"sender"] ?: @"—";
+    int phase = [ft[@"phase"] intValue];
+    NSString *ph = phase == 0 ? @"点击" : [NSString stringWithFormat:@"滑动%@", PTDirName([ft[@"direction"] doubleValue])];
+    c.textLabel.text = [NSString stringWithFormat:@"特征%ld  %@  sender=%@", (long)(ip.row + 1), ph, snd];
+    if (phase == 0) {
+        c.detailTextLabel.text = [NSString stringWithFormat:@"方向 %.0f° · 无位移 · 录 %d 次",
+            [ft[@"direction"] doubleValue], [ft[@"recordCount"] intValue]];
+    } else {
+        c.detailTextLabel.text = [NSString stringWithFormat:@"方向 %.0f° · 位移 %.0f~%.0f pt · 录 %d 次",
+            [ft[@"direction"] doubleValue], [ft[@"distMin"] doubleValue], [ft[@"distMax"] doubleValue],
+            [ft[@"recordCount"] intValue]];
+    }
+    c.textLabel.textColor = [UIColor labelColor];
+    c.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return c;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    if (ip.row >= (NSInteger)self.features.count) return;
+    NSDictionary *ft = self.features[ip.row];
+    NSString *snd = ft[@"sender"] ?: @"—";
+    int phase = [ft[@"phase"] intValue];
+    NSString *ph = phase == 0 ? @"点击" : [NSString stringWithFormat:@"滑动%@", PTDirName([ft[@"direction"] doubleValue])];
+    NSString *detail;
+    if (phase == 0) {
+        detail = [NSString stringWithFormat:@"类型：%@\n来源：%@\n方向：%.0f°\n无位移（点击）\n录制样本：%d 次",
+            ph, snd, [ft[@"direction"] doubleValue], [ft[@"recordCount"] intValue]];
+    } else {
+        detail = [NSString stringWithFormat:@"类型：%@\n来源：%@\n方向：%.0f°\n位移：%.0f ~ %.0f pt\n录制样本：%d 次",
+            ph, snd, [ft[@"direction"] doubleValue], [ft[@"distMin"] doubleValue], [ft[@"distMax"] doubleValue],
+            [ft[@"recordCount"] intValue]];
+    }
+    UIAlertController *al = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"特征%ld 详情", (long)(ip.row + 1)]
+        message:detail preferredStyle:UIAlertControllerStyleAlert];
+    [al addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [al addAction:[UIAlertAction actionWithTitle:@"重新录制" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        // 重录 = 进学习页（正常收敛模式），保存时替换这一条；返回不保存则原特征保留
+        PTLearnVC *vc = [PTLearnVC new];
+        vc.planName = self.planName;
+        vc.replaceIndex = ip.row;
+        [self.navigationController pushViewController:vc animated:YES];
+    }]];
+    [self presentViewController:al animated:YES completion:nil];
+}
+
+// 左滑删除（v1.0.34）
+- (BOOL)tableView:(UITableView *)tv canEditRowAtIndexPath:(NSIndexPath *)ip {
+    return ip.row < (NSInteger)self.features.count;
+}
+- (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)style forRowAtIndexPath:(NSIndexPath *)ip {
+    if (style != UITableViewCellEditingStyleDelete || ip.row >= (NSInteger)self.features.count) return;
+    NSMutableDictionary *cfg = PTRead();
+    NSMutableArray *plans = [NSMutableArray array];
+    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
+        if ([p[@"name"] isEqualToString:self.planName]) {
+            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+            NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
+            [fts removeObjectAtIndex:ip.row];
+            np[@"features"] = fts;
+            [np removeObjectForKey:@"feature"];
+            [plans addObject:np];
+        } else [plans addObject:p];
+    }
+    cfg[@"plans"] = plans;
+    PTWrite(cfg);
+    [self reload];
+}
+
+@end
+
+// ============================================================
 // 学习页（大白屏录特征）
 // ============================================================
 @implementation PTLearnVC
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"录制特征";
+    // v1.0.34：增加特征模式（onceMode）——标题/提示不同，正常模式不变
+    self.title = self.onceMode ? @"增加特征" : @"录制特征";
     // v1.0.31：深色模式适配——大白屏改系统自适应背景（浅色=白底黑字，深色=黑底白字）
     self.view.backgroundColor = [UIColor systemBackgroundColor];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"返回" style:UIBarButtonItemStylePlain target:self action:@selector(back)];
@@ -1310,7 +1465,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
     self.status = [[UILabel alloc] initWithFrame:CGRectMake(24, h * 0.22, w - 48, 60)];
-    self.status.text = @"请一直重复按同一个键\n直到提示特征已稳定";
+    // v1.0.34：once 模式提示单次覆盖逻辑
+    self.status.text = self.onceMode ? @"按 1 次即可记录\n再按会覆盖上一条（以最后一下为准）"
+                                     : @"请一直重复按同一个键\n直到提示特征已稳定";
     self.status.numberOfLines = 0;
     self.status.textAlignment = NSTextAlignmentCenter;
     self.status.font = [UIFont systemFontOfSize:20 weight:UIFontWeightMedium];
@@ -1386,6 +1543,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 
 - (void)judge:(NSDictionary *)s {
+    // v1.0.34：增加特征模式——单次覆盖逻辑（不走收敛判定）
+    if (self.onceMode) { [self judgeOnce:s]; return; }
     // v1.0.30（用户问题1）：稳定后仍可继续录（增强精准性）——不再 return；
     // 只接受同一个 sender 继续累积，误按别的键给提示不混入
     if (self.finished) {
@@ -1466,6 +1625,48 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     }
 }
 
+// v1.0.34：增加特征模式——每次按键直接覆盖 readyFt（以最后一下为准），至少 1 次可保存
+- (void)judgeOnce:(NSDictionary *)s {
+    // 去重：与已有特征（跨方案全部特征）高度相似 → 拒绝（沿用防重复规矩）
+    NSArray *plans = PTRead()[@"plans"] ?: @[];
+    NSString *dup = PTDuplicate(s, plans);
+    if (dup) {
+        SLog(@"judgeOnce: REJECT duplicate with '%@' — new{sender=%@ phase=%d dir=%.1f dist=%.1f}",
+             dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]);
+        self.status.text = [NSString stringWithFormat:@"⚠️ 与已有方案『%@』高度相似\n可能按错了键，请换一个键", dup];
+        self.status.textColor = [UIColor systemRedColor];
+        [self appendLog:[NSString stringWithFormat:@"✗ 拒绝（与『%@』重复）  sender=%@ phase=%d dir=%.1f° dist=%.1f",
+            dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]]];
+        return;
+    }
+    self.status.textColor = [UIColor labelColor];
+    self.onceCount++;
+    NSMutableDictionary *ft = [NSMutableDictionary dictionary];
+    ft[@"sender"] = s[@"sender"];
+    ft[@"phase"] = s[@"phase"];
+    ft[@"direction"] = s[@"direction"];
+    double d = [s[@"dist"] doubleValue];
+    if ([s[@"phase"] intValue] == 1) { ft[@"distMin"] = @(d); ft[@"distMax"] = @(d); }
+    ft[@"recordCount"] = @(1);
+    self.readyFt = ft;
+    self.finished = YES;
+    NSString *sender = s[@"sender"];
+    double dir = [s[@"direction"] doubleValue];
+    self.countLabel.text = [NSString stringWithFormat:@"已记录：第 %d 次（来源 %@，以最后为准）", self.onceCount, sender];
+    self.dirLabel.text = [NSString stringWithFormat:@"方向：%@（%.0f°）", PTDirName(dir), dir];
+    if ([s[@"phase"] intValue] == 1) self.distLabel.text = [NSString stringWithFormat:@"位移：%.0f pt", d];
+    else self.distLabel.text = @"位移：点击（无滑动）";
+    [self appendLog:[NSString stringWithFormat:@"✓ 记录 %d 次（覆盖上一条）  sender=%@ phase=%d dir=%.1f° dist=%.1f",
+        self.onceCount, sender, [s[@"phase"] intValue], dir, d]];
+    [self drawTrailWithDirection:dir dist:d phase:[s[@"phase"] intValue]];
+    self.status.text = [NSString stringWithFormat:@"✅ 已记录：来源 %@｜方向 %@｜位移 %.0f pt\n\n再按会覆盖，点右上角「保存」完成",
+        sender, PTDirName(dir), d];
+    self.status.textColor = [UIColor systemGreenColor];
+    self.navigationItem.rightBarButtonItem.enabled = YES;
+    SLog(@"learn(once): 已记录 %d 次 sender=%@ phase=%d dir=%.1f dist=%.1f（等右上角保存）",
+        self.onceCount, sender, [s[@"phase"] intValue], dir, d);
+}
+
 - (void)onStable:(NSString *)sender phase:(int)phase dir:(double)dir {
     if (self.finished) return;
     self.finished = YES;
@@ -1499,6 +1700,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 // v1.0.29：右上角保存——默认名「新方案N」（N 跳过重名），保存后回记录与映射列表
 - (void)saveTapped {
+    // v1.0.34：增加特征模式——加 1 条进当前方案已录入特征，回方案页
+    if (self.onceMode) { [self saveOnce]; return; }
+    // v1.0.34：特征列表页重录——替换当前方案第 replaceIndex 条特征，回方案页
+    if (self.replaceIndex >= 0) { [self saveReplace]; return; }
     if (!self.finished || !self.readyFt) return;
     NSDictionary *ft = self.readyFt;
     NSArray *plans = PTRead()[@"plans"] ?: @[];
@@ -1512,7 +1717,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (!name) name = @"新按键";
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *nplans = [NSMutableArray arrayWithArray:cfg[@"plans"] ?: @[]];
-    [nplans addObject:@{@"name": name, @"feature": ft, @"actions": @[]}];
+    // v1.0.34：新方案统一 features[] 数组存储（兼容旧 feature 单条读取）
+    [nplans addObject:@{@"name": name, @"features": @[ft], @"actions": @[]}];
     cfg[@"plans"] = nplans;
     PTWrite(cfg);
     PTSetLearningLocal(NO);
@@ -1522,6 +1728,85 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSUInteger base = NSNotFound;
     for (NSUInteger i = 0; i < stack.count; i++) {
         if ([stack[i] isKindOfClass:[PTPlansVC class]]) { base = i; break; }
+    }
+    if (base != NSNotFound) {
+        [stack removeObjectsInRange:NSMakeRange(base + 1, stack.count - base - 1)];
+        [self.navigationController setViewControllers:stack animated:YES];
+    } else {
+        [self.navigationController popViewControllerAnimated:YES];
+    }
+}
+
+// v1.0.34：增加特征保存——加 1 条进当前方案 features（不新建方案），回方案页
+- (void)saveOnce {
+    if (!self.readyFt) return;
+    NSMutableDictionary *cfg = PTRead();
+    NSMutableArray *plans = [NSMutableArray array];
+    BOOL done = NO;
+    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
+        if ([p[@"name"] isEqualToString:self.planName]) {
+            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+            NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
+            [fts addObject:self.readyFt];
+            np[@"features"] = fts;
+            [np removeObjectForKey:@"feature"];
+            [plans addObject:np];
+            done = YES;
+        } else [plans addObject:p];
+    }
+    if (!done) { [self.navigationController popViewControllerAnimated:YES]; return; }
+    cfg[@"plans"] = plans;
+    PTWrite(cfg);
+    PTSetLearningLocal(NO);
+    // 数一下该方案现在的特征数（写日志用）
+    NSUInteger total = 0;
+    for (NSDictionary *p in plans) if ([p[@"name"] isEqualToString:self.planName]) { total = PTFeaturesOfPlan(p).count; break; }
+    [self appendLog:[NSString stringWithFormat:@"已增加 1 条特征（共 %lu 条），回方案页", (unsigned long)total]];
+    // 回方案页（清掉学习页；方案页 viewWillAppear 自动刷新）
+    NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
+    NSUInteger base = NSNotFound;
+    for (NSUInteger i = 0; i < stack.count; i++) {
+        if ([stack[i] isKindOfClass:[PTPlanVC class]]) { base = i; break; }
+    }
+    if (base != NSNotFound) {
+        [stack removeObjectsInRange:NSMakeRange(base + 1, stack.count - base - 1)];
+        [self.navigationController setViewControllers:stack animated:YES];
+    } else {
+        [self.navigationController popViewControllerAnimated:YES];
+    }
+}
+
+// v1.0.34：特征列表重录保存——替换当前方案第 replaceIndex 条特征，回方案页
+- (void)saveReplace {
+    if (!self.finished || !self.readyFt) return;
+    NSMutableDictionary *cfg = PTRead();
+    NSMutableArray *plans = [NSMutableArray array];
+    BOOL done = NO;
+    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
+        if ([p[@"name"] isEqualToString:self.planName]) {
+            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+            NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
+            if (self.replaceIndex >= 0 && self.replaceIndex < (NSInteger)fts.count) {
+                fts[self.replaceIndex] = self.readyFt;
+            } else {
+                [fts addObject:self.readyFt];
+            }
+            np[@"features"] = fts;
+            [np removeObjectForKey:@"feature"];
+            [plans addObject:np];
+            done = YES;
+        } else [plans addObject:p];
+    }
+    if (!done) { [self.navigationController popViewControllerAnimated:YES]; return; }
+    cfg[@"plans"] = plans;
+    PTWrite(cfg);
+    PTSetLearningLocal(NO);
+    [self appendLog:@"已替换特征，回方案页"];
+    // 回方案页
+    NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
+    NSUInteger base = NSNotFound;
+    for (NSUInteger i = 0; i < stack.count; i++) {
+        if ([stack[i] isKindOfClass:[PTPlanVC class]]) { base = i; break; }
     }
     if (base != NSNotFound) {
         [stack removeObjectsInRange:NSMakeRange(base + 1, stack.count - base - 1)];

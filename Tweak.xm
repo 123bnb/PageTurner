@@ -1,5 +1,13 @@
 // ============================================================
-// PageTurner v1.0.32 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.34 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.34（多特征方案）：
+//   方案特征集合 feature(单条) → features[] 数组（兼容旧格式自动迁移）：
+//   PTLoadConfig 统计已学 sender 遍历 features；PTMatchPlan 遍历 features 匹配。
+//   对应设置页：方案页【增加特征】单特征录制 + 已录入特征列表页（v1.0.34）
+//
+// v1.0.33（实测反馈）：
+//   设置页测试区滑动速度换算与运行端统一 + 命中日志加特征细节（RootListController.m）
 //
 // v1.0.32（v1.0.31 实测：拦截已生效但仍见双动作）：
 //   根因：v1.0.30 的「执行中放行（!gIsInjecting）」把执行期间按的翻页器键也放行了——
@@ -271,12 +279,15 @@ static void PTLoadConfig(BOOL force) {
     for (NSDictionary *p in gConfig[@"plans"] ?: @[]) {
         if (!p[@"name"]) continue;
         gPlans[p[@"name"]] = p;
-        NSDictionary *ft = p[@"feature"];
-        if (ft[@"sender"]) {
-            unsigned long long s = 0;
-            NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
-            if ([sc scanHexLongLong:&s] && gLearnedSenderCount < 32) {
-                gLearnedSenders[gLearnedSenderCount++] = s;
+        // v1.0.34：特征集合 features[]（兼容旧格式单条 feature）
+        NSArray *fts = p[@"features"] ?: (p[@"feature"] ? @[p[@"feature"]] : @[]);
+        for (NSDictionary *ft in fts) {
+            if (ft[@"sender"]) {
+                unsigned long long s = 0;
+                NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
+                if ([sc scanHexLongLong:&s] && gLearnedSenderCount < 32) {
+                    gLearnedSenders[gLearnedSenderCount++] = s;
+                }
             }
         }
     }
@@ -372,29 +383,32 @@ static void PTAppendLearnSample(PagerFeature f, uint64_t sender) {
 }
 
 // 运行模式：匹配（sender + 相位 + 方向±15° + 位移区间）→ 唯一方案
+// v1.0.34：遍历方案 features[]（兼容旧 feature 单条）
 static NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
     NSString *best = nil;
     double bestScore = DBL_MAX;
     for (NSString *name in gPlans) {
-        NSDictionary *ft = gPlans[name][@"feature"];
-        if (!ft) continue;
-        if (ft[@"sender"]) {
-            unsigned long long s = 0;
-            NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
-            if (![sc scanHexLongLong:&s] || s != sender) continue;   // sender 必须一致
+        NSDictionary *p = gPlans[name];
+        NSArray *fts = p[@"features"] ?: (p[@"feature"] ? @[p[@"feature"]] : @[]);
+        for (NSDictionary *ft in fts) {
+            if (ft[@"sender"]) {
+                unsigned long long s = 0;
+                NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
+                if (![sc scanHexLongLong:&s] || s != sender) continue;   // sender 必须一致
+            }
+            if ([ft[@"phase"] intValue] != f.phase) continue;
+            double pd = [ft[@"direction"] doubleValue];
+            double d = fabs(fabs(f.direction - pd)); if (d > 180) d = 360 - d;
+            if (d > kDirTolerance) continue;
+            double lo = 0, hi = 0;
+            if (f.phase == 1) {
+                lo = [ft[@"distMin"] doubleValue];
+                hi = [ft[@"distMax"] doubleValue];
+                if (f.dist < lo - kDistSlack || f.dist > hi + kDistSlack) continue;
+            }
+            double score = d + (f.phase == 1 ? fabs(f.dist - (lo + hi) / 2.0) / 100.0 : 0);
+            if (score < bestScore) { bestScore = score; best = name; }
         }
-        if ([ft[@"phase"] intValue] != f.phase) continue;
-        double pd = [ft[@"direction"] doubleValue];
-        double d = fabs(fabs(f.direction - pd)); if (d > 180) d = 360 - d;
-        if (d > kDirTolerance) continue;
-        double lo = 0, hi = 0;
-        if (f.phase == 1) {
-            lo = [ft[@"distMin"] doubleValue];
-            hi = [ft[@"distMax"] doubleValue];
-            if (f.dist < lo - kDistSlack || f.dist > hi + kDistSlack) continue;
-        }
-        double score = d + (f.phase == 1 ? fabs(f.dist - (lo + hi) / 2.0) / 100.0 : 0);
-        if (score < bestScore) { bestScore = score; best = name; }
     }
     return best;
 }
@@ -961,7 +975,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.32 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.34 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
