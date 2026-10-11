@@ -1,5 +1,10 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.19，以真实 v1.0.4 为基底）
+// RootListController.m —— PageTurner 设置页（v1.0.23）
+//
+// v1.0.23：首页「调试」组新增【调试可视化】开关（key=debugDots）：
+//   注入端 dylib（Tweak.xm）读取该键，开启后所有触摸显示绿点+轨迹
+//   （TrollCM 触摸轨迹思路），翻页器圆点带 P 标记，映射执行的触摸也可见。
+//   用于确认"注入成功→点触生效"，无需去目标 App 猜。
 //
 // v1.0.19：方案页新增【测试区】→ 大白屏测试页（PTTestVC）：
 //   按翻页器按键 → 完整特征匹配（sender+phase+方向±15°+dist 区间）
@@ -15,7 +20,7 @@
 //   addEvent sender 变化 / sendEvent 窗口内事件 / 样本 / 判重 的观察日志。
 //
 // 页面结构（全部在系统设置 → PageTurner）：
-//   RootListController  总开关 / 指定App生效 / 防抖 / 记录与映射 / 调试日志
+//   RootListController  总开关 / 指定App生效 / 防抖 / 记录与映射 / 调试可视化 / 调试日志
 //   PTPlansVC           方案列表（左滑删除 / 新增方案）
 //   PTPlanVC            方案页（名称 / 记录状态 / 映射区 / 新增映射）
 //   PTLearnVC           学习页（大白屏录特征，轮询 plist 判定）
@@ -603,6 +608,14 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [specs addObject:plans];
 
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"调试"]];
+        PSSpecifier *dots = [PSSpecifier preferenceSpecifierNamed:@"调试可视化"
+            target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+            detail:nil cell:PSSwitchCell edit:nil];
+        [dots setProperty:@"debugDots" forKey:@"key"];
+        [dots setProperty:@NO forKey:@"default"];
+        [dots setProperty:@"开启后所有触摸显示绿点+轨迹（翻页器带P标记，映射执行也可见）。用于确认注入和点触生效。" forKey:@"staticText"];
+        [specs addObject:dots];
+
         PSSpecifier *log = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
             target:self set:nil get:nil detail:NSClassFromString(@"PTDebugLogVC")
             cell:PSLinkCell edit:nil];
