@@ -199,6 +199,25 @@ static NSMutableArray *sTracePoints = nil;   // NSValue(CGPoint) 相对坐标
 static double sTraceX = 0, sTraceY = 0;      // 相对位移累计
 static BOOL sTraceHas = NO;
 static IMP gOrigAddEvent = NULL;
+static uint64_t sLastAddSender = 0;      // addEvent 层最近收到的 sender（sendEvent 关联用）
+static double sLastAddSenderAt = 0;
+
+// 从 UIEvent/UITouch 内部取回 IOHIDEvent 并读 sender（与运行端 Tweak.xm 同款：
+// 手指触摸 sender=0，外部 HID（翻页器）sender≠0 —— 天然区分设备）
+static uint64_t SSEventSender(UIEvent *event) {
+    if (!event || !sGetSender) return 0;
+    id hid = nil;
+    @try { hid = [event valueForKey:@"_hidEvent"]; } @catch (NSException *e) {}
+    if (!hid) { @try { hid = [event valueForKey:@"hidEvent"]; } @catch (NSException *e) {} }
+    if (!hid) {
+        for (UITouch *t in event.allTouches) {
+            @try { hid = [t valueForKey:@"_hidEvent"]; } @catch (NSException *e) {}
+            if (hid) break;
+        }
+    }
+    if (!hid) return 0;
+    @try { return sGetSender((__bridge void *)hid); } @catch (NSException *e) { return 0; }
+}
 
 static void SAppendSample(int phase, double dir, double dist) {
     NSMutableDictionary *cfg = PTRead();
@@ -298,22 +317,29 @@ static void SFeedSample(uint64_t sender, double dx, double dy, const char *src) 
     });
 }
 
-// 通道①：addEvent 层 —— 只收位移事件（dx≠0 || dy≠0）
-// 空闲心跳（dx=0 dy=0）跳过；点击键交给 sendEvent 通道（坐标不变=点击）
+// 通道①：addEvent 层 —— 所有 type 都读（方向键可能是非 type=11 的鼠标/其他 type）
+// 位移从多个候选字段取（0x23/0x24 相对位移、0x04/0x05 绝对坐标、0x3B/0x3C 滚轮），
+// 任一非 0 即视为位移事件喂会话；全 0 = 心跳/点击，交给 sendEvent 通道（坐标不变=点击）
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
     @try {
         if (sGetType && sGetSender && event && sCollectArmed) {
             uint32_t type = sGetType(event);
-            if (type == 11) {
-                uint64_t sender = sGetSender(event);
-                double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
-                double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
-                if (dx != 0 || dy != 0) {
-                    SFeedSample(sender, dx, dy, "addEvent");
-                } else {
-                    // 心跳/无位移：跳过（避免心跳污染；点击键由 sendEvent 收）
-                    if (sSessActive && sender == sSessSender && PTNowC() - sSessLastAt > 0.15) SFinishSession();
-                }
+            uint64_t sender = sGetSender(event);
+            if (sender != 0) { sLastAddSender = sender; sLastAddSenderAt = PTNowC(); }
+            double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
+            double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
+            if (dx == 0 && dy == 0 && sGetFloat) {
+                dx = sGetFloat(event, 0x04); dy = sGetFloat(event, 0x05);
+            }
+            if (dx == 0 && dy == 0 && sGetFloat) {
+                dx = sGetFloat(event, 0x3B); dy = sGetFloat(event, 0x3C);
+            }
+            if (dx != 0 || dy != 0) {
+                SFeedSample(sender, dx, dy, "addEvent");
+            } else if (type != 11 || sender != 0) {
+                // 全 0：心跳（0x8000000800a15173）或点击键 → 记录最近 sender 供关联，
+                // 不喂会话（点击键由 sendEvent 通道收；心跳在 sendEvent 层不存在）
+                if (sSessActive && sender == sSessSender && PTNowC() - sSessLastAt > 0.15) SFinishSession();
             }
         }
     } @catch (NSException *e) {}
@@ -322,15 +348,21 @@ static void SImpAddEvent(id self, SEL _cmd, void *event) {
 
 static IMP gOrigSendEvent = NULL;
 
-// 通道②：sendEvent 层 —— 翻页器合成触摸（UIKit 层真实坐标）
+// 通道②：sendEvent 层 —— 翻页器合成触摸/hover（UIKit 层真实坐标）
 // 手指（sender=0）放行；翻页器（sender≠0）按坐标增量喂会话
+// sender 溯源失败时用最近 30ms addEvent 层 sender 关联（点击键 addEvent 层必有）
 static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     @try {
-        if (event && sCollectArmed && event.type == UIEventTypeTouches) {
-            uint64_t sender = SSEventSender(event);
-            if (sender != 0) {
+        if (event && sCollectArmed) {
+            UIEventType et = event.type;
+            // touches=0（点击/拖动）、hover=11（鼠标移动=方向键）都收
+            if (et == UIEventTypeTouches || et == (UIEventType)11) {
+                uint64_t sender = SSEventSender(event);
+                if (sender == 0 && sLastAddSenderAt > 0 && PTNowC() - sLastAddSenderAt < 0.03) {
+                    sender = sLastAddSender;   // addEvent 关联兜底
+                }
                 UITouch *t = [event.allTouches anyObject];
-                if (t) {
+                if (sender != 0 && t) {
                     CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:nil];
                     // 上一次该 sender 的触摸坐标（跨事件保留，算增量）
                     static uint64_t sLastSender = 0;
@@ -348,6 +380,8 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                         // 坐标不变 = 点击键（合成触摸按下）
                         SFeedSample(sender, 0, 0, "sendEvent");
                     }
+                } else if (sender == 0 && t) {
+                    SLog(@"sendEvent: 触摸到了但 sender=0（溯源失败，未采集）type=%d", (int)et);
                 }
             }
         }
@@ -1016,7 +1050,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
     // 状态提示：大高度 + 自动换行（内容长时不顶到屏幕边缘，碰边换行）
     self.status = [[UILabel alloc] initWithFrame:CGRectMake(24, h * 0.14, w - 48, h * 0.34)];
-    self.status.text = @"请一直重复按同一个键\n直到提示特征已稳定";
+    self.status.text = @"请切换到任意 App（如番茄小说/备忘录）\n连续按同一个键，直到提示特征已稳定\n再回到本页";
     self.status.numberOfLines = 0;
     self.status.lineBreakMode = NSLineBreakByWordWrapping;
     self.status.textAlignment = NSTextAlignmentCenter;
@@ -1049,7 +1083,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     sLastSampleAt = PTNowC();
     sCollectArmed = YES;   // v1.0.4 原版：进入即 armed（无武装延迟）
     SCollectHook();
-    SLog(@"learn: viewDidLoad 会话已复位，armed=YES");
+    SLog(@"learn: viewDidLoad 会话已复位，armed=YES（App 进程采集已就绪）");
     // 轨迹 overlay（全屏透明，显示最近一次按键的相对位移路径）
     self.traceView = [[UIView alloc] initWithFrame:self.view.bounds];
     self.traceView.userInteractionEnabled = NO;
@@ -1072,13 +1106,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.navigationController popViewControllerAnimated:YES];
 }
 
-// 轮询 plist：读走新样本 → 判定；刷新轨迹 overlay
+// 轮询 plist：读走新样本（App 进程采集写回）→ 判定；刷新轨迹 overlay
 - (void)poll {
     [self drawTrace];
     NSMutableDictionary *cfg = PTRead();
     NSArray *samples = cfg[@"learningSamples"] ?: @[];
-    cfg[@"learningSamples"] = @[];   // 清空已读
-    PTWrite(cfg);
+    if (samples.count) {
+        cfg[@"learningSamples"] = @[];   // 只读走非空样本（避免空写覆盖 App 进程刚写入）
+        PTWrite(cfg);
+    }
     if (!samples.count) {
         // 诊断：一直没收到翻页器事件
         if (!self.finished && self.mem.count == 0 && PTNowC() - sLastSampleAt > 1.5) {
@@ -1092,13 +1128,34 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 
 // 画最近一次按键的轨迹（相对位移路径）：起点=屏幕中心绿圈 → 沿线绿点 → 终点红点 + 蓝位移线
+// 数据源：优先 App 进程采集写回的 learningTrace（字符串 "x,y" 相对点）；空则用本地会话轨迹
 - (void)drawTrace {
     for (UIView *v in self.traceView.subviews) [v removeFromSuperview];
     for (CALayer *l in [self.traceView.layer.sublayers copy]) [l removeFromSuperlayer];
-    if (!sTraceHas || !sTracePoints.count) return;
+    NSMutableArray *pts = [NSMutableArray array];
+    BOOL has = NO;
+    double tx = 0, ty = 0;
+    @try {
+        NSArray *lt = PTRead()[@"learningTrace"] ?: @[];
+        if (lt.count) {
+            for (NSString *s in lt) {
+                NSArray *xy = [s componentsSeparatedByString:@","];
+                if (xy.count == 2) {
+                    [pts addObject:[NSValue valueWithCGPoint:CGPointMake([xy[0] doubleValue], [xy[1] doubleValue])]];
+                    tx = [xy[0] doubleValue]; ty = [xy[1] doubleValue];
+                }
+            }
+            has = YES;
+        }
+    } @catch (NSException *e) {}
+    if (!has) {
+        if (!sTraceHas || !sTracePoints.count) return;
+        pts = sTracePoints;
+        tx = sTraceX; ty = sTraceY;
+    }
     CGFloat w = self.traceView.bounds.size.width, h = self.traceView.bounds.size.height;
     CGPoint c = CGPointMake(w / 2, h / 2);
-    CGPoint end = CGPointMake(c.x + sTraceX, c.y + sTraceY);
+    CGPoint end = CGPointMake(c.x + tx, c.y + ty);
     // 位移线：中心 → 终点
     UIBezierPath *path = [UIBezierPath bezierPath];
     [path moveToPoint:c];
