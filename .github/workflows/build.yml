@@ -45,13 +45,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.12-roothide.deb
+          DEB=PageTurner-1.0.13-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.12
-          NOTES=$'PageTurner v1.0.12（roothide 直装）—— 录制日志路径修复（日志这次真的能写出来）\n\n【v1.0.12 改了什么】\n上一版（v1.0.11）日志为空的原因找到了：录制日志写的是 /var/mobile/Documents/PageTurner.log，但 iOS 沙盒只允许 Preferences 进程写自己的容器，外部路径打开必失败（错误被忽略）→ 日志永远空；设置页"日志"页读的也是这个死路径。\n1. 【日志修复】录制日志改写到 Preferences 沙盒容器，设置页"日志"页同步读取 → 现在录完键回去就能看到每个事件的 sender/位移/结算/判重\n2. 录制逻辑仍是 v1.0.4 原版（addEvent 0x23/0x24，无过滤无锚定），没动\n\n【怎么测】\n1. 装 v1.0.12 → 注销 → 重开设置\n2. 设置 → PageTurner → 日志（先看是不是空）\n3. 新建方案 → 新增记录 → 连按同一个键（手指勿碰屏幕）直到稳定 → 返回\n4. 再新增记录录第二个键 —— 如果提示重复，记下提示里的新旧特征对比\n5. 回 设置 → PageTurner → 日志 → 复制，把内容完整发我（关键：第二个键的 sender/dx/dy 到底是什么）'
+          TAG=v1.0.13
+          NOTES=$'PageTurner v1.0.13（roothide 直装）—— 录制日志内存+文件双写（日志页 100% 可见）+ 冲突提示自动换行\n\n【v1.0.13 改了什么】\n1. 【日志双写】日志改为①内存数组（日志页直接显示，不依赖文件系统，绝不会空白）+ ②文件多候选路径（沙盒 Documents → home/Documents → tmp → /var/mobile/Documents，第一个可写的生效并显示实际路径）\n2. 【提示换行】录制页状态提示改为大高度+自动换行，冲突提示长文字碰屏幕边缘自动换行，不再显示不全\n3. 录制逻辑仍是 v1.0.4 原版（addEvent 0x23/0x24，无过滤无锚定），没动\n\n【怎么测】\n1. 装 v1.0.13 → 注销 → 重开设置\n2. 设置 → PageTurner → 日志（应显示"日志路径: ..."）\n3. 新建方案 → 新增记录 → 连按同一个键直到稳定 → 返回\n4. 再新增记录录第二个键 → 提示重复也没关系 → 返回\n5. 回 设置 → PageTurner → 日志 → 复制，把内容完整发我（这次一定有内容：每个键的 sender/dx/dy/phase/dir/dist 全会打出来）'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
             gh release delete "$TAG" --yes || true
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.12" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.13" --notes "$NOTES"
           fi
