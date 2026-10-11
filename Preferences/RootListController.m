@@ -1,5 +1,11 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.18，以真实 v1.0.4 为基底）
+// RootListController.m —— PageTurner 设置页（v1.0.19，以真实 v1.0.4 为基底）
+//
+// v1.0.19：方案页新增【测试区】→ 大白屏测试页（PTTestVC）：
+//   按翻页器按键 → 完整特征匹配（sender+phase+方向±15°+dist 区间）
+//   → PTFakeMetaTouch 注入点触（ptftouch 编入 bundle）→ 大绿点可视化注入位置。
+//   在设置 App 内闭环验证"录特征→匹配→执行→点触"，成功即执行链路 OK。
+//   执行期间 gTestInjecting 放行（防注入触摸再被 hook 递归）；测试防抖 300ms。
 //
 // v1.0.17：整包回滚到用户实测唯一能录多个键的版本
 //   = release v1.0.4（commit 0cd50018）—— 采集逻辑逐字未动：
@@ -36,6 +42,7 @@
 #include <math.h>
 #include <float.h>
 #include <stdarg.h>
+#import "PTFakeMetaTouch.h"
 
 @interface PSViewController (Private)
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier;
@@ -94,6 +101,10 @@
 @end
 
 @interface PTDebugLogVC : PSViewController
+@end
+
+@interface PTTestVC : PSViewController
+@property (nonatomic, strong) NSString *planName;
 @end
 
 // ---------- 工具 ----------
@@ -203,6 +214,186 @@ static void SAppendSample(int phase, double dir, double dist) {
     sLastSampleAt = PTNowC();
 }
 
+// ============================================================
+// 测试模式（v1.0.19 加）：方案页 → 测试区 → 大白屏测试页
+// 在设置 App 内闭环验证"录特征 → 匹配 → 执行动作 → 点触可视化"。
+// 设置 App 里翻页器方向键走 UITouch 会话通道（与学习端同口径），
+// 匹配用完整特征（sender+phase+方向±15°+dist 区间），
+// 执行 = PTFakeMetaTouch 注入 + 大绿点显示注入位置（VolumeKeyTapper 式可视化）。
+// 成功即证明执行链路 OK，无需去目标 App 实测。
+// ============================================================
+static BOOL sTestArmed = NO;          // 测试页打开时置 YES
+static BOOL gTestInjecting = NO;      // 注入保护（防执行触摸再被本 hook 处理）
+static UIView *sTestDot = nil;        // 测试页绿点视图
+static double sLastTestExec = 0;      // 测试防抖
+
+// 匹配（复制 Tweak.xm PTMatchPlan：sender + phase + 方向±15° + dist 区间）
+static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t sender) {
+    NSString *best = nil; double bestScore = DBL_MAX;
+    for (NSDictionary *p in (PTRead()[@"plans"] ?: @[])) {
+        NSDictionary *ft = p[@"feature"]; if (!ft) continue;
+        if (ft[@"sender"]) {
+            unsigned long long s = 0;
+            NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
+            if (![sc scanHexLongLong:&s] || s != sender) continue;
+        }
+        if ([ft[@"phase"] intValue] != phase) continue;
+        double pd = [ft[@"direction"] doubleValue];
+        double d = fabs(fabs(dir - pd)); if (d > 180) d = 360 - d;
+        if (d > 15.0) continue;
+        double lo = 0, hi = 0;
+        if (phase == 1) {
+            lo = [ft[@"distMin"] doubleValue];
+            hi = [ft[@"distMax"] doubleValue];
+            if (dist < lo - 30.0 || dist > hi + 30.0) continue;
+        }
+        double score = d + (phase == 1 ? fabs(dist - (lo + hi) / 2.0) / 100.0 : 0);
+        if (score < bestScore) { bestScore = score; best = p[@"name"]; }
+    }
+    return best;
+}
+
+// 绿点可视化：tap 原地显示；swipe 从起点动画到终点，之后淡出
+static void PTTestShowDot(CGPoint from, CGPoint to, BOOL animate, double dur) {
+    if (!sTestDot) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sTestDot.hidden = NO;
+        sTestDot.alpha = 0.9;
+        sTestDot.center = from;
+        if (animate) {
+            [UIView animateWithDuration:dur animations:^{ sTestDot.center = to; }
+                completion:^(BOOL f) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        sTestDot.alpha = 0; sTestDot.hidden = YES;
+                    });
+                }];
+        } else {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                sTestDot.alpha = 0; sTestDot.hidden = YES;
+            });
+        }
+    });
+}
+
+// 点触注入（复制 Tweak.xm：PTFakeMetaTouch，KIF 合成触摸，与 volumekeytapper 同源）
+static void PTTestTap(CGPoint p, BOOL doubleTap) {
+    UIWindow *w = [UIApplication sharedApplication].keyWindow;
+    if (!w) return;
+    PTTestShowDot(p, p, NO, 0);
+    NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
+    usleep(30000);
+    [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:UITouchPhaseEnded];
+    if (doubleTap) {
+        usleep(120000);
+        PTTestShowDot(p, p, NO, 0);
+        NSInteger pid2 = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
+        usleep(30000);
+        [PTFakeMetaTouch fakeTouchId:pid2 AtPoint:p withTouchPhase:UITouchPhaseEnded];
+    }
+}
+
+static float PTTestGetVolume(void) {
+    @try {
+        id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
+        id v = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:@"AVAudioSessionCategoryAmbient"];
+        return v ? [v floatValue] : 0.5f;
+    } @catch (NSException *e) { return 0.5f; }
+}
+
+static void PTTestSetVolume(float v) {
+    @try {
+        id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
+        [c performSelector:NSSelectorFromString(@"setVolumeTo:forCategory:") withObject:@(v) withObject:@"AVAudioSessionCategoryAmbient"];
+        [c performSelector:NSSelectorFromString(@"setVolumeTo:") withObject:@(v)];
+    } @catch (NSException *e) {}
+}
+
+// 执行单条动作 → 完成后 next()（复制 Tweak.xm PTRunAction 逻辑）
+static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
+    NSString *type = a[@"type"];
+    if ([type isEqualToString:@"tap"]) {
+        CGPoint p = CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]);
+        PTTestTap(p, NO);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
+    } else if ([type isEqualToString:@"doubleTap"]) {
+        CGPoint p = CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]);
+        PTTestTap(p, YES);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
+    } else if ([type isEqualToString:@"swipe"]) {
+        CGPoint from = CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]);
+        CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
+        double dur = [a[@"speed"] doubleValue] ?: 200;
+        PTTestShowDot(from, to, YES, dur / 1000.0);
+        NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
+        int steps = 12;
+        double per = dur / 1000.0 / steps;
+        __block int i = 1;
+        __block void (^step)(void);
+        step = ^(void) {
+            if (i > steps) {
+                [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+                if (next) next();
+                return;
+            }
+            double t = (double)i / steps;
+            CGPoint pp = CGPointMake(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            [PTFakeMetaTouch fakeTouchId:pid AtPoint:pp withTouchPhase:UITouchPhaseMoved];
+            i++;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(per * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
+        };
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.02 * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
+    } else if ([type isEqualToString:@"delay"]) {
+        double ms = [a[@"ms"] doubleValue] ?: 100;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
+    } else if ([type isEqualToString:@"volumeUp"]) {
+        PTTestSetVolume(MIN(1.0, PTTestGetVolume() + 0.0625));
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
+    } else if ([type isEqualToString:@"volumeDown"]) {
+        PTTestSetVolume(MAX(0.0, PTTestGetVolume() - 0.0625));
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
+    } else if ([type isEqualToString:@"muteToggle"]) {
+        static float sTestMuted = -1;
+        if (sTestMuted < 0) { sTestMuted = PTTestGetVolume(); PTTestSetVolume(0); }
+        else { PTTestSetVolume(sTestMuted); sTestMuted = -1; }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
+    } else {
+        if (next) next();
+    }
+}
+
+// 顺序执行方案动作序列（测试防抖 300ms）
+static void PTTestExecPlan(NSString *name) {
+    double now = PTNowC();
+    if (now - sLastTestExec < 0.3) { SLog(@"[测试] 防抖：忽略 %@", name); return; }
+    sLastTestExec = now;
+    NSDictionary *plan = nil;
+    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:name]) { plan = p; break; }
+    if (!plan) return;
+    NSArray *actions = plan[@"actions"] ?: @[];
+    if (!actions.count) { SLog(@"[测试] %@ 无动作，跳过", name); return; }
+    SLog(@"[测试] 命中「%@」，执行 %lu 条动作", name, (unsigned long)actions.count);
+    gTestInjecting = YES;
+    __block int idx = 0;
+    __block void (^runNext)(void);
+    runNext = ^(void) {
+        if (idx >= (int)actions.count) { gTestInjecting = NO; SLog(@"[测试] %@ 序列完成", name); return; }
+        NSDictionary *a = actions[idx++];
+        PTTestRunAction(a, runNext);
+    };
+    runNext();
+}
+
+// 测试模式：Ended 结算 → 匹配 → 执行
+static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender) {
+    NSString *plan = PTTestMatchFeature(phase, dir, dist, sender);
+    if (plan) {
+        SLog(@"[测试] 特征匹配 → 方案「%@」", plan);
+        PTTestExecPlan(plan);
+    } else {
+        SLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f（特征需先录制）", sender, phase, dir, dist);
+    }
+}
+
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
     @try {
         if (sGetType && sGetSender && event) {
@@ -216,7 +407,7 @@ static void SImpAddEvent(id self, SEL _cmd, void *event) {
                     SLog(@"addEvent: type=11 sender=0x%llx armed=%d", sender, sCollectArmed);
                 }
                 sCurSender = sender;
-                if (sCollectArmed) sWindowUntil = PTNowC() + 0.05;
+                if (sCollectArmed || sTestArmed) sWindowUntil = PTNowC() + 0.05;
             }
         }
     } @catch (NSException *e) {}
@@ -225,7 +416,11 @@ static void SImpAddEvent(id self, SEL _cmd, void *event) {
 
 static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     @try {
-        if (sCollectArmed && event && PTNowC() < sWindowUntil) {
+        if (gTestInjecting) {
+            ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
+            return;
+        }
+        if ((sCollectArmed || sTestArmed) && event && PTNowC() < sWindowUntil) {
             NSSet *touches = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
             UITouch *t = [touches anyObject];
             if (t && sGetSender) {
@@ -260,7 +455,8 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                             int phase = (sSessDist < 30.0) ? 0 : 1;
                             double dir = sSessHasMove ? sSessFirstDir : 0;
                             SLog(@"end: dist=%.1f dir=%.1f hasMove=%d → phase=%d", sSessDist, sSessFirstDir, sSessHasMove, phase);
-                            SAppendSample(phase, dir, sSessDist);
+                            if (sTestArmed) PTTestOnEnded(phase, dir, sSessDist, sCurSender);
+                            else SAppendSample(phase, dir, sSessDist);
                         }
                         break;
                     }
@@ -799,7 +995,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 
 #pragma mark UITableView
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return self.actions.count + 1; }
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return self.actions.count + 2; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     static NSString *cid = @"act";
     UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:cid];
@@ -807,16 +1003,25 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (ip.row < (NSInteger)self.actions.count) {
         c.textLabel.text = [NSString stringWithFormat:@"%ld. %@", (long)(ip.row + 1), PTActionText(self.actions[ip.row])];
         c.accessoryType = UITableViewCellAccessoryNone;
-    } else {
+    } else if (ip.row == (NSInteger)self.actions.count) {
         c.textLabel.text = @"＋ 新增映射";
         c.textLabel.textColor = [UIColor systemBlueColor];
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    } else {
+        c.textLabel.text = @"▶ 测试本方案（大白屏 + 绿点点触验证）";
+        c.textLabel.textColor = [UIColor systemGreenColor];
         c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     }
     return c;
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (ip.row >= (NSInteger)self.actions.count) [self addActionMenu];
+    if (ip.row < (NSInteger)self.actions.count) return;
+    if (ip.row == (NSInteger)self.actions.count) { [self addActionMenu]; return; }
+    // 最后一行：测试本方案（大白屏 + 绿点点触验证）
+    PTTestVC *vc = [PTTestVC new];
+    vc.planName = self.planName;
+    [self.navigationController pushViewController:vc animated:YES];
 }
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
     if (ip.row >= (NSInteger)self.actions.count) return nil;
@@ -1238,5 +1443,51 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         message:@"日志已复制到剪贴板，可直接粘贴发送" preferredStyle:UIAlertControllerStyleAlert];
     [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:al animated:YES completion:nil];
+}
+@end
+
+// ============================================================
+// 测试页（v1.0.19 加）：大白屏 + 绿点点触可视化
+// 按翻页器按键 → 匹配方案 → 执行动作 → 绿点显示注入位置
+// ============================================================
+@implementation PTTestVC
+
+- (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
+    self = [super initWithSpecifier:specifier];
+    if (self) self.title = @"测试本方案";
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+
+    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(16, 80, self.view.bounds.size.width - 32, 120)];
+    tip.numberOfLines = 0;
+    tip.textAlignment = NSTextAlignmentCenter;
+    tip.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    tip.text = [NSString stringWithFormat:@"按翻页器按键测试方案「%@」\n\n匹配成功会执行动作序列，\n绿点 = 注入点触的位置\n（点击原地显示；滑动从起点到终点）", self.planName ?: @""];
+    [self.view addSubview:tip];
+
+    // 绿点：全屏可移动的可视化圆点（不拦截触摸）
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 72, 72)];
+    dot.layer.cornerRadius = 36;
+    dot.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.35];
+    dot.layer.borderWidth = 3;
+    dot.layer.borderColor = [UIColor systemGreenColor].CGColor;
+    dot.hidden = YES;
+    dot.userInteractionEnabled = NO;
+    [self.view addSubview:dot];
+
+    sTestDot = dot;
+    sTestArmed = YES;
+    SCollectHook();
+    SLog(@"test: viewDidLoad armed=YES（方案 %@）", self.planName ?: @"");
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    sTestArmed = NO;
+    sTestDot = nil;
 }
 @end
