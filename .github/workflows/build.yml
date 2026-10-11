@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.38-roothide.deb
+          DEB=PageTurner-1.0.39-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.38
-          NOTES=$'PageTurner v1.0.38（roothide 直装）—— 修复新增映射覆盖已有映射的 bug\n\n【v1.0.38 改了什么】\n1. 修复严重 bug：新增映射会覆盖已有第 1 条映射，导致无论新增多少次都只剩 1 条\n   - 根因：新增入口未初始化 editIndex（默认 0），保存逻辑把 editIndex=0 当成\u201c编辑第 0 条\u201d走覆盖分支\n   - 修复：新增入口显式 editIndex=-1；保存逻辑加 editAction 条件双保险（只有编辑模式才覆盖，新增一律追加）\n2. 影响说明：此前被覆盖的旧映射已丢失无法找回，需重新添加\n\n【怎么测】\n1. 方案页 → ＋ 新增记录 → 添加点击/双击/滑动 → 完成\n2. 连续新增 3 条不同映射 → 返回方案页：应显示 3 条，逐条存在不覆盖\n3. 点击已有动作行 → 修改坐标 → 完成：该条被更新、其余条不动\n4. 番茄小说实测正常'
+          TAG=v1.0.39
+          NOTES=$'PageTurner v1.0.39（roothide 直装）—— 滑动 6 参数 + 回滑防惯性 + 修复连按滑动越滑越短\n\n【v1.0.39 改了什么】\n1. 弹起停留上限 500→2000ms；滑动分段上限 48→96（轨迹更丝滑）\n2. 滑动动作新增回滑防惯性（两参数）：回滑距离 backPt（0~10pt，默认 0=不启用）+ 回滑停顿 backMs（0~500ms，默认 80）\n   - backPt>0：滑到终点往回滑 backPt pt（30ms 内）再停 backMs 再弹起——Ended 时刻速度反向，App 不会惯性滑\n   - backPt=0：走原地弹起停留（手动 liftMs）\n3. 修复严重 bug：滑动执行中连按翻页器导致滑动越滑越短（最后只剩 1pt）\n   - 根因：旧滑动被中断时触摸没弹起（悬空）→ 新滑动同 id 重启位置错乱\n   - 修复：执行中按新键 → 旧滑动立即弃置并在最后实际位置干净弹起（触摸复位）→ 新滑动完整执行\n\n【怎么测】\n1. 方案页 → 长按滑动动作 → 动作参数：确认 6 个滑块（按下停留/弹起停留/速度/分段/回滑距离/回滑停顿）\n2. 回滑距离设 2pt、回滑停顿 80ms → 测试：滑动到终点会往回挪一点再弹起，App 不惯性滑\n3. 番茄小说：映射滑动后快速连按翻页器 3~5 次 → 每次滑动距离完整、不再越滑越短、无双动作\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.38" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.39" --notes "$NOTES"
           fi

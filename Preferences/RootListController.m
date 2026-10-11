@@ -1,9 +1,11 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.38）
+// RootListController.m —— PageTurner 设置页（v1.0.39）
 //
-// v1.0.38（修复新增映射覆盖已有映射的 bug）：
-//   1. 新增入口（configAction）显式 vc.editIndex = -1（此前默认 0，保存时误走"覆盖第0条"分支）
-//   2. done 保存加 self.editAction 双保险：仅编辑模式覆盖，新增一律追加
+// v1.0.39（滑动参数上限 + 回滑防惯性，与运行端同步）：
+//   1. 参数页滑动分支：弹起停留上限 500→2000ms、滑动分段上限 48→96
+//   2. 参数页滑动 6 滑块：按下停留/弹起停留/滑动速度/滑动分段/回滑距离(0~10pt)/回滑停顿(0~500ms)
+//   3. 测试区滑动执行：钳制 96；backPt>0 时回滑 backPt pt（30ms 后 Moved）停 backMs 再 Ended
+//   4. 新建滑动动作默认存 backPt=0/backMs=80；编辑保留参数列表加 backPt/backMs
 //
 // v1.0.37（滑动时序参数扩展，与运行端同步）：
 //   1. 动作参数页滑动分支：按下停留 + 弹起停留(liftMs) + 滑动速度 + 滑动分段(steps 默认12)
@@ -507,10 +509,20 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         double durMs = (distT / MAX(speed, 1.0)) * 1000.0;
         if (durMs < 50) durMs = 50;
         // v1.0.37：按下停留/弹起停留/滑动分段 与运行端统一（可调）
+        // v1.0.39：分段上限 96；回滑防惯性——backPt>0 到终点往回滑 backPt pt 再停 backMs 再 Ended
         int holdMs = [a[@"holdMs"] intValue] ?: 20;
         int liftMs = [a[@"liftMs"] intValue] ?: 0;
         int steps = [a[@"steps"] intValue] ?: 12;
-        if (steps < 2) steps = 2; if (steps > 48) steps = 48;
+        if (steps < 2) steps = 2; if (steps > 96) steps = 96;
+        double backPt = [a[@"backPt"] doubleValue];
+        int backMs = [a[@"backMs"] intValue] ?: 80;
+        CGPoint backEnd = to;
+        if (backPt > 0) {
+            double bdx = to.x - from.x, bdy = to.y - from.y;
+            double bd = hypot(bdx, bdy);
+            if (bd > 0.001) backEnd = CGPointMake(to.x - bdx / bd * backPt, to.y - bdy / bd * backPt);
+            else backPt = 0;
+        }
         PTTestShowDot(from, to, YES, durMs / 1000.0);
         NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
         double per = durMs / 1000.0 / steps;
@@ -518,15 +530,31 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         __block void (^step)(void);
         step = ^(void) {
             if (i > steps) {
-                // v1.0.37：弹起停留——到终点后停 liftMs 再 Ended
-                if (liftMs > 0) {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                        [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
-                        if (next) next();
+                if (backPt > 0) {
+                    // v1.0.39：回滑段——30ms 后回滑到 backEnd，停 backMs 再 Ended（与运行端一致）
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                        [PTFakeMetaTouch fakeTouchId:pid AtPoint:backEnd withTouchPhase:UITouchPhaseMoved];
+                        if (backMs > 0) {
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(backMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                                [PTFakeMetaTouch fakeTouchId:pid AtPoint:backEnd withTouchPhase:UITouchPhaseEnded];
+                                if (next) next();
+                            });
+                        } else {
+                            [PTFakeMetaTouch fakeTouchId:pid AtPoint:backEnd withTouchPhase:UITouchPhaseEnded];
+                            if (next) next();
+                        }
                     });
                 } else {
-                    [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
-                    if (next) next();
+                    // v1.0.37：原地弹起停留——到终点后停 liftMs 再 Ended
+                    if (liftMs > 0) {
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                            [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+                            if (next) next();
+                        });
+                    } else {
+                        [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+                        if (next) next();
+                    }
                 }
                 return;
             }
@@ -2128,10 +2156,13 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"x2"] = @(self.dot2.center.x); a[@"y2"] = @(self.dot2.center.y);
         // v1.0.28：speed = 真实速度 pt/s（默认 200）；holdMs = 按下停留（默认 20）
         // v1.0.37：liftMs = 弹起停留（默认 0）；steps = 滑动分段（默认 12）
+        // v1.0.39：backPt = 回滑距离（默认 0 不启用）；backMs = 回滑停顿（默认 80）
         a[@"speed"] = @(200);
         a[@"holdMs"] = @(20);
         a[@"liftMs"] = @(0);
         a[@"steps"] = @(12);
+        a[@"backPt"] = @(0);
+        a[@"backMs"] = @(80);
     } else if ([self.actionType isEqualToString:@"doubleTap"]) {
         a[@"type"] = @"doubleTap";
         a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
@@ -2143,9 +2174,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
         a[@"pressMs"] = @(30);
     }
-    // v1.0.29 编辑模式：保留原时序参数（pressMs/gapMs/speed/holdMs/liftMs/steps/ms），只更新坐标
+    // v1.0.29 编辑模式：保留原时序参数（pressMs/gapMs/speed/holdMs/liftMs/steps/backPt/backMs/ms），只更新坐标
     if (self.editIndex >= 0 && self.editAction) {
-        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"liftMs", @"steps", @"ms"]) {
+        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"liftMs", @"steps", @"backPt", @"backMs", @"ms"]) {
             if (self.editAction[k]) a[k] = self.editAction[k];
         }
     }
@@ -2194,10 +2225,13 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
                   @{@"key": @"gapMs", @"name": @"两次间隔", @"unit": @"ms", @"min": @50, @"max": @800, @"def": @120} ];
     } else if ([type isEqualToString:@"swipe"]) {
         // v1.0.37：弹起停留（liftMs）+ 滑动分段（steps）与按下停留放一起
+        // v1.0.39：liftMs 上限 500→2000；steps 上限 48→96；新增回滑防惯性两参数（回滑距离/回滑停顿）
         defs = @[ @{@"key": @"holdMs", @"name": @"按下停留", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @20},
-                  @{@"key": @"liftMs", @"name": @"弹起停留", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @0},
+                  @{@"key": @"liftMs", @"name": @"弹起停留", @"unit": @"ms", @"min": @0, @"max": @2000, @"def": @0},
                   @{@"key": @"speed", @"name": @"滑动速度", @"unit": @"pt/s", @"min": @100, @"max": @2000, @"def": @200},
-                  @{@"key": @"steps", @"name": @"滑动分段", @"unit": @"段", @"min": @6, @"max": @48, @"def": @12} ];
+                  @{@"key": @"steps", @"name": @"滑动分段", @"unit": @"段", @"min": @6, @"max": @96, @"def": @12},
+                  @{@"key": @"backPt", @"name": @"回滑距离", @"unit": @"pt", @"min": @0, @"max": @10, @"def": @0},
+                  @{@"key": @"backMs", @"name": @"回滑停顿", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @80} ];
     } else if ([type isEqualToString:@"delay"]) {
         defs = @[ @{@"key": @"ms", @"name": @"延迟时长", @"unit": @"ms", @"min": @50, @"max": @5000, @"def": @100} ];
     } else {
@@ -2215,23 +2249,33 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         NSDictionary *p = defs[i];
         CGFloat y = top + i * 118;
         UILabel *name = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 26)];
-        name.text = [NSString stringWithFormat:@"%@（%@）", p[@"name"], p[@"unit"]];
+        name.text = [NSString stringWithFormat:@"%@%@", p[@"name"],
+            [p[@"type"] isEqualToString:@"switch"] ? @"" : [NSString stringWithFormat:@"（%@）", p[@"unit"]]];
         name.font = [UIFont systemFontOfSize:15];
         [self.view addSubview:name];
-        UILabel *val = [[UILabel alloc] initWithFrame:CGRectMake(20, y + 28, w - 40, 26)];
-        val.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightMedium];
-        val.textAlignment = NSTextAlignmentRight;
-        [self.view addSubview:val];
-        UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(20, y + 58, w - 40, 34)];
-        sl.minimumValue = [p[@"min"] doubleValue];
-        sl.maximumValue = [p[@"max"] doubleValue];
-        double cur = [self.action[p[@"key"]] doubleValue];
-        sl.value = cur > 0 ? cur : [p[@"def"] doubleValue];
-        [self.view addSubview:sl];
-        [self.labels addObject:val];
-        [self.sliders addObject:sl];
-        [sl addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
-        [self changed:sl];
+        if ([p[@"type"] isEqualToString:@"switch"]) {
+            // 参数页通用 switch 支持（v1.0.39 曾用；当前 6 滑块方案无开关项，保留备用）
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(20, y + 4, w - 40, 34)];
+            sw.on = [self.action[p[@"key"]] boolValue] || [p[@"def"] boolValue];
+            [self.view addSubview:sw];
+            [self.labels addObject:[NSNull null]];
+            [self.sliders addObject:sw];
+        } else {
+            UILabel *val = [[UILabel alloc] initWithFrame:CGRectMake(20, y + 28, w - 40, 26)];
+            val.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightMedium];
+            val.textAlignment = NSTextAlignmentRight;
+            [self.view addSubview:val];
+            UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(20, y + 58, w - 40, 34)];
+            sl.minimumValue = [p[@"min"] doubleValue];
+            sl.maximumValue = [p[@"max"] doubleValue];
+            double cur = [self.action[p[@"key"]] doubleValue];
+            sl.value = cur > 0 ? cur : [p[@"def"] doubleValue];
+            [self.view addSubview:sl];
+            [self.labels addObject:val];
+            [self.sliders addObject:sl];
+            [sl addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
+            [self changed:sl];
+        }
     }
 }
 
@@ -2252,7 +2296,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
                 NSMutableDictionary *a = [NSMutableDictionary dictionaryWithDictionary:acts[self.actionIndex]];
                 for (int i = 0; i < (int)self.sliders.count && i < (int)self.paramDefs.count; i++) {
                     NSString *key = self.paramDefs[i][@"key"];
-                    a[key] = @(roundf(((UISlider *)self.sliders[i]).value));
+                    // 开关项写 BOOL，滑块项写数值（switch 支持备用）
+                    if ([self.paramDefs[i][@"type"] isEqualToString:@"switch"]) {
+                        a[key] = @(((UISwitch *)self.sliders[i]).on);
+                    } else {
+                        a[key] = @(roundf(((UISlider *)self.sliders[i]).value));
+                    }
                 }
                 acts[self.actionIndex] = a;
             }
