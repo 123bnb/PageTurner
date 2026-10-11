@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.22-roothide.deb
+          DEB=PageTurner-1.0.23-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.22
-          NOTES=$'PageTurner v1.0.22（roothide 直装）—— 真正修复 ellekit 拒载：删除 dynamic_lookup，恢复 _MSHookMessageEx import\n\n【终极根因（本轮用 deb 拆包二进制级实证）】\n- Makefile 里 -Wl,-undefined,dynamic_lookup 会把 MSHookMessageEx 变成「运行时动态查找」符号，不写入 dylib 的 import 表\n- ellekit/roothide 扫描 dylib 时看不到 _MSHookMessageEx → 判定非 substrate 插件 → 拒载 → 番茄小说进程根本没被注入（/var/mobile/Documents/ 里没有 PageTurner-injected-com.dragon.read.txt 就是证据）\n- 二进制对比实证：TrollCM.dylib 含 _MSHookMessageEx 符号×4；PageTurner 之前 0 次（只剩日志字符串）\n- v1.0.21 用 extern 声明+调用 MSHookMessageEx 没用——符号被 dynamic_lookup 吞掉了\n\n【v1.0.22 改了什么】\n1. 删除 -Wl,-undefined,dynamic_lookup → MSHookMessageEx 正常 import libsubstrate → ellekit 认可注入\n2. 补 -framework IOKit（ptftouch 引用 IOHIDEvent* 5 个 C 函数，删除 dynamic_lookup 后需要显式链接）\n3. 保留：跨沙盒多路径读配置（jbroot 提取）、注入标记文件、命中才吞/未命中放行、会话通道\n\n【怎么测】\n1. 装 v1.0.22 → 注销\n2. Filza 打开 /var/mobile/Documents/ 看有没有 PageTurner-injected-com.dragon.read.txt —— 有 = 注入修复成功！没有 = 发我日志\n3. 设置 → PageTurner → 总开关开 → 指定 App 勾番茄小说 → 打开番茄小说按录过特征的键\n4. 映射点击生效 = 成；翻页器还能翻 = 未命中（发日志）\n5. /var/mobile/Documents/PageTurner.log 完整发我'
+          TAG=v1.0.23
+          NOTES=$'PageTurner v1.0.23（roothide 直装）—— 终极根因修复：Filter 空 {} → ellekit 从不注入任何进程\n\n【三路实证锁定根因（二进制级）】\n- TrollCM deb 拆包：Filter={ Bundles=[com.apple.springboard] } + _MSHookMessageEx×4 → 注入 SpringBoard 成功\n- volumekeytapper Makefile：Filter={ Bundles=[com.apple.UIKit] } + -Wl,-undefined,dynamic_lookup → 注入所有 UIKit App 成功（你实测点击成功）——它带 dynamic_lookup 照样注入！证明 ellekit 判定的是 Filter，不是符号\n- PageTurner before-package 一直写 printf '"'"'{}'"'"'（空 Filter）→ ellekit 跳过，番茄小说从未被注入 → v1.0.1~v1.0.22 全部无效\n\n【v1.0.23 改了什么（全部照抄 volumekeytapper）】\n1. Filter 改为 { Filter = { Bundles = ( "com.apple.UIKit"); }; } → 所有 UIKit App 都会被注入（包括番茄小说）\n2. 恢复 -Wl,-undefined,dynamic_lookup（volumekeytapper 同款，本就不是问题）\n3. MSHookMessageEx 声明补 extern "C"（v1.0.22 链接失败实证：C++ 名字修饰找不到 _MSHookMessageEx）\n4. 新增调试可视化（抄 TrollCM 触摸轨迹）：覆盖窗口绿点+轨迹线，翻页器圆点带 P 标记；显示所有触摸（翻页器+手指+映射执行）；设置→PageTurner→调试可视化 开关\n\n【怎么测】\n1. 装 v1.0.23 → 注销\n2. Filza 打开 /var/mobile/Documents/ 看 PageTurner-injected-com.dragon.read.txt —— 这次应该有了！\n3. 设置 → PageTurner → 总开关开 → 调试可视化开 → 指定 App 勾番茄小说 → 打开番茄小说按录过特征的键\n4. 看绿点轨迹：翻页器 P 点、映射执行的绿点都能看到 = 注入成功\n5. /var/mobile/Documents/PageTurner.log 完整发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.22" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.23" --notes "$NOTES"
           fi
