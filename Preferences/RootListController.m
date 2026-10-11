@@ -126,18 +126,25 @@ static double PTNowC(void) {
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
-// 录制端日志（写 /var/mobile/Documents/PageTurner.log，目录自动创建）——
-// Preferences 进程此前完全没有日志，"录不到/重复录入"只能靠这个定位
+// 录制端日志（写本进程沙盒容器 Documents/PageTurner.log）——
+// 注意：绝对不能写 /var/mobile/Documents —— iOS 沙盒只允许 Preferences
+// 进程写自己的容器，外部路径打开必失败（错误被忽略 → 日志永远空）。
+// 本进程容器 = NSHomeDirectory()/Documents，可写可读。
+static NSString *PTLogPath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/PageTurner.log"];
+}
 static void SLog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:@"/var/mobile/Documents"]) {
-        [fm createDirectoryAtPath:@"/var/mobile/Documents" withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *path = PTLogPath();
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    if (![fm fileExistsAtPath:dir]) {
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     }
     NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@"/var/mobile/Documents/PageTurner.log"];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
     if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; } @catch (NSException *e) {} }
 }
 
@@ -1300,7 +1307,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
         style:UIBarButtonItemStyleDone target:self action:@selector(copyLog)];
 
-    NSString *path = @"/var/mobile/Documents/PageTurner.log";
+    NSString *path = PTLogPath();
     NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (content.length) {
         NSArray *lines = [content componentsSeparatedByString:@"\n"];
@@ -1309,7 +1316,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         NSArray *tail = [lines subarrayWithRange:NSMakeRange(from, n - from)];
         tv.text = [tail componentsJoinedByString:@"\n"];
     } else {
-        tv.text = @"日志为空。\n\n开启首页「调试模式」后重开 App，翻页器相关拦截/特征/匹配/执行日志会写入此文件。";
+        tv.text = @"日志为空。\n\n这是【录制端日志】（设置 App 内录特征时的全链路日志）。\n打开「新增记录」并按翻页器键后，回到这里刷新即可看到每次事件的 sender/位移/结算/判重。";
     }
 }
 
