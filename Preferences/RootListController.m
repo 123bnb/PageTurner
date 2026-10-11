@@ -1,5 +1,13 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.35）
+// RootListController.m —— PageTurner 设置页（v1.0.36）
+//
+// v1.0.36（点击特征位移矢量匹配）：
+//   1. 点击样本新增 tapDx（位移方向符号 +1右/-1左/0原地）：会话起点 sSessStart 记录，
+//      Ended 时按 x 分量方向计算；学习页显示「位移：向右 0.4 pt」不再笼统"无滑动"
+//   2. 点击特征匹配/去重启用位移判定：tapDx 方向符号一致 + dist 区间（容差 kTapDistSlack=0.15pt）
+//      ——解决同 sender 双点击键（如 0.4 右 / 0.7 左）被误判重复的问题
+//   3. 录制保存：onStable/judgeOnce 点击存 tapDx + distMin/distMax（正常录与增加特征都支持）
+//   4. 旧特征无 tapDx/distMin → 自动跳过新检查（兼容）
 //
 // v1.0.35（设置页风格统一）：
 //   1. 各子页背景 systemBackgroundColor → systemGroupedBackgroundColor
@@ -212,6 +220,9 @@
 static NSString *PT_PREFS = @"/var/mobile/Library/Preferences/com.yourname.pageturner.plist";
 static const double kDirTol = 15.0;     // 方向容差
 static const double kDistSlack = 30.0;  // 位移匹配裕度
+// v1.0.36：点击位移区间容差 / 方向判定阈值（区分 0.4/0.7 这类微小位移点击键）
+static const double kTapDistSlack = 0.15;
+static const double kTapDxThresh = 0.05;
 static const int kLearnMin = 5;         // 下限
 static const int kLearnMax = 15;        // 上限
 static const double kConverge = 60.0;   // 位移收敛
@@ -333,21 +344,23 @@ static BOOL sSessActive = NO;
 static double sSessDist = 0, sSessFirstDir = 0;
 static BOOL sSessHasMove = NO;
 static CGPoint sSessLast = {0, 0};
+static CGPoint sSessStart = {0, 0};   // v1.0.36：会话起点（算点击位移方向符号）
 static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊断用）
 static IMP gOrigAddEvent = NULL;
 static IMP gOrigSendEvent = NULL;
 
-static void SAppendSample(int phase, double dir, double dist) {
+static void SAppendSample(int phase, double dir, double dist, int tapDx) {
     NSMutableDictionary *cfg = PTRead();
     if (![cfg[@"learning"][@"active"] boolValue]) return;
     NSMutableArray *samples = [NSMutableArray arrayWithArray:cfg[@"learningSamples"] ?: @[]];
     [samples addObject:@{
         @"sender": [NSString stringWithFormat:@"0x%llx", sCurSender],
         @"phase": @(phase), @"direction": @(dir), @"dist": @(dist),
+        @"tapDx": @(tapDx),   // v1.0.36：点击位移方向符号（+1/-1/0）
     }];
     cfg[@"learningSamples"] = samples;
     PTWrite(cfg);
-    SLog(@"sample: sender=0x%llx phase=%d dir=%.1f dist=%.1f (总数%lu)", sCurSender, phase, dir, dist, (unsigned long)samples.count);
+    SLog(@"sample: sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d (总数%lu)", sCurSender, phase, dir, dist, tapDx, (unsigned long)samples.count);
     sLastSampleAt = PTNowC();
 }
 
@@ -373,7 +386,8 @@ static NSArray *PTFeaturesOfPlan(NSDictionary *p) {
 }
 
 // 匹配（复制 Tweak.xm PTMatchPlan：sender + phase + 方向±15° + dist 区间）
-static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t sender) {
+// v1.0.36：点击也启用位移匹配（tapDx 方向符号 + dist 区间小容差）
+static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t sender, int tapDx) {
     NSString *best = nil; double bestScore = DBL_MAX;
     for (NSDictionary *p in (PTRead()[@"plans"] ?: @[])) {
         for (NSDictionary *ft in PTFeaturesOfPlan(p)) {
@@ -391,6 +405,15 @@ static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t
                 lo = [ft[@"distMin"] doubleValue];
                 hi = [ft[@"distMax"] doubleValue];
                 if (dist < lo - 30.0 || dist > hi + 30.0) continue;
+            } else {
+                if (ft[@"tapDx"]) {
+                    if (tapDx != [ft[@"tapDx"] intValue]) continue;
+                }
+                if (ft[@"distMin"]) {
+                    lo = [ft[@"distMin"] doubleValue];
+                    hi = [ft[@"distMax"] doubleValue];
+                    if (dist < lo - kTapDistSlack || dist > hi + kTapDistSlack) continue;
+                }
             }
             double score = d + (phase == 1 ? fabs(dist - (lo + hi) / 2.0) / 100.0 : 0);
             if (score < bestScore) { bestScore = score; best = p[@"name"]; }
@@ -535,20 +558,21 @@ static void PTTestExecPlan(NSString *name) {
 }
 
 // 测试模式：Ended 结算 → 匹配 → 执行
-static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender) {
-    NSString *plan = PTTestMatchFeature(phase, dir, dist, sender);
+// v1.0.36：加 tapDx（点击位移方向符号）
+static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender, int tapDx) {
+    NSString *plan = PTTestMatchFeature(phase, dir, dist, sender, tapDx);
     if (plan) {
         SLog(@"[测试] 特征匹配 → 方案「%@」", plan);
         PTTestExecPlan(plan);
         NSDictionary *pp = nil;
         for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:plan]) { pp = p; break; }
         // v1.0.33：命中日志加特征细节（sender/相位/方向/位移），与未命中格式一致
-        [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作（sender=0x%llx phase=%d dir=%.1f dist=%.1f）",
-            plan, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0), sender, phase, dir, dist]];
+        [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作（sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d）",
+            plan, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0), sender, phase, dir, dist, tapDx]];
     } else {
-        SLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f（特征需先录制）", sender, phase, dir, dist);
-        [sTestLogSink appendLog:[NSString stringWithFormat:@"✗ 未命中（放行）：sender=0x%llx phase=%d dir=%.1f dist=%.1f",
-            sender, phase, dir, dist]];
+        SLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d（特征需先录制）", sender, phase, dir, dist, tapDx);
+        [sTestLogSink appendLog:[NSString stringWithFormat:@"✗ 未命中（放行）：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d",
+            sender, phase, dir, dist, tapDx]];
     }
     // v1.0.29：测试页画调试可视化同款轨迹（翻页器按键真实轨迹，命中与否都画）
     [sTestLogSink drawTrailWithDirection:dir dist:dist phase:phase];
@@ -592,6 +616,7 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                     case UITouchPhaseBegan: {
                         sSessActive = YES; sSessDist = 0; sSessHasMove = NO; sSessFirstDir = 0;
                         sSessLast = p;
+                        sSessStart = p;   // v1.0.36：记录会话起点
                         break;
                     }
                     case UITouchPhaseMoved: {
@@ -614,9 +639,15 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                             sSessActive = NO;
                             int phase = (sSessDist < 30.0) ? 0 : 1;
                             double dir = sSessHasMove ? sSessFirstDir : 0;
-                            SLog(@"end: dist=%.1f dir=%.1f hasMove=%d → phase=%d", sSessDist, sSessFirstDir, sSessHasMove, phase);
-                            if (sTestArmed) PTTestOnEnded(phase, dir, sSessDist, sCurSender);
-                            else SAppendSample(phase, dir, sSessDist);
+                            // v1.0.36：点击位移方向符号（x 分量，起点→终点）
+                            int tapDx = 0;
+                            {
+                                double dxv = p.x - sSessStart.x;
+                                tapDx = (dxv > kTapDxThresh) ? 1 : (dxv < -kTapDxThresh ? -1 : 0);
+                            }
+                            SLog(@"end: dist=%.1f dir=%.1f hasMove=%d → phase=%d tapDx=%d", sSessDist, sSessFirstDir, sSessHasMove, phase, tapDx);
+                            if (sTestArmed) PTTestOnEnded(phase, dir, sSessDist, sCurSender, tapDx);
+                            else SAppendSample(phase, dir, sSessDist, tapDx);
                         }
                         break;
                     }
@@ -672,11 +703,13 @@ static NSString *PTActionText(NSDictionary *a) {
 }
 
 // 与已有特征去重（v1.0.34：遍历方案所有特征）：同 sender + 同相位 + 方向接近 + 位移接近 → 返回方案名
+// v1.0.36：点击也检查 tapDx（位移方向符号）+ dist 区间（小容差）
 static NSString *PTDuplicate(NSDictionary *s, NSArray *plans) {
     NSString *snd = s[@"sender"];
     int phase = [s[@"phase"] intValue];
     double dir = [s[@"direction"] doubleValue];
     double dist = [s[@"dist"] doubleValue];
+    int tapDx = [s[@"tapDx"] intValue];
     for (NSDictionary *p in plans) {
         for (NSDictionary *ft in PTFeaturesOfPlan(p)) {
             if (![ft[@"sender"] isEqualToString:snd]) continue;
@@ -687,6 +720,13 @@ static NSString *PTDuplicate(NSDictionary *s, NSArray *plans) {
             if (phase == 1) {
                 double lo = [ft[@"distMin"] doubleValue], hi = [ft[@"distMax"] doubleValue];
                 if (dist < lo - kDistSlack || dist > hi + kDistSlack) continue;
+            } else {
+                // v1.0.36：点击去重——方向符号不同不算重复；位移区间小容差
+                if (ft[@"tapDx"] && tapDx != [ft[@"tapDx"] intValue]) continue;
+                if (ft[@"distMin"]) {
+                    double lo = [ft[@"distMin"] doubleValue], hi = [ft[@"distMax"] doubleValue];
+                    if (dist < lo - kTapDistSlack || dist > hi + kTapDistSlack) continue;
+                }
             }
             return p[@"name"];
         }
@@ -1395,8 +1435,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSString *ph = phase == 0 ? @"点击" : [NSString stringWithFormat:@"滑动%@", PTDirName([ft[@"direction"] doubleValue])];
     c.textLabel.text = [NSString stringWithFormat:@"特征%ld  %@  sender=%@", (long)(ip.row + 1), ph, snd];
     if (phase == 0) {
-        c.detailTextLabel.text = [NSString stringWithFormat:@"方向 %.0f° · 无位移 · 录 %d 次",
-            [ft[@"direction"] doubleValue], [ft[@"recordCount"] intValue]];
+        // v1.0.36：点击显示位移方向 + 大小
+        int dx = [ft[@"tapDx"] intValue];
+        NSString *dxs = dx > 0 ? @"向右" : (dx < 0 ? @"向左" : @"原地");
+        c.detailTextLabel.text = [NSString stringWithFormat:@"%@ %@ %.1f pt · 录 %d 次", dxs,
+            PTDirName([ft[@"direction"] doubleValue]), [ft[@"distMin"] doubleValue], [ft[@"recordCount"] intValue]];
     } else {
         c.detailTextLabel.text = [NSString stringWithFormat:@"方向 %.0f° · 位移 %.0f~%.0f pt · 录 %d 次",
             [ft[@"direction"] doubleValue], [ft[@"distMin"] doubleValue], [ft[@"distMax"] doubleValue],
@@ -1417,8 +1460,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSString *ph = phase == 0 ? @"点击" : [NSString stringWithFormat:@"滑动%@", PTDirName([ft[@"direction"] doubleValue])];
     NSString *detail;
     if (phase == 0) {
-        detail = [NSString stringWithFormat:@"类型：%@\n来源：%@\n方向：%.0f°\n无位移（点击）\n录制样本：%d 次",
-            ph, snd, [ft[@"direction"] doubleValue], [ft[@"recordCount"] intValue]];
+        // v1.0.36：点击详情显示位移方向 + 大小
+        int dx = [ft[@"tapDx"] intValue];
+        NSString *dxs = dx > 0 ? @"向右" : (dx < 0 ? @"向左" : @"原地");
+        detail = [NSString stringWithFormat:@"类型：%@\n来源：%@\n位移：%@ %.1f pt\n录制样本：%d 次",
+            ph, snd, dxs, [ft[@"distMin"] doubleValue], [ft[@"recordCount"] intValue]];
     } else {
         detail = [NSString stringWithFormat:@"类型：%@\n来源：%@\n方向：%.0f°\n位移：%.0f ~ %.0f pt\n录制样本：%d 次",
             ph, snd, [ft[@"direction"] doubleValue], [ft[@"distMin"] doubleValue], [ft[@"distMax"] doubleValue],
@@ -1580,7 +1626,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         self.countLabel.text = [NSString stringWithFormat:@"已录：%d 次（来源 %@）", count, sender];
         self.dirLabel.text = [NSString stringWithFormat:@"方向：%@（%.0f°）", PTDirName(dir), dir];
         if ([s[@"phase"] intValue] == 1) self.distLabel.text = [NSString stringWithFormat:@"位移：%.0f pt", dist];
-        else self.distLabel.text = @"位移：点击（无滑动）";
+        else {
+            // v1.0.36：点击显示位移方向 + 大小（不再笼统显示"无滑动"）
+            int dx = [s[@"tapDx"] intValue];
+            NSString *dxs = dx > 0 ? @"向右" : (dx < 0 ? @"向左" : @"原地");
+            self.distLabel.text = [NSString stringWithFormat:@"位移：%@ %.1f pt", dxs, dist];
+        }
         [self appendLog:[NSString stringWithFormat:@"✓ 增强 %d 次  sender=%@ phase=%d dir=%.1f° dist=%.1f",
             count, sender, [s[@"phase"] intValue], dir, dist]];
         [self drawTrailWithDirection:dir dist:dist phase:[s[@"phase"] intValue]];
@@ -1626,7 +1677,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.countLabel.text = [NSString stringWithFormat:@"已录：%d 次（来源 %@）", count, sender];
     self.dirLabel.text = [NSString stringWithFormat:@"方向：%@（%.0f°）", PTDirName(dir), dir];
     if ([s[@"phase"] intValue] == 1) self.distLabel.text = [NSString stringWithFormat:@"位移：%.0f pt", dist];
-    else self.distLabel.text = @"位移：点击（无滑动）";
+    else {
+        // v1.0.36：点击显示位移方向 + 大小
+        int dx = [s[@"tapDx"] intValue];
+        NSString *dxs = dx > 0 ? @"向右" : (dx < 0 ? @"向左" : @"原地");
+        self.distLabel.text = [NSString stringWithFormat:@"位移：%@ %.1f pt", dxs, dist];
+    }
     [self appendLog:[NSString stringWithFormat:@"✓ 已录 %d 次  sender=%@ phase=%d dir=%.1f° dist=%.1f",
         count, sender, [s[@"phase"] intValue], dir, dist]];
     // v1.0.29：每次按键画调试可视化同款轨迹（方向线 + 绿点 + P 标记）
@@ -1665,6 +1721,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     ft[@"direction"] = s[@"direction"];
     double d = [s[@"dist"] doubleValue];
     if ([s[@"phase"] intValue] == 1) { ft[@"distMin"] = @(d); ft[@"distMax"] = @(d); }
+    else {
+        // v1.0.36：点击也存位移区间 + 方向符号（区分同 sender 的多个点击键）
+        ft[@"distMin"] = @(d); ft[@"distMax"] = @(d);
+        ft[@"tapDx"] = s[@"tapDx"] ?: @0;
+    }
     ft[@"recordCount"] = @(1);
     self.readyFt = ft;
     self.finished = YES;
@@ -1673,7 +1734,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.countLabel.text = [NSString stringWithFormat:@"已记录：第 %d 次（来源 %@，以最后为准）", self.onceCount, sender];
     self.dirLabel.text = [NSString stringWithFormat:@"方向：%@（%.0f°）", PTDirName(dir), dir];
     if ([s[@"phase"] intValue] == 1) self.distLabel.text = [NSString stringWithFormat:@"位移：%.0f pt", d];
-    else self.distLabel.text = @"位移：点击（无滑动）";
+    else {
+        // v1.0.36：点击显示位移方向 + 大小
+        int dx = [s[@"tapDx"] intValue];
+        NSString *dxs = dx > 0 ? @"向右" : (dx < 0 ? @"向左" : @"原地");
+        self.distLabel.text = [NSString stringWithFormat:@"位移：%@ %.1f pt", dxs, d];
+    }
     [self appendLog:[NSString stringWithFormat:@"✓ 记录 %d 次（覆盖上一条）  sender=%@ phase=%d dir=%.1f° dist=%.1f",
         self.onceCount, sender, [s[@"phase"] intValue], dir, d]];
     [self drawTrailWithDirection:dir dist:d phase:[s[@"phase"] intValue]];
@@ -1702,10 +1768,21 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     ft[@"direction"] = @(dir);
     ft[@"distMin"] = @(lo);
     ft[@"distMax"] = @(hi);
+    // v1.0.36：点击特征记录位移方向符号（用最后一次样本；点击方向稳定）
+    if (phase == 0) {
+        int lastDx = 0;
+        for (NSDictionary *m in self.mem) if ([m[@"sender"] isEqualToString:sender]) lastDx = [m[@"tapDx"] intValue];
+        ft[@"tapDx"] = @(lastDx);
+    }
     ft[@"recordCount"] = @([self countForSender:sender]);
     self.readyFt = ft;
     // v1.0.29：稳定后不弹框——背景绿色提示，你自己按够了点右上角「保存」；名字以后再改
-    self.status.text = [NSString stringWithFormat:@"✅ 特征已稳定\n来源 %@｜方向 %@｜位移 %.0f~%.0f pt\n\n点右上角「保存」完成录制", sender, PTDirName(dir), lo, hi];
+    if (phase == 0) {
+        NSString *dxs = ([ft[@"tapDx"] intValue] > 0) ? @"向右" : (([ft[@"tapDx"] intValue] < 0) ? @"向左" : @"原地");
+        self.status.text = [NSString stringWithFormat:@"✅ 特征已稳定\n来源 %@｜%@ %@｜位移 %.1f~%.1f pt\n\n点右上角「保存」完成录制", sender, dxs, PTDirName(dir), lo, hi];
+    } else {
+        self.status.text = [NSString stringWithFormat:@"✅ 特征已稳定\n来源 %@｜方向 %@｜位移 %.0f~%.0f pt\n\n点右上角「保存」完成录制", sender, PTDirName(dir), lo, hi];
+    }
     self.status.textColor = [UIColor whiteColor];
     self.view.backgroundColor = [UIColor systemGreenColor];
     // v1.0.31：深色模式适配——日志底改系统次级背景（绿底上白字保持）
@@ -1713,7 +1790,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.navigationItem.rightBarButtonItem.enabled = YES;
     // v1.0.30（用户问题1）：稳定后不暂停收集——你还能继续按同一个键增强特征，
     // 按够了再点右上角「保存」；保存时用最新样本重算位移区间
-    SLog(@"learn: 特征已稳定（不弹框），可继续录或点右上角保存 sender=%@ phase=%d dir=%.1f dist=%.0f~%.0f", sender, phase, dir, lo, hi);
+    SLog(@"learn: 特征已稳定（不弹框），可继续录或点右上角保存 sender=%@ phase=%d dir=%.1f dist=%.0f~%.0f tapDx=%d", sender, phase, dir, lo, hi, [ft[@"tapDx"] intValue]);
 }
 
 // v1.0.29：右上角保存——默认名「新方案N」（N 跳过重名），保存后回记录与映射列表

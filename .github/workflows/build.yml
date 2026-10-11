@@ -1,4 +1,4 @@
-name: Build PageTurner
+﻿name: Build PageTurner
 
 on:
   push:
@@ -45,10 +45,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.35-roothide.deb
+          DEB=PageTurner-1.0.36-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.35
-          NOTES=$'PageTurner v1.0.35（roothide 直装）—— 设置页风格统一（灰分组背景 + 方案名白卡片）\n\n【v1.0.35 改了什么】\n1. 记录与映射往里的页面（方案列表/方案页/特征列表/App列表/防抖/动作设置/调试日志）背景从纯白改成系统灰分组背景，与插件主设置页一致；列表行变白底卡片（系统设置风格）\n2. 方案页方案名：改成白底圆角卡片样式（像输入框），点它弹框改名\n3. 学习页/测试页保留大白屏（录特征/看轨迹需要干净背景）\n4. 方案页蓝/橙大按钮保留（醒目）\n\n【怎么测】\n1. 装 v1.0.35 → 注销 → 设置 → PageTurner → 记录与映射各页面：背景应为灰色分组风格，方案名是白卡片\n2. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.36
+          NOTES=$'PageTurner v1.0.36（roothide 直装）—— 点击特征启用位移矢量匹配（区分同 sender 的双点击键）\n\n【v1.0.36 改了什么】\n1. 点击特征新增 tapDx（位移方向符号：向右/向左/原地）：会话按起点→终点 x 分量计算，录制页显示「位移：向右 0.4 pt」\n2. 点击匹配/去重启用位移判定：方向符号一致 + 位移区间（容差 0.15pt）——解决新 2 键翻页器（两键同 sender 0x1000786aa、位移仅 0.4/0.7 pt）第二键被误判「与已有方案高度相似」录不进的问题\n3. 正常录制与「增加特征」都保存点击位移；旧特征无 tapDx 自动按旧规则匹配（兼容不误伤）\n4. 特征列表与详情显示点击位移方向+大小\n\n【怎么测】\n1. 设置 → PageTurner → 记录与映射 → 学习：分别录新翻页器 0.4 键（右移）和 0.7 键（左移）两个方案，第二键不再被拒录\n2. 方案页测试：按 0.4 键命中方案 A、按 0.7 键命中方案 B，互不串\n3. 番茄小说实测：两个键各自触发各自映射、原翻页器动作被吞\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else

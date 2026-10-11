@@ -1,5 +1,11 @@
 // ============================================================
-// PageTurner v1.0.34 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.36 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.36（点击特征位移矢量匹配）：
+//   点击样本/特征新增 tapDx（位移方向符号 +1右/-1左/0原地）：
+//   会话 Ended 按起点→终点 x 分量方向计算；PTMatchPlan 点击分支检查
+//   tapDx 一致 + dist 区间（kTapDistSlack=0.15pt）——区分同 sender 的双点击键
+//   （设置页 0.4 右 / 0.7 左 实测）；旧特征无 tapDx 自动兼容。
 //
 // v1.0.34（多特征方案）：
 //   方案特征集合 feature(单条) → features[] 数组（兼容旧格式自动迁移）：
@@ -125,6 +131,8 @@ static const double kPagerWindowSec = 0.4;       // v1.0.30：窗口 0.4s——�
 static const double kTapDistThreshold = 30.0;    // 位移 <30pt 判定 tap
 static const double kDirTolerance = 15.0;        // 方向容差 ±15°
 static const double kDistSlack = 30.0;           // 位移区间匹配裕度
+static const double kTapDistSlack = 0.15;        // v1.0.36：点击位移区间容差（pt，用于区分 0.4/0.7 这类微小位移点击键）
+static const double kTapDxThresh = 0.05;         // v1.0.36：点击位移方向判定阈值（|dx|>0.05 才算有方向）
 
 // ============================================================
 // 日志
@@ -341,6 +349,7 @@ typedef struct {
     int phase;        // 0=tap 1=swipe
     double direction;
     double dist;
+    int tapDx;        // v1.0.36：点击位移方向符号（+1 右 / -1 左 / 0 不动）——区分同 sender 的多个点击键
 } PagerFeature;
 
 static void PTExecutePlan(NSString *name);                    // 前向声明（动作执行段定义）
@@ -376,6 +385,7 @@ static void PTAppendLearnSample(PagerFeature f, uint64_t sender) {
         @"phase": @(f.phase),
         @"direction": @(f.direction),
         @"dist": @(f.dist),
+        @"tapDx": @(f.tapDx),   // v1.0.36：点击位移方向符号
     }];
     cfg[@"learningSamples"] = samples;
     PTWriteFileRaw(cfg);
@@ -405,6 +415,16 @@ static NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
                 lo = [ft[@"distMin"] doubleValue];
                 hi = [ft[@"distMax"] doubleValue];
                 if (f.dist < lo - kDistSlack || f.dist > hi + kDistSlack) continue;
+            } else {
+                // v1.0.36：点击也启用位移匹配——方向符号 + 位移区间（微小容差）
+                if (ft[@"tapDx"]) {
+                    if (f.tapDx != [ft[@"tapDx"] intValue]) continue;
+                }
+                if (ft[@"distMin"]) {
+                    lo = [ft[@"distMin"] doubleValue];
+                    hi = [ft[@"distMax"] doubleValue];
+                    if (f.dist < lo - kTapDistSlack || f.dist > hi + kTapDistSlack) continue;
+                }
             }
             double score = d + (f.phase == 1 ? fabs(f.dist - (lo + hi) / 2.0) / 100.0 : 0);
             if (score < bestScore) { bestScore = score; best = name; }
@@ -463,6 +483,12 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {    if (![event respondsToSelect
             f.phase = (gSession.totalDist < kTapDistThreshold) ? 0 : 1;
             f.direction = gSession.hasMove ? gSession.firstMoveDir : 0;
             f.dist = gSession.totalDist;
+            // v1.0.36：点击位移方向符号（用整段位移的 x 分量方向；start=Began 起点）
+            {
+                double sx = gSession.start.x, ex = p.x;
+                double dxv = ex - sx;
+                f.tapDx = (dxv > kTapDxThresh) ? 1 : (dxv < -kTapDxThresh ? -1 : 0);
+            }
             if (gIsPreferences && gLearnActive) {
                 PTAppendLearnSample(f, gCurSender);
                 gSessTrail = nil;
@@ -975,7 +1001,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.34 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.36 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
