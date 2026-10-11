@@ -126,26 +126,51 @@ static double PTNowC(void) {
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
-// 录制端日志（写本进程沙盒容器 Documents/PageTurner.log）——
-// 注意：绝对不能写 /var/mobile/Documents —— iOS 沙盒只允许 Preferences
-// 进程写自己的容器，外部路径打开必失败（错误被忽略 → 日志永远空）。
-// 本进程容器 = NSHomeDirectory()/Documents，可写可读。
-static NSString *PTLogPath(void) {
-    return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/PageTurner.log"];
-}
+// 录制端日志（内存 + 文件双写）——
+// ① 内存数组：日志页直接显示，不依赖文件系统，100% 可见
+// ② 文件：从多个候选路径里挑第一个可写的（不同 iOS 环境 NSHomeDirectory()
+//    返回值不同，有的返回 /var/mobile 导致写失败 —— 逐个尝试，总能找到一个）
+static NSMutableArray *sLogLines = nil;   // 内存日志（本次进程会话）
+static NSString *sLogPath = nil;          // 实际可写的文件路径（nil=所有候选都失败）
 static void SLog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *path = PTLogPath();
-    NSString *dir = [path stringByDeletingLastPathComponent];
-    if (![fm fileExistsAtPath:dir]) {
-        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *line = [NSString stringWithFormat:@"%@ %@", [NSDate date], msg];
+    // ① 内存（永不失败）
+    if (!sLogLines) sLogLines = [NSMutableArray array];
+    [sLogLines addObject:line];
+    if (sLogLines.count > 500) {
+        [sLogLines removeObjectsInRange:NSMakeRange(0, sLogLines.count - 500)];
     }
-    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; } @catch (NSException *e) {} }
+    // ② 文件：首次调用时探测可写路径
+    if (!sLogPath) {
+        NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docDir = docs.count ? docs.firstObject : nil;
+        NSArray *cands = @[
+            docDir.length ? [docDir stringByAppendingPathComponent:@"PageTurner.log"] : @"",
+            [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/PageTurner.log"],
+            [NSTemporaryDirectory() stringByAppendingPathComponent:@"PageTurner.log"],
+            @"/var/mobile/Documents/PageTurner.log",
+        ];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *p in cands) {
+            if (!p.length) continue;
+            NSString *parent = [p stringByDeletingLastPathComponent];
+            if (![fm fileExistsAtPath:parent]) {
+                [fm createDirectoryAtPath:parent withIntermediateDirectories:YES attributes:nil error:nil];
+            }
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
+            if (fh) { [fh closeFile]; sLogPath = p; break; }
+        }
+        if (!sLogPath) {
+            [sLogLines addObject:[NSString stringWithFormat:@"%@ [SLog] ⚠️ 所有候选路径都不可写（仅内存日志）", line]];
+            return;
+        }
+        [sLogLines addObject:[NSString stringWithFormat:@"%@ [SLog] 日志文件: %@", line, sLogPath]];
+    }
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
+    if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; } @catch (NSException *e) {} }
 }
 
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
@@ -903,11 +928,13 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.mem = [NSMutableArray array];
 
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-    self.status = [[UILabel alloc] initWithFrame:CGRectMake(24, h * 0.22, w - 48, 60)];
+    // 状态提示：大高度 + 自动换行（内容长时不顶到屏幕边缘，碰边换行）
+    self.status = [[UILabel alloc] initWithFrame:CGRectMake(24, h * 0.14, w - 48, h * 0.34)];
     self.status.text = @"请一直重复按同一个键\n直到提示特征已稳定";
     self.status.numberOfLines = 0;
+    self.status.lineBreakMode = NSLineBreakByWordWrapping;
     self.status.textAlignment = NSTextAlignmentCenter;
-    self.status.font = [UIFont systemFontOfSize:20 weight:UIFontWeightMedium];
+    self.status.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
     [self.view addSubview:self.status];
 
     self.countLabel = [[UILabel alloc] initWithFrame:CGRectMake(24, h * 0.4, w - 48, 30)];
@@ -1307,16 +1334,27 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
         style:UIBarButtonItemStyleDone target:self action:@selector(copyLog)];
 
-    NSString *path = PTLogPath();
-    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-    if (content.length) {
-        NSArray *lines = [content componentsSeparatedByString:@"\n"];
-        NSUInteger n = lines.count;
-        NSUInteger from = n > 200 ? n - 200 : 0;
-        NSArray *tail = [lines subarrayWithRange:NSMakeRange(from, n - from)];
-        tv.text = [tail componentsJoinedByString:@"\n"];
-    } else {
-        tv.text = @"日志为空。\n\n这是【录制端日志】（设置 App 内录特征时的全链路日志）。\n打开「新增记录」并按翻页器键后，回到这里刷新即可看到每次事件的 sender/位移/结算/判重。";
+    NSMutableString *out = [NSMutableString string];
+    if (sLogPath) [out appendFormat:@"日志路径: %@\n\n", sLogPath];
+    // 内存日志尾部 200 行（优先，100% 有内容）
+    if (sLogLines.count) {
+        NSInteger n = (NSInteger)sLogLines.count;
+        NSInteger from = MAX(0, n - 200);
+        NSArray *tail = [sLogLines subarrayWithRange:NSMakeRange(from, n - from)];
+        [out appendString:[tail componentsJoinedByString:@"\n"]];
+    }
+    // 文件内容（若与内存不同则追加）
+    if (sLogPath) {
+        NSString *fc = [NSString stringWithContentsOfFile:sLogPath encoding:NSUTF8StringEncoding error:nil];
+        if (fc.length) {
+            NSArray *fl = [fc componentsSeparatedByString:@"\n"];
+            if (fl.count > 200) {
+                NSArray *tail = [fl subarrayWithRange:NSMakeRange(fl.count - 200, 200)];
+                [out appendFormat:@"\n--- 文件尾部 ---\n%@", [tail componentsJoinedByString:@"\n"]];
+            }
+        }
+    }
+    tv.text = out.length ? out : @"日志为空。\n\n打开「新增记录」并按翻页器键后，回到这里刷新即可看到每次事件的 sender/位移/结算/判重。";
     }
 }
 
