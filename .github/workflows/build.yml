@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.18-roothide.deb
+          DEB=PageTurner-1.0.19-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.18
-          NOTES=$'PageTurner v1.0.18（roothide 直装）—— 运行端双通道，修复映射执行不到\n\n【v1.0.18 改了什么】\n1. 运行端双通道：\n   - 方向键 = addEvent 层读 HID 相对位移（0x23/0x24）匹配（sender+方向±15°，跳过 dist 区间：HID 计数与 UITouch pt 量级不同），命中即吞事件 + 执行映射动作，App 不再收到翻页器滚动\n   - 点击键 = sendEvent 层 UITouch 会话匹配（真实 v1.0.4 原链路）\n2. 执行端不变 = PTFakeMetaTouch（与 volumekeytapper 同源 KIF 合成触摸，已验证可点触）\n3. 学习采集端 = 真实 v1.0.4 逐字未动（多键可录、有位移）\n4. App 进程日志全打：[addEvent] 方向键/点击键分流、[HID] 位移累计与结算、[执行] 命中序列\n\n【怎么测（重点）】\n1. 装 v1.0.18 → 注销\n2. 设置 → PageTurner → 指定 App 生效 → 勾选目标 App（如番茄小说）\n3. 打开目标 App → 按翻页器你录过特征的键 → 看是否执行映射动作（点击/双击/滑动）\n4. 若未执行：把 App 容器 Documents/PageTurner.log 完整发我（路径 /var/mobile/Containers/Data/Application/<App>/Documents/PageTurner.log，或 Filza 里搜 PageTurner.log）\n5. 日志关键段：[addEvent] 是否分流 → [HID] 结算 dir 是否在 ±15° → [执行] 是否命中'
+          TAG=v1.0.19
+          NOTES=$'PageTurner v1.0.19（roothide 直装）—— 方案页测试区：大白屏测试页 + 绿点点触可视化\n\n【v1.0.19 改了什么】\n1. 方案页新增「▶ 测试本方案」入口 → 大白屏测试页\n2. 测试页按翻页器按键：完整特征匹配（sender+phase+方向±15°+dist 区间）→ 执行动作序列 → 大绿点可视化注入位置（点击原地显示；滑动起点→终点）\n3. 执行 = PTFakeMetaTouch（KIF 合成触摸，ptftouch 已编入设置页 bundle，与 volumekeytapper 同源）\n4. 在设置 App 内闭环验证"录特征→匹配→执行→点触"：绿点出现 = 执行链路 OK，无需去目标 App 实测\n5. 注入保护 gTestInjecting（防执行触摸被 hook 递归）、测试防抖 300ms\n\n【怎么测】\n1. 装 v1.0.19 → 注销\n2. 设置 → PageTurner → 记录与映射 → 进方案（如「左键」）\n3. 点最下方「▶ 测试本方案」→ 大白屏\n4. 按翻页器那个键（如左键）→ 看绿点是否出现在映射动作的坐标（如点击(200,600)绿点应在该位置闪一下）\n5. 绿点出现 = 匹配+执行+点触全部 OK；不出现 → 调试日志页复制日志发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.18" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.19" --notes "$NOTES"
           fi
