@@ -164,10 +164,14 @@ static void SLog(NSString *fmt, ...) {
             if (fh) { [fh closeFile]; sLogPath = p; break; }
         }
         if (!sLogPath) {
-            [sLogLines addObject:[NSString stringWithFormat:@"%@ [SLog] ⚠️ 所有候选路径都不可写（仅内存日志）", line]];
+            static BOOL sWarned = NO;
+            if (!sWarned) {
+                sWarned = YES;
+                [sLogLines addObject:@"[SLog] ⚠️ 所有候选路径都不可写（仅内存日志）"];
+            }
             return;
         }
-        [sLogLines addObject:[NSString stringWithFormat:@"%@ [SLog] 日志文件: %@", line, sLogPath]];
+        [sLogLines addObject:[NSString stringWithFormat:@"[SLog] 日志文件: %@", sLogPath]];
     }
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
     if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; } @catch (NSException *e) {} }
@@ -211,67 +215,144 @@ static void SAppendSample(int phase, double dir, double dist) {
 
 static void SFinishSession(void);   // 前向声明
 
-// v1.0.4 原版录制：hook _UIUpdateHIDDigitizerInput -addEvent:，type=11 全收
-// （无设备过滤、无锚定 —— 这是 1.0.4 能正常录翻页器的原因），读相对位移 0x23/0x24
+// ============================================================
+// 采集（v1.0.14 双通道，根治"位移丢失 + 心跳污染"）
+//   - addEvent 层（_UIUpdateHIDDigitizerInput -addEvent:）：只收【位移事件】
+//     （dx≠0 或 dy≠0）。空闲心跳 dx=0 dy=0 一律跳过 —— 心跳不再污染样本
+//   - sendEvent 层（UIApplication -sendEvent:）：收翻页器【合成触摸】
+//     （UIKit 把翻页器鼠标位移合成为触摸，UITouch 屏幕坐标增量 = 真实位移；
+//     点击键坐标不变 = 点击特征）。手指触摸 sender=0 天然忽略；
+//     空闲心跳无触摸、不合成 —— sendEvent 层根本不存在心跳
+//   - 双通道 8ms 同 sender 去重：同一按键的位移事件可能两通道都收到，
+//     只计先到的那个（保留 250ms 结算逻辑不变）
+// ============================================================
+
+// 从 UIEvent/UITouch 内部取回 IOHIDEvent 并读 sender（与运行端 Tweak.xm 同款：
+// 手指触摸 sender=0，外部 HID（翻页器）sender≠0 —— 天然区分设备）
+static uint64_t SSEventSender(UIEvent *event) {
+    if (!event || !sGetSender) return 0;
+    id hid = nil;
+    @try { hid = [event valueForKey:@"_hidEvent"]; } @catch (NSException *e) {}
+    if (!hid) { @try { hid = [event valueForKey:@"hidEvent"]; } @catch (NSException *e) {} }
+    if (!hid && event.type == UIEventTypeTouches) {
+        UITouch *t = [event.allTouches anyObject];
+        if (t) { @try { hid = [t valueForKey:@"_hidEvent"]; } @catch (NSException *e) {} }
+    }
+    if (!hid) return 0;
+    @try { return sGetSender((__bridge void *)hid); } @catch (NSException *e) { return 0; }
+}
+
+static double sLastFeedAt = 0;   // 最近一次喂会话时间（双通道去重）
+
+// 公共喂样本逻辑（两通道共用）：位移增量喂会话
+static void SFeedSample(uint64_t sender, double dx, double dy, const char *src) {
+    double now = PTNowC();
+    // 8ms 去重：同一按键两通道（addEvent 位移 + sendEvent 触摸）只计一次
+    if (sSessActive && sSessSender == sender && now - sLastFeedAt < 0.008) {
+        SLog(@"feed(%s): sender=0x%llx dx=%.1f dy=%.1f (8ms内重复，跳过)", src, sender, dx, dy);
+        return;
+    }
+    sLastFeedAt = now;
+    if (sSessActive && now - sSessLastAt > 0.15) SFinishSession();
+    if (!sSessActive) {
+        sSessActive = YES;
+        sSessSender = sender;
+        sSessDist = 0; sSessFirstDir = 0;
+        sSessHasMove = NO; sSessSettled = NO;
+        // 新会话：轨迹重置到中心
+        sTracePoints = [NSMutableArray array];
+        sTraceX = 0; sTraceY = 0;
+        sTraceHas = YES;
+        [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(0, 0)]];
+        SLog(@"feed(%s): sender=0x%llx dx=%.1f dy=%.1f (会话开始)", src, sender, dx, dy);
+    } else if (sender != sSessSender) {
+        SLog(@"feed(%s): sender=0x%llx (!!! 与当前会话 sender=0x%llx 不同，强制开新会话)", src, sender, sSessSender);
+        SFinishSession();
+        sSessActive = YES;
+        sSessSender = sender;
+        sSessDist = 0; sSessFirstDir = 0;
+        sSessHasMove = NO; sSessSettled = NO;
+        sTracePoints = [NSMutableArray array];
+        sTraceX = 0; sTraceY = 0;
+        sTraceHas = YES;
+        [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(0, 0)]];
+        SLog(@"feed(%s): sender=0x%llx dx=%.1f dy=%.1f (会话开始/换sender)", src, sender, dx, dy);
+    } else {
+        SLog(@"feed(%s): sender=0x%llx dx=%.1f dy=%.1f", src, sender, dx, dy);
+    }
+    sSessLastAt = now;
+    double seg = hypot(dx, dy);
+    if (seg > 0) {
+        sSessDist += seg;
+        if (!sSessHasMove && sSessDist > 5) {
+            sSessHasMove = YES;
+            sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
+        }
+        // 轨迹累积（相对路径）
+        sTraceX += dx; sTraceY += dy;
+        [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(sTraceX, sTraceY)]];
+    }
+    // 事件流停止 250ms 后结算样本
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        SFinishSession();
+    });
+}
+
+// 通道①：addEvent 层 —— 只收位移事件（dx≠0 || dy≠0）
+// 空闲心跳（dx=0 dy=0）跳过；点击键交给 sendEvent 通道（坐标不变=点击）
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
     @try {
-        if (sGetType && sGetSender && event) {
+        if (sGetType && sGetSender && event && sCollectArmed) {
             uint32_t type = sGetType(event);
-            if (type == 11 && sCollectArmed) {
-                // 翻页器 digitizer：读相对位移（0x23=dx 0x24=dy）
+            if (type == 11) {
                 uint64_t sender = sGetSender(event);
                 double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
                 double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
-                double now = PTNowC();
-                if (sSessActive && now - sSessLastAt > 0.15) SFinishSession();
-                if (!sSessActive) {
-                    sSessActive = YES;
-                    sSessSender = sender;
-                    sSessDist = 0; sSessFirstDir = 0;
-                    sSessHasMove = NO; sSessSettled = NO;
-                    // 新会话：轨迹重置到中心
-                    sTracePoints = [NSMutableArray array];
-                    sTraceX = 0; sTraceY = 0;
-                    sTraceHas = YES;
-                    [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(0, 0)]];
-                    SLog(@"recv: type=%u sender=0x%llx dx=%.1f dy=%.1f (会话开始)", type, sender, dx, dy);
+                if (dx != 0 || dy != 0) {
+                    SFeedSample(sender, dx, dy, "addEvent");
                 } else {
-                    if (sender != sSessSender) {
-                        SLog(@"recv: type=%u sender=0x%llx (!!! 与当前会话 sender=0x%llx 不同，强制开新会话)", type, sender, sSessSender);
-                        SFinishSession();
-                        sSessActive = YES;
-                        sSessSender = sender;
-                        sSessDist = 0; sSessFirstDir = 0;
-                        sSessHasMove = NO; sSessSettled = NO;
-                        sTracePoints = [NSMutableArray array];
-                        sTraceX = 0; sTraceY = 0;
-                        sTraceHas = YES;
-                        [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(0, 0)]];
-                        SLog(@"recv: type=%u sender=0x%llx dx=%.1f dy=%.1f (会话开始/换sender)", type, sender, dx, dy);
-                    } else {
-                        SLog(@"recv: type=%u sender=0x%llx dx=%.1f dy=%.1f", type, sender, dx, dy);
-                    }
+                    // 心跳/无位移：跳过（避免心跳污染；点击键由 sendEvent 收）
+                    if (sSessActive && sender == sSessSender && PTNowC() - sSessLastAt > 0.15) SFinishSession();
                 }
-                sSessLastAt = now;
-                double seg = hypot(dx, dy);
-                if (seg > 0) {
-                    sSessDist += seg;
-                    if (!sSessHasMove && sSessDist > 5) {
-                        sSessHasMove = YES;
-                        sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
-                    }
-                    // 轨迹累积（相对路径）
-                    sTraceX += dx; sTraceY += dy;
-                    [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(sTraceX, sTraceY)]];
-                }
-                // 事件流停止 250ms 后结算样本
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    SFinishSession();
-                });
             }
         }
     } @catch (NSException *e) {}
     if (gOrigAddEvent) ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
+}
+
+static IMP gOrigSendEvent = NULL;
+
+// 通道②：sendEvent 层 —— 翻页器合成触摸（UIKit 层真实坐标）
+// 手指（sender=0）放行；翻页器（sender≠0）按坐标增量喂会话
+static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
+    @try {
+        if (event && sCollectArmed && event.type == UIEventTypeTouches) {
+            uint64_t sender = SSEventSender(event);
+            if (sender != 0) {
+                UITouch *t = [event.allTouches anyObject];
+                if (t) {
+                    CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:nil];
+                    // 上一次该 sender 的触摸坐标（跨事件保留，算增量）
+                    static uint64_t sLastSender = 0;
+                    static CGPoint sLastPt = {0, 0};
+                    double dx = 0, dy = 0;
+                    if (sLastSender == sender && !CGPointEqualToPoint(sLastPt, p)) {
+                        dx = p.x - sLastPt.x;
+                        dy = p.y - sLastPt.y;
+                    }
+                    sLastSender = sender;
+                    sLastPt = p;
+                    if (dx != 0 || dy != 0) {
+                        SFeedSample(sender, dx, dy, "sendEvent");
+                    } else {
+                        // 坐标不变 = 点击键（合成触摸按下）
+                        SFeedSample(sender, 0, 0, "sendEvent");
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
 
 // 结算按键会话 → append 样本（v1.0.4 原版，含停止校验）
@@ -301,15 +382,20 @@ static void SCollectHook(void) {
             sGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
             sGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
-        // v1.0.4 原版：hook _UIUpdateHIDDigitizerInput -addEvent:
+        // 通道①：_UIUpdateHIDDigitizerInput -addEvent:（位移）
         Class addCls = NSClassFromString(@"_UIUpdateHIDDigitizerInput");
         SEL addSel = sel_registerName("addEvent:");
         Method am = addCls ? class_getInstanceMethod(addCls, addSel) : NULL;
         if (am) { gOrigAddEvent = method_getImplementation(am); method_setImplementation(am, (IMP)SImpAddEvent); }
+        // 通道②：UIApplication -sendEvent:（合成触摸）
+        Class appCls = NSClassFromString(@"UIApplication");
+        SEL seSel = sel_registerName("sendEvent:");
+        Method sm = appCls ? class_getInstanceMethod(appCls, seSel) : NULL;
+        if (sm) { gOrigSendEvent = method_getImplementation(sm); method_setImplementation(sm, (IMP)SImpSendEvent); }
 
-        sHooked = (gOrigAddEvent != NULL && sGetType != NULL && sGetSender != NULL);
-        SLog(@"collect: sHooked=%d addEvent=%p getType=%p getSender=%p getFloat=%p (armed=%d)",
-             sHooked, gOrigAddEvent, sGetType, sGetSender, sGetFloat, sCollectArmed);
+        sHooked = (gOrigAddEvent != NULL && gOrigSendEvent != NULL && sGetType != NULL && sGetSender != NULL);
+        SLog(@"collect: sHooked=%d addEvent=%p sendEvent=%p getType=%p getSender=%p getFloat=%p (armed=%d)",
+             sHooked, gOrigAddEvent, gOrigSendEvent, sGetType, sGetSender, sGetFloat, sCollectArmed);
     }
 }
 
