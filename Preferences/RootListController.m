@@ -73,6 +73,7 @@
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) NSMutableArray *mem;
 @property (nonatomic, assign) BOOL finished;
+@property (nonatomic, strong) UIView *traceView;   // 轨迹 overlay（全屏透明，不挡触摸）
 @end
 
 @interface PTActionVC : PSViewController
@@ -134,7 +135,6 @@ static IOHIDEventGetFloatValue_t sGetFloat = NULL;
 static uint64_t sCurSender = 0;
 static BOOL sHooked = NO;
 static BOOL sCollectArmed = NO;      // 学习页打开时置 YES
-static uint64_t sAnchorSender = 0;   // 学习锚定的设备 sender：首个非手指 HID 事件锁定，只收它
 // 空闲 digitizer sender（无触摸心跳，不算按键）
 #define kIdleDigitizerSenderC 0x8000000800a15173ull
 // 学习会话（与运行端 Tweak.xm 同口径：sendEvent 层合成触摸屏幕坐标 + _hidEvent 溯源 sender）
@@ -146,6 +146,11 @@ static BOOL sSessHasMove = NO;
 static BOOL sSessSettled = NO;
 static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊断用）
 static CGPoint sLastPoint = {0, 0};
+// 轨迹（学习页可视化）：最近一次按键会话的触摸点序列 + 起点 + 终点
+static NSMutableArray *sTracePoints = nil;    // NSValue(CGPoint)
+static CGPoint sTraceStart = {0, 0};
+static CGPoint sTraceEnd = {0, 0};
+static BOOL sTraceHas = NO;
 static IMP gOrigSendEvent = NULL;
 
 static void SAppendSample(int phase, double dir, double dist) {
@@ -186,6 +191,11 @@ static void STouchPoint(CGPoint p) {
         sSessDist = 0; sSessFirstDir = 0;
         sSessHasMove = NO; sSessSettled = NO;
         sLastPoint = p;
+        // 新会话：开始记录轨迹
+        sTracePoints = [NSMutableArray array];
+        sTraceStart = p;
+        sTraceEnd = p;
+        sTraceHas = YES;
     }
     sSessLastAt = now;
     if (!CGPointEqualToPoint(sLastPoint, p)) {
@@ -200,6 +210,8 @@ static void STouchPoint(CGPoint p) {
         }
     }
     sLastPoint = p;
+    sTraceEnd = p;
+    if (sTracePoints) [sTracePoints addObject:[NSValue valueWithCGPoint:p]];
     // 事件流停止 250ms 后结算样本（同运行端）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         SFinishSession();
@@ -210,17 +222,16 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     @try {
         if (sCollectArmed && event) {
             uint64_t sender = SHIDEventSender(event);
-            // 手指触摸 sender=0 天然排除；空闲心跳 sender 也排除；其余首个设备锁定
+            // 手指触摸 sender=0 天然排除；空闲心跳 sender 也排除；
+            // 其余（翻页器等外部 HID）一律接收 —— v1.0.4 行为：不做设备锁定，
+            // 避免任何非手指事件把录制锁死（v1.0.6 锚定 bug 根因）
             if (sender != 0 && sender != kIdleDigitizerSenderC) {
-                if (sAnchorSender == 0) sAnchorSender = sender;
-                if (sender == sAnchorSender) {
-                    sSessSender = sender;
-                    if (event.type == UIEventTypeTouches) {
-                        UITouch *t = [event.allTouches anyObject];
-                        if (t) {
-                            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:nil];
-                            STouchPoint(p);
-                        }
+                sSessSender = sender;
+                if (event.type == UIEventTypeTouches) {
+                    UITouch *t = [event.allTouches anyObject];
+                    if (t) {
+                        CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:nil];
+                        STouchPoint(p);
                     }
                 }
             }
@@ -907,10 +918,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.view addSubview:self.distLabel];
 
     PTSetLearningLocal(YES);
-    sCollectArmed = NO;   // 武装延迟：跳过进入页面瞬间的手指触摸收尾事件，防止锚定锁死成手指 sender
-    sAnchorSender = 0;   // 每次进入学习页重新锚定
+    sCollectArmed = NO;   // 武装延迟：跳过进入页面瞬间的手指触摸收尾事件
     sLastSampleAt = PTNowC();
     SCollectHook();
+    // 轨迹 overlay（全屏透明，显示最近一次按键的触摸轨迹）
+    self.traceView = [[UIView alloc] initWithFrame:self.view.bounds];
+    self.traceView.userInteractionEnabled = NO;
+    self.traceView.backgroundColor = [UIColor clearColor];
+    self.traceView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:self.traceView];
     self.status.text = @"正在准备…请稍候";
     __weak typeof(self) ws = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -935,8 +951,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.navigationController popViewControllerAnimated:YES];
 }
 
-// 轮询 plist：读走新样本 → 判定
+// 轮询 plist：读走新样本 → 判定；刷新轨迹 overlay
 - (void)poll {
+    [self drawTrace];
     NSMutableDictionary *cfg = PTRead();
     NSArray *samples = cfg[@"learningSamples"] ?: @[];
     cfg[@"learningSamples"] = @[];   // 清空已读
@@ -944,19 +961,62 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (!samples.count) {
         // 诊断：一直没收到翻页器事件
         if (!self.finished && self.mem.count == 0 && PTNowC() - sLastSampleAt > 1.5) {
-            if (sAnchorSender != 0) {
-                // 已锁定设备但没样本：可能锁错了（锁成手指）或翻页器没连
-                self.status.text = [NSString stringWithFormat:@"已锁定设备 0x%llx\n按了没反应？返回重进学习页再试", sAnchorSender];
-                self.status.textColor = [UIColor systemOrangeColor];
-            } else {
-                self.status.text = @"⚠️ 未收到翻页器按键事件\n确认翻页器已连接、保持在前台按它";
-                self.status.textColor = [UIColor systemOrangeColor];
-            }
+            self.status.text = @"⚠️ 未收到翻页器按键事件\n确认翻页器已连接、保持在前台按它";
+            self.status.textColor = [UIColor systemOrangeColor];
         }
         return;
     }
     sLastSampleAt = PTNowC();
     for (NSDictionary *s in samples) [self judge:s];
+}
+
+// 画最近一次按键的轨迹：起点绿点 → 沿线绿点 → 终点红点 + 蓝位移线
+- (void)drawTrace {
+    for (UIView *v in self.traceView.subviews) [v removeFromSuperview];
+    for (CALayer *l in [self.traceView.layer.sublayers copy]) [l removeFromSuperlayer];
+    if (!sTraceHas || !sTracePoints.count) return;
+    CGFloat w = self.traceView.bounds.size.width, h = self.traceView.bounds.size.height;
+    // 位移线：起点 → 终点
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    [path moveToPoint:sTraceStart];
+    [path addLineToPoint:sTraceEnd];
+    CAShapeLayer *line = [CAShapeLayer layer];
+    line.path = path.CGPath;
+    line.strokeColor = [UIColor systemBlueColor].CGColor;
+    line.lineWidth = 3;
+    line.fillColor = [UIColor clearColor].CGColor;
+    line.lineCap = kCALineCapRound;
+    [self.traceView.layer addSublayer:line];
+    // 沿线触摸点（绿小点）
+    for (NSValue *v in sTracePoints) {
+        CGPoint p = v.CGPointValue;
+        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 8)];
+        dot.center = p;
+        dot.layer.cornerRadius = 4;
+        dot.backgroundColor = [UIColor systemGreenColor];
+        [self.traceView addSubview:dot];
+    }
+    // 起点（绿空心） + 终点（红实心）
+    UIView *s0 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 18, 18)];
+    s0.center = sTraceStart;
+    s0.layer.cornerRadius = 9;
+    s0.layer.borderWidth = 3;
+    s0.layer.borderColor = [UIColor systemGreenColor].CGColor;
+    s0.backgroundColor = [UIColor clearColor];
+    [self.traceView addSubview:s0];
+    UIView *e0 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 18, 18)];
+    e0.center = sTraceEnd;
+    e0.layer.cornerRadius = 9;
+    e0.backgroundColor = [UIColor systemRedColor];
+    [self.traceView addSubview:e0];
+    // 坐标标注（左上）
+    UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(12, h - 44, w - 24, 30)];
+    lb.text = [NSString stringWithFormat:@"起点(%.0f,%.0f) → 终点(%.0f,%.0f)",
+               sTraceStart.x, sTraceStart.y, sTraceEnd.x, sTraceEnd.y];
+    lb.font = [UIFont systemFontOfSize:13];
+    lb.textColor = [UIColor secondaryLabelColor];
+    lb.textAlignment = NSTextAlignmentCenter;
+    [self.traceView addSubview:lb];
 }
 
 - (void)judge:(NSDictionary *)s {
