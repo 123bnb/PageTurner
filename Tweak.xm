@@ -1,5 +1,5 @@
 // ============================================================
-// PageTurner v1.0.25 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.26 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.24（注入可视化，照抄 volumekeytapper）：用户要求"打开 App 一眼看出注入成功没"
 //   - 提醒条（勾选生效 App）：黑底白字+黄边框、屏幕中上方、2 秒——
@@ -485,7 +485,7 @@ static void PTDebugEnsureWindow(void) {
 }
 
 static void PTDebugUpdate(void *touchPtr, CGPoint p, UITouchPhase phase, BOOL pager) {
-    if (!gDebugDots) return;
+    if (!gMasterEnabled || !gDebugDots) return;   // v1.0.26：调试可视化纳入总开关
     if (![NSThread isMainThread]) return;
     PTDebugEnsureWindow();
     NSString *key = [NSString stringWithFormat:@"%p", touchPtr];
@@ -728,7 +728,7 @@ static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
     // 调试可视化（v1.0.23）：所有触摸——翻页器（gCurSender≠0）、手指、映射执行
-    if (gDebugDots && event) {
+    if (gMasterEnabled && gDebugDots && event) {   // v1.0.26：可视化纳入总开关
         for (UITouch *t in event.allTouches) {
             CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
             PTDebugUpdate((__bridge void *)t, p, t.phase, (gCurSender != 0));
@@ -796,7 +796,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.25 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.26 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
@@ -819,7 +819,8 @@ static void PTInit() {
         // v1.0.24 注入探针（照抄 VKT ShowProbeAlert）：第三方 App 启动 2.5s 弹，
         // 显示 本App/注入✅/全局配置/总开关/crashTest/勾选App数/本App被勾选 ——
         // 打开番茄小说一眼看出注入成功没、有没有勾选
-        if (!gIsPreferences && ![bundleID hasPrefix:@"com.apple."]) {
+        // v1.0.26：探针纳入总开关（总开关=总闸，关掉插件完全静默）
+        if (!gIsPreferences && gMasterEnabled && ![bundleID hasPrefix:@"com.apple."]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ PTShowProbeAlert(); });
         }
