@@ -1,6 +1,6 @@
 Package: com.yourname.pageturner
 Name: PageTurner
-Version: 1.0.10
+Version: 1.0.11
 Architecture: iphoneos-arm64e
 Description: 翻页器按键拦截：学习按键触摸特征（上/下/左/右/点击），映射为自定义动作序列（点击/双击/滑动/延迟/静音/音量±），指定 App 生效
 Maintainer: 123bnb
