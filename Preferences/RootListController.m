@@ -1,5 +1,12 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.31）
+// RootListController.m —— PageTurner 设置页（v1.0.33）
+//
+// v1.0.33（实测反馈）：
+//   1. 修测试区滑动速度 bug：旧代码把 speed 当毫秒时长（固定=速度值毫秒，与距离无关，
+//      短距离滑动测试区比运行端慢数倍，体感"测试慢/应用快"）；改为与运行端统一
+//      时长=距离/速度，距离 200pt @1000pt/s = 0.2s
+//   2. 测试区命中日志加特征细节：✓ 命中「xx」→ 映射 N 条动作（sender=… phase=… dir=… dist=…），
+//      与未命中格式一致
 //
 // v1.0.31（深色模式适配）：
 //   1. 学习页大白屏 whiteColor → systemBackgroundColor（深色模式黑底白字，不再白底白字看不清）
@@ -423,11 +430,16 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
     } else if ([type isEqualToString:@"swipe"]) {
         CGPoint from = CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]);
         CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
-        double dur = [a[@"speed"] doubleValue] ?: 200;
-        PTTestShowDot(from, to, YES, dur / 1000.0);
+        // v1.0.33：修测试区速度 bug——旧代码把 speed 当毫秒时长（固定 1 秒，与距离无关，
+        // 短距离比运行端慢数倍）；现在与运行端统一：时长 = 距离/速度
+        double speed = [a[@"speed"] doubleValue] ?: 200;
+        double distT = hypot(to.x - from.x, to.y - from.y);
+        double durMs = (distT / MAX(speed, 1.0)) * 1000.0;
+        if (durMs < 50) durMs = 50;
+        PTTestShowDot(from, to, YES, durMs / 1000.0);
         NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
         int steps = 12;
-        double per = dur / 1000.0 / steps;
+        double per = durMs / 1000.0 / steps;
         __block int i = 1;
         __block void (^step)(void);
         step = ^(void) {
@@ -492,8 +504,9 @@ static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender) {
         PTTestExecPlan(plan);
         NSDictionary *pp = nil;
         for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:plan]) { pp = p; break; }
-        [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作",
-            plan, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0)]];
+        // v1.0.33：命中日志加特征细节（sender/相位/方向/位移），与未命中格式一致
+        [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作（sender=0x%llx phase=%d dir=%.1f dist=%.1f）",
+            plan, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0), sender, phase, dir, dist]];
     } else {
         SLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f（特征需先录制）", sender, phase, dir, dist);
         [sTestLogSink appendLog:[NSString stringWithFormat:@"✗ 未命中（放行）：sender=0x%llx phase=%d dir=%.1f dist=%.1f",
