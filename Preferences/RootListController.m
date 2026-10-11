@@ -43,6 +43,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
 #import <sys/time.h>
 #include <math.h>
 #include <float.h>
@@ -120,6 +121,32 @@ static const int kLearnMin = 5;         // 下限
 static const int kLearnMax = 15;        // 上限
 static const double kConverge = 60.0;   // 位移收敛
 
+// v1.0.25 根因修复：设置页之前只写普通路径 /var/mobile/Library/Preferences/...，
+// 第三方 App 沙盒读该路径会被系统重定向到 App 自己的容器 → 永远读不到
+// （探针显示"文件不可读"）。现在照抄注入端 Tweak.xm 的 PTJbrootRoot 逻辑，
+// 从本 dylib 镜像提取 .jbroot-XXX 根，把配置同时写入 jbroot 真实偏好路径 +
+// 普通路径兜底，App 侧 PTGlobalPlistPath 多候选读取必有一处命中。
+static NSString *PTJbrootRootC(void) {
+    static NSString *root = nil;
+    static dispatch_once_t on;
+    dispatch_once(&on, ^{
+        uint32_t n = _dyld_image_count();
+        for (uint32_t i = 0; i < n; i++) {
+            const char *img = _dyld_get_image_name(i);
+            if (!img) continue;
+            NSString *p = [NSString stringWithUTF8String:img];
+            NSRange r = [p rangeOfString:@"/.jbroot-"];
+            if (r.location == NSNotFound) continue;
+            NSRange after = NSMakeRange(NSMaxRange(r), p.length - NSMaxRange(r));
+            NSRange slash = [p rangeOfString:@"/" options:0 range:after];
+            NSUInteger end = (slash.location != NSNotFound) ? slash.location : p.length;
+            root = [p substringToIndex:end];
+            break;
+        }
+    });
+    return root;
+}
+
 static NSMutableDictionary *PTRead(void) {
     NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:PT_PREFS];
     return d ? d : [NSMutableDictionary dictionary];
@@ -129,10 +156,20 @@ static void PTWrite(NSDictionary *cfg) {
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:cfg
         format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
     if (!data) return;
-    NSString *tmp = [PT_PREFS stringByAppendingString:@".tmp"];
-    [data writeToFile:tmp atomically:YES];
-    [[NSFileManager defaultManager] removeItemAtPath:PT_PREFS error:nil];
-    [[NSFileManager defaultManager] moveItemAtPath:tmp toPath:PT_PREFS error:nil];
+    // 候选写入位置：jbroot 真实偏好路径（App 侧读得到）优先 + 普通路径兜底
+    NSMutableArray *targets = [NSMutableArray array];
+    NSString *jb = PTJbrootRootC();
+    if (jb.length) {
+        [targets addObject:[jb stringByAppendingPathComponent:
+            [@"var/mobile/Library/Preferences" stringByAppendingPathComponent:@"com.yourname.pageturner.plist"]]];
+    }
+    [targets addObject:PT_PREFS];
+    for (NSString *p in targets) {
+        NSString *tmp = [p stringByAppendingString:@".tmp"];
+        [data writeToFile:tmp atomically:YES];
+        [[NSFileManager defaultManager] removeItemAtPath:p error:nil];
+        [[NSFileManager defaultManager] moveItemAtPath:tmp toPath:p error:nil];
+    }
 }
 
 static void PTSetLearningLocal(BOOL on) {

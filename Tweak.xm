@@ -1,5 +1,5 @@
 // ============================================================
-// PageTurner v1.0.24 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.25 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.24（注入可视化，照抄 volumekeytapper）：用户要求"打开 App 一眼看出注入成功没"
 //   - 提醒条（勾选生效 App）：黑底白字+黄边框、屏幕中上方、2 秒——
@@ -796,7 +796,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.24 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.25 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);

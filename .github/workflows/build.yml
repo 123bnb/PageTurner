@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.24-roothide.deb
+          DEB=PageTurner-1.0.25-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.24
-          NOTES=$'PageTurner v1.0.24（roothide 直装）—— 注入可视化：打开 App 一眼看出注入成功没\n\n【v1.0.24 改了什么（照抄 volumekeytapper）】\n1. 注入探针（抄 VKT ShowProbeAlert）：任何第三方 App 启动 2.5s 弹窗显示——本App / 注入✅成功 / 全局配置(文件可读?) / 总开关enabled / 注入测试crashTest / 勾选App数 / 本App被勾选。打开番茄小说一眼看出注入和勾选状态\n2. 注入提醒条（勾选生效 App 才有）：黑底白字+黄边框、屏幕中上方、2 秒——「PageTurner 注入成功 · 翻页键映射生效中」。打勾的 App 打开就有提醒条 = 注入成功\n\n【怎么测】\n1. 装 v1.0.24 → 注销\n2. 打开番茄小说（或任何第三方 App）→ 2.5 秒后弹「PageTurner 注入探针」：\n   - 弹了 = 插件注入成功（看 本App: com.dragon.read / 注入: ✅ 成功）\n   - 弹窗里看 本App被勾选: 是✅/否❌、总开关、勾选App数\n3. 勾选的 App 启动还有黄边框提醒条 = 生效确认\n4. 探针/提醒条都没有 = 注入还没发生，把 PageTurner.log 发我\n\n（上一版 v1.0.23 已修复终极根因：Filter 空 {} → 改为 Bundles com.apple.UIKit，ellekit 才会注入）'
+          TAG=v1.0.25
+          NOTES=$'PageTurner v1.0.25（roothide 直装）—— 跨沙盒配置读写双通：注入通了、配置也通了\n\n【v1.0.25 改了什么】\n1. 根因修复（跨沙盒配置读取的最后一环）：设置页之前只写普通路径 /var/mobile/Library/Preferences/com.yourname.pageturner.plist，第三方 App 沙盒读该路径会被系统重定向到 App 自己容器 → 永远读不到 → 探针显示"全局配置：文件不可读"、勾选App数=0、本App被勾选=否\n2. 设置页写入改为照抄注入端 PTJbrootRoot 的 dyld 镜像遍历：从 .jbroot-XXX 根拼 jbroot 真实偏好路径写入 + 普通路径兜底，App 侧 PTGlobalPlistPath 多候选读取必有一处命中\n3. 探针现在应显示：全局配置：文件可读 /private/var/containers/Bundle/Application/.jbroot-XXX/var/mobile/Library/Preferences/com.yourname.pageturner.plist，总开关/勾选App数/本App被勾选全部真实\n\n【怎么测】\n1. 装 v1.0.25 → 注销\n2. 设置 → PageTurner → 打开总开关、勾选番茄小说\n3. 打开番茄小说 → 2.5 秒弹探针：\n   - 全局配置：文件可读（jbroot 路径）\n   - 总开关 enabled：开\n   - 勾选 App 数：1，本App被勾选：是\n4. 按翻页器按键 → 应该执行映射动作（点触可视化开 → 看到绿点）\n\n（v1.0.23 已修 Filter 空{} 注入问题；v1.0.25 补齐配置读写两侧）'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.24" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.25" --notes "$NOTES"
           fi

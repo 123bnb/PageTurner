@@ -1,4 +1,4 @@
-# PageTurner v1.0.24 —— 翻页器按键拦截正式版（学习模式 + 映射 + 动作执行）
+# PageTurner v1.0.25 —— 翻页器按键拦截正式版（学习模式 + 映射 + 动作执行）
 # 架构：Filter = Bundles com.apple.UIKit（照抄 volumekeytapper）→ 所有 UIKit App 注入
 #       → Preferences（设置 App）进程收集学习样本（bundle 自 hook）→ 生效 App 拦截执行
 # 事件：hook UIApplication -sendEvent:（UIEvent 层，UITouch 真实坐标）
@@ -22,7 +22,7 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.24
+PACKAGE_VERSION := 1.0.25
 
 DEBUG = 0
 ARCHS = arm64 arm64e
