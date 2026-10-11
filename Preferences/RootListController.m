@@ -1,5 +1,13 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.34）
+// RootListController.m —— PageTurner 设置页（v1.0.35）
+//
+// v1.0.35（设置页风格统一）：
+//   1. 各子页背景 systemBackgroundColor → systemGroupedBackgroundColor
+//      （灰分组背景，与插件主设置页一致）：App列表/防抖/方案列表/方案页/特征列表/
+//      动作设置/调试日志；列表页 Plain→Grouped（行变白底卡片）；参数页/测试页本就灰
+//   2. 学习页/测试页保持大白屏（录特征/看轨迹需要干净背景）
+//   3. 方案页方案名行：透明文字 → 白底圆角卡片样式（像系统输入框），点击仍弹框改名
+//   4. 方案页两个大按钮（蓝/橙）保留彩色（醒目）
 //
 // v1.0.34（多特征方案）：
 //   1. 方案数据结构 feature(单条) → features[] 数组（兼容旧数据自动迁移读取）
@@ -812,7 +820,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    // v1.0.35：统一成系统设置灰分组背景（与主设置页一致）
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
     NSMutableSet *sel = [NSMutableSet setWithArray:PTRead()[@"enabledApps"] ?: @[]];
     self.selected = sel;
@@ -828,7 +837,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.view addSubview:self.sb];
 
     self.tv = [[UITableView alloc] initWithFrame:CGRectMake(0, top + 44, self.view.bounds.size.width,
-        self.view.bounds.size.height - top - 44) style:UITableViewStylePlain];
+        self.view.bounds.size.height - top - 44) style:UITableViewStyleGrouped];
     self.tv.dataSource = self;
     self.tv.delegate = self;
     [self.view addSubview:self.tv];
@@ -916,7 +925,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    // v1.0.35：统一成系统设置灰分组背景
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
     CGFloat top = 110;
     if (self.view.safeAreaInsets.top > 20) top = self.view.safeAreaInsets.top + 60;
@@ -963,11 +973,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    // v1.0.35：统一成系统设置灰分组背景
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     CGFloat top = 100;
     if (self.view.safeAreaInsets.top > 20) top = self.view.safeAreaInsets.top + 40;
     self.tv = [[UITableView alloc] initWithFrame:CGRectMake(0, top, self.view.bounds.size.width,
-        self.view.bounds.size.height - top) style:UITableViewStylePlain];
+        self.view.bounds.size.height - top) style:UITableViewStyleGrouped];
     self.tv.dataSource = self;
     self.tv.delegate = self;
     [self.view addSubview:self.tv];
@@ -1056,7 +1067,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    // v1.0.35：统一成系统设置灰分组背景
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     [self reload];
 }
 
@@ -1080,8 +1092,13 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
     if (!self.nameLabel) {
         // v1.0.28：方案名一行显示「方案名： xxxxx」，点击弹框改名
-        self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, top, w - 32, 36)];
+        // v1.0.35：改白底圆角卡片样式（像系统设置输入框），文字居中，点击弹框改名
+        self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, top, w - 32, 40)];
         self.nameLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+        self.nameLabel.backgroundColor = [UIColor systemBackgroundColor];
+        self.nameLabel.layer.cornerRadius = 10;
+        self.nameLabel.clipsToBounds = YES;
+        self.nameLabel.textAlignment = NSTextAlignmentCenter;
         self.nameLabel.userInteractionEnabled = YES;
         [self.nameLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(renameTapped)]];
         [self.view addSubview:self.nameLabel];
@@ -1111,7 +1128,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [self.view addSubview:self.addFeatureBtn];
 
         self.tv = [[UITableView alloc] initWithFrame:CGRectMake(0, top + 148, w, self.view.bounds.size.height - top - 148)
-            style:UITableViewStylePlain];
+            style:UITableViewStyleGrouped];
         self.tv.dataSource = self;
         self.tv.delegate = self;
         [self.view addSubview:self.tv];
@@ -1332,8 +1349,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"已录入特征";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-    self.tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
+    // v1.0.35：统一成系统设置灰分组背景
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.tv = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleGrouped];
     self.tv.dataSource = self;
     self.tv.delegate = self;
     [self.view addSubview:self.tv];
@@ -1918,7 +1936,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.isSwipe = [self.actionType isEqualToString:@"swipe"];
     self.title = self.isSwipe ? @"滑动设置" : ([self.actionType isEqualToString:@"doubleTap"] ? @"双击设置" : @"点击设置");
     // v1.0.28：标题栏白色，下方内容区统一灰色
-    self.view.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    // v1.0.35：统一成系统设置灰分组背景（与主设置页一致）
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
         style:UIBarButtonItemStyleDone target:self action:@selector(done)];
 
@@ -2153,7 +2172,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    // v1.0.35：统一成系统设置灰分组背景
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
     UITextView *tv = [[UITextView alloc] initWithFrame:self.view.bounds];
     tv.editable = NO;
