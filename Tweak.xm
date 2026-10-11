@@ -1,29 +1,21 @@
 // ============================================================
-// PageTurner v1.0.20 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.21 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
-// v1.0.20（本版核心修复）：
-//   - 运行端统一改 sendEvent 会话通道（与设置 App 测试区完全同款链路）。
-//     依据：v1.0.19 测试区实证"翻页器方向键 = UITouch 会话（Began→Moved→Ended，
-//     dist≈100-168pt）→ 匹配 → 执行 → 点触成功"；0x23/0x24 HID 相对位移
-//     在 Preferences 进程实测恒 0，HID 通道是死路，废弃。
-//   - 已学 sender：放行 + 开 50ms 窗口 → sendEvent 会话结算 → 匹配 → 执行。
-//   - 命中才吞事件（防 App 同时收到翻页器滚动）；未命中放行（App 保留原行为，
-//     便于区分"映射是否生效"）+ 日志记录。
-//   - 0x23/0x24 仅观察日志（帮判断目标 App HID 位移是否存在），不再用于匹配。
+// v1.0.21（本版核心修复，对照 volumekeytapper 私有仓库）：
+//   根因一：dylib 纯手写 method_setImplementation，无 %hook / _MSHookMessageEx
+//   符号 → ellekit/roothide 拒载第三方 App，目标 App 根本没被注入
+//   （volumekeytapper 专门留空壳 %hook 生成符号）→ PTHook 改 MSHookMessageEx。
+//   根因二：固定路径 /var/mobile/Library/Preferences 在 roothide 下第三方
+//   App 沙盒读不到 Preferences 进程写的全局配置 → enabledApps 判断失败
+//   → PTGlobalPlistPath() 多路径 + jbroot 提取（照抄 volumekeytapper）。
+//   根因三：注入后无痕，用户无法取证 → 注入标记文件 + 增强启动日志。
 //
-// v1.0.18：运行端双通道（HID 位移通道 + 会话通道）——目标 App 实测无效，
-//   0x23/0x24 在 iOS 16 读不到位移，方向键被吞后 App 无反应也不执行，废弃。
+// v1.0.20：运行端统一 sendEvent 会话通道（与测试区同款），命中才吞。
+// v1.0.19：设置端方案页测试区（大白屏 + 绿点可视化），实证"匹配+执行+点触"OK。
+// v1.0.18：运行端双通道（HID 位移通道 + 会话通道）——0x23/0x24 读不到，废弃。
+// v1.0.17：整包回滚到真实 v1.0.4（release tag v1.0.4 = commit 0cd50018）。
 //
-// v1.0.17：整包回滚到真实 v1.0.4（release tag v1.0.4 = commit 0cd50018），
-//   学习采集 = 设置页 bundle 内自 hook（addEvent 拿 sender → 50ms 窗口
-//   → sendEvent UITouch 坐标会话），采集逻辑逐字未动。
-//
-// v1.0.1 架构修正（用户定稿）：
-//   - 所有 UI 在【系统设置 → PageTurner 设置页】，App 内零 UI
-//   - 来源 sender 录进特征，不写死设备：学什么拦什么
-//   - 学习宿主 = Preferences 进程：学习页打开时收集 → plist，设置页轮询判定
-//
-// 注入范围：所有进程（roothide 黑名单默认）
+// 注入范围：所有进程（ellekit 黑名单默认）
 //   - Preferences 进程：旁路（学习收集由设置页 bundle 自 hook）
 //   - 其它 App：运行时检查 masterEnabled + enabledApps[bundleID] 才 hook
 //
@@ -35,6 +27,7 @@
 // 动作：PTFakeMetaTouch（点击/双击/滑动）+ AVSystemController（静音/音量±）
 // 防递归：gIsInjecting；防抖：gDebounceMs
 // 日志：App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log
+// 注入标记：/var/mobile/Documents/PageTurner-injected-<bid>.txt（Filza 一眼可查）
 // ============================================================
 
 #import <UIKit/UIKit.h>
@@ -51,6 +44,10 @@
 #include <dlfcn.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <mach-o/dyld.h>
+// MSHookMessageEx 由 -lsubstrate（ellekit substrate 兼容库）提供；
+// 只要 dylib 调用它，符号表必含 _MSHookMessageEx → ellekit 认可注入
+extern void MSHookMessageEx(Class _cls, SEL _name, IMP _imp, IMP *_orig);
 #import "ptftouch/PTFakeMetaTouch.h"
 
 // ============================================================
@@ -101,17 +98,63 @@ static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
+static NSString *gCfgPath = nil;            // 实际读到的 plist 路径（诊断）
 
 static uint64_t gLearnedSenders[32];        // 已学 sender 集合（运行时识别）
 static int gLearnedSenderCount = 0;
 
-// 原始读文件（不碰 mtime 缓存）
-static NSMutableDictionary *PTReadFileRaw(void) {
-    NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefPath];
-    return d ? d : [NSMutableDictionary dictionary];
+// 跨沙盒读全局 plist（v1.0.21 加，照抄 volumekeytapper）：
+// roothide 下第三方 App 沙盒读 /var/mobile/Library/Preferences 会被重定向到
+// App 沙盒，读不到 Preferences 进程写的全局配置 → 从本 dylib 镜像提取
+// .jbroot-XXX 根，拼接 jbroot 下的真实偏好路径。
+static NSString *PTJbrootRoot(void) {
+    static NSString *root = nil;
+    static dispatch_once_t on;
+    dispatch_once(&on, ^{
+        uint32_t n = _dyld_image_count();
+        for (uint32_t i = 0; i < n; i++) {
+            const char *img = _dyld_get_image_name(i);
+            if (!img) continue;
+            NSString *p = [NSString stringWithUTF8String:img];
+            NSRange r = [p rangeOfString:@"/.jbroot-"];
+            if (r.location == NSNotFound) continue;
+            NSRange startSeg = r;
+            NSRange after = NSMakeRange(NSMaxRange(startSeg), p.length - NSMaxRange(startSeg));
+            NSRange slash = [p rangeOfString:@"/" options:0 range:after];
+            NSUInteger end = (slash.location != NSNotFound) ? slash.location : p.length;
+            root = [p substringToIndex:end];
+            break;
+        }
+    });
+    return root;
 }
 
-// 原子写（tmp + rename）
+static NSString *PTGlobalPlistPath(void) {
+    NSString *name = @"com.yourname.pageturner.plist";
+    NSMutableArray *cands = [NSMutableArray array];
+    [cands addObject:[@"/var/mobile/Library/Preferences" stringByAppendingPathComponent:name]];
+    NSString *jb = PTJbrootRoot();
+    if (jb.length) {
+        [cands addObject:[jb stringByAppendingPathComponent:[@"var/mobile/Library/Preferences" stringByAppendingPathComponent:name]]];
+        [cands addObject:[jb stringByAppendingPathComponent:[@"Library/Preferences" stringByAppendingPathComponent:name]]];
+    }
+    [cands addObject:[@"/var/jb/var/mobile/Library/Preferences" stringByAppendingPathComponent:name]];
+    [cands addObject:[@"/var/jb/Library/Preferences" stringByAppendingPathComponent:name]];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSString *p in cands) {
+        if ([fm fileExistsAtPath:p]) return p;
+    }
+    return cands.firstObject; // 不存在也返回首选路径（供日志）
+}
+
+// 原始读文件（不碰 mtime 缓存；多路径取第一个存在的）
+static NSMutableDictionary *PTReadFileRaw(void) {
+    NSString *p = PTGlobalPlistPath();
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:p];
+    return d ? [NSMutableDictionary dictionaryWithDictionary:d] : [NSMutableDictionary dictionary];
+}
+
+// 原子写（tmp + rename；只 Preferences 进程使用，写系统根路径）
 static void PTWriteFileRaw(NSDictionary *cfg) {
     NSData *data = [NSPropertyListSerialization dataWithPropertyList:cfg format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
     if (!data) return;
@@ -122,10 +165,15 @@ static void PTWriteFileRaw(NSDictionary *cfg) {
 }
 
 static void PTLoadConfig(BOOL force) {
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:kPrefPath error:nil];
+    NSString *p = PTGlobalPlistPath();
+    if (!gCfgPath || ![gCfgPath isEqualToString:p]) {
+        gCfgPath = p;
+        PTLog(@"[配置] 实际读取路径=%@", p);
+    }
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
     double mtime = attrs ? [attrs.fileModificationDate timeIntervalSince1970] : 0;
     if (!force && gConfig && mtime == gConfigMtime) return;
-    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:kPrefPath];
+    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:p];
     gConfig = cfg ? cfg : @{};
     gConfigMtime = mtime;
     gMasterEnabled = [gConfig[@"masterEnabled"] boolValue];
@@ -484,16 +532,36 @@ static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
 
-// ---------- swizzle ----------
+// ---------- swizzle（v1.0.21 改用 MSHookMessageEx） ----------
+// 关键：ellekit/roothide 只注入含 _MSHookMessageEx / _MSHookFunction 符号的 dylib
+// （volumekeytapper Tweak.x 注释原文："无任何 %hook 的 dylib 会被 ellekit 拒载第三方 App"）。
+// 此前 method_setImplementation 不产生该符号 → 目标 App 根本没被注入。
+// MSHookMessageEx 由 -lsubstrate（ellekit substrate 兼容库）提供。
 static void PTHook(NSString *clsName, NSString *selName, IMP newImp, IMP *origSlot) {
     Class cls = NSClassFromString(clsName);
     if (!cls) { PTLog(@"[探测] 类不存在 %@ 跳过", clsName); return; }
     SEL sel = sel_registerName(selName.UTF8String);
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) { PTLog(@"[探测] %@ -%@ 不存在，跳过", clsName, selName); return; }
-    *origSlot = method_getImplementation(m);
-    method_setImplementation(m, newImp);
-    PTLog(@"[探测] %@ -%@ 已hook ✓", clsName, selName);
+    MSHookMessageEx(cls, sel, newImp, origSlot);
+    PTLog(@"[探测] %@ -%@ 已hook ✓（MSHookMessageEx）", clsName, selName);
+}
+
+// 注入标记文件（v1.0.21 加，照抄 volumekeytapper WriteInjectMarker）：
+// constructor 一被加载就写（无论是否勾选），Filza 看 /var/mobile/Documents/
+// PageTurner-injected-<bid>.txt 即知该进程有没有被 dylib 注入
+static void PTWriteInjectMarker(NSString *bid) {
+    @try {
+        NSString *line = [NSString stringWithFormat:@"%@ 注入标记 进程=%@ bundleID=%@\n",
+                          [NSDate date], NSProcessInfo.processInfo.processName, bid];
+        for (NSString *p in @[
+            [NSString stringWithFormat:@"/var/mobile/Documents/PageTurner-injected-%@.txt", bid],
+            @"/var/mobile/Documents/PageTurner-injected.txt",
+            [NSString stringWithFormat:@"/tmp/PageTurner-injected-%@.txt", bid]]) {
+            FILE *f = fopen(p.UTF8String, "a");
+            if (f) { fputs(line.UTF8String, f); fclose(f); }
+        }
+    } @catch (NSException *e) {}
 }
 
 __attribute__((constructor))
@@ -516,10 +584,12 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.20 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
-        PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
-              gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
+        PTLog(@"PageTurner v1.0.21 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
+              gCfgPath, gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
+        // 注入标记（无条件写）：Filza 看 /var/mobile/Documents/PageTurner-injected-<bid>.txt
+        PTWriteInjectMarker(bundleID);
         if (gIsPreferences) {
             // 学习收集由设置页 bundle 内自 hook 负责（roothide 空 Filter 不注入系统 App，
             // tweak 在此进程收不到事件；bundle 必然被 PreferenceLoader 加载）。
@@ -531,7 +601,8 @@ static void PTInit() {
             PTHook(@"UIApplication", @"sendEvent:", (IMP)PTImpSendEvent, &gOrigSendEvent);
             PTLog(@"生效 App 就绪：学过的 sender 按键将被拦截");
         } else {
-            PTLog(@"旁路：未生效 App（bundleID 不在列表或总开关关）");
+            PTLog(@"旁路：未生效 App（bundleID=%@ 不在列表(%lu)或总开关=%d）",
+                  bundleID, (unsigned long)gEnabledApps.count, gMasterEnabled);
         }
         PTLog(@"==================================================");
     }
