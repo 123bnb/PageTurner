@@ -1,5 +1,16 @@
 // ============================================================
-// PageTurner v1.0.10 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.11 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.11（录制端加日志 + 会话彻底复位 —— 定位"只能录1个后重复录入"）：
+//   - 【录制端日志】Preferences 进程此前完全没有日志。本版录制全链路写
+//     /var/mobile/Documents/PageTurner.log：hook 是否成功、每个 type=11 事件的
+//     sender/dx/dy、会话结算的 phase/dir/dist、判重拒绝时的新旧特征对比 ——
+//     录不到/重复录入一眼定位
+//   - 【会话复位】学习页 viewDidLoad/viewDidDisappear 全量复位会话状态
+//     （sSessActive/sSessSettled/轨迹），防止"录一半退出 → 残留状态 → 下次
+//     新会话永不开始"
+//   - 【判重提示】被拒时显示新旧特征详细对比（方向/位移/sender），确认是
+//     真重复还是误判
 //
 // v1.0.10（录制端真正回滚 v1.0.4 原版 —— 修"v1.0.9 仍录不了"）：
 //   - 【核心】v1.0.9 只是删了锚定，采集层仍是 v1.0.8 的 sendEvent 坐标版，
@@ -559,7 +570,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.10 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.11 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d 调试=%d",
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount, gDebugMode);
