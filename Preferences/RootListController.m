@@ -1,16 +1,24 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.1 全 UI 宿主）
+// RootListController.m —— PageTurner 设置页（v1.0.17，以真实 v1.0.4 为基底）
+//
+// v1.0.17：整包回滚到用户实测唯一能录多个键的版本
+//   = release v1.0.4（commit 0cd50018）—— 采集逻辑逐字未动：
+//   SImpAddEvent（addEvent 层拿 sender + 开 50ms 窗口）
+//   → SImpSendEvent（UIEvent 层 UITouch 屏幕坐标会话，位移/方向来自这里）
+//   只加了：日志系统（内存+文件双写）、调试日志页（读内存 100% 可见）、
+//   addEvent sender 变化 / sendEvent 窗口内事件 / 样本 / 判重 的观察日志。
 //
 // 页面结构（全部在系统设置 → PageTurner）：
-//   RootListController  总开关 / 指定App生效 / 防抖 / 记录与映射 / 版本
+//   RootListController  总开关 / 指定App生效 / 防抖 / 记录与映射 / 调试日志
 //   PTPlansVC           方案列表（左滑删除 / 新增方案）
 //   PTPlanVC            方案页（名称 / 记录状态 / 映射区 / 新增映射）
 //   PTLearnVC           学习页（大白屏录特征，轮询 plist 判定）
 //   PTActionVC          动作设置（绿点①点击/双击；①②起点终点+速度滑动）
+//   PTDebugLogVC        调试日志（v1.0.17 加，读内存日志尾部 + 一键复制）
 //
 // 学习链路：
 //   - 进入学习页：写 learning.active=true + 清 learningSamples
-//   - 注入 Preferences 进程的 tweak 收到翻页器按键 → append 样本到 learningSamples
+//   - bundle 内自 hook：addEvent 拿 sender → 50ms 窗口 → sendEvent UITouch 会话
 //   - 本页 NSTimer 轮询 0.3s：读走样本（清空已读）→ 判定稳定/上限/去重 → 更新 UI
 //   - 稳定 → 弹命名框 → feature（sender+相位+方向+位移区间）写入方案
 //
@@ -27,6 +35,7 @@
 #import <sys/time.h>
 #include <math.h>
 #include <float.h>
+#include <stdarg.h>
 
 @interface PSViewController (Private)
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier;
@@ -125,7 +134,7 @@ static double PTNowC(void) {
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
-// ---------- 日志系统（v1.0.16 加：内存+文件双写，只观察不改采集逻辑）----------
+// ---------- 日志系统（v1.0.17 加：内存+文件双写，只观察不改采集逻辑）----------
 static NSMutableArray *sLogLines = nil;      // 内存日志（日志页直接显示，100% 可见）
 static NSString *sLogPath = nil;             // 文件日志实际路径（nil=全部不可写）
 static NSString *SLogProbePath(void) {
@@ -166,22 +175,19 @@ static void SLog(NSString *fmt, ...) {
 
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
-typedef double (*IOHIDEventGetFloatValue_t)(void *, uint32_t);
 static IOHIDEventGetType_t sGetType = NULL;
 static IOHIDEventGetSenderID_t sGetSender = NULL;
-static IOHIDEventGetFloatValue_t sGetFloat = NULL;
 static uint64_t sCurSender = 0;
+static double sWindowUntil = 0;
 static BOOL sHooked = NO;
 static BOOL sCollectArmed = NO;      // 学习页打开时置 YES
-// 学习会话（与运行端 Tweak.xm 同口径：addEvent 层读 IOHIDEvent 相对位移 0x23/0x24）
 static BOOL sSessActive = NO;
-static uint64_t sSessSender = 0;
-static double sSessLastAt = 0;
 static double sSessDist = 0, sSessFirstDir = 0;
 static BOOL sSessHasMove = NO;
-static BOOL sSessSettled = NO;
+static CGPoint sSessLast = {0, 0};
 static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊断用）
 static IMP gOrigAddEvent = NULL;
+static IMP gOrigSendEvent = NULL;
 
 static void SAppendSample(int phase, double dir, double dist) {
     NSMutableDictionary *cfg = PTRead();
@@ -193,87 +199,78 @@ static void SAppendSample(int phase, double dir, double dist) {
     }];
     cfg[@"learningSamples"] = samples;
     PTWrite(cfg);
+    SLog(@"sample: sender=0x%llx phase=%d dir=%.1f dist=%.1f (总数%lu)", sCurSender, phase, dir, dist, (unsigned long)samples.count);
     sLastSampleAt = PTNowC();
 }
-
-static void SFinishSession(void);   // 前向声明
 
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
     @try {
         if (sGetType && sGetSender && event) {
             uint32_t type = sGetType(event);
-            // [日志观察] 打印每个事件的关键字段（只打印，不参与采集）
-            uint64_t dbgSender = sGetSender(event);
-            double dbg23 = sGetFloat ? sGetFloat(event, 0x23) : 0;
-            double dbg24 = sGetFloat ? sGetFloat(event, 0x24) : 0;
-            double dbg04 = sGetFloat ? sGetFloat(event, 0x04) : 0;
-            double dbg05 = sGetFloat ? sGetFloat(event, 0x05) : 0;
-            double dbg3B = sGetFloat ? sGetFloat(event, 0x3B) : 0;
-            double dbg3C = sGetFloat ? sGetFloat(event, 0x3C) : 0;
-            double dbg2F = sGetFloat ? sGetFloat(event, 0x2F) : -1;
-            BOOL allZero = (dbg23==0 && dbg24==0 && dbg04==0 && dbg05==0 && dbg3B==0 && dbg3C==0 && dbg2F<=0);
-            if (allZero && dbgSender != 0) {
-                // 无位移事件（空闲心跳等）：同 sender 1 秒内折叠成一条，防刷屏
-                static uint64_t sIdleSender = 0; static double sIdleFirstAt = 0; static int sIdleCount = 0;
-                double now = PTNowC();
-                if (dbgSender == sIdleSender && now - sIdleFirstAt < 1.0) { sIdleCount++; }
-                else {
-                    if (sIdleCount > 0) SLog(@"ev: …同 sender 无位移事件 %d 条（已折叠）", sIdleCount);
-                    SLog(@"ev: type=%u sender=0x%llx 全0（无位移，疑空闲心跳）", type, dbgSender);
-                    sIdleSender = dbgSender; sIdleFirstAt = now; sIdleCount = 0;
-                }
-            } else {
-                SLog(@"ev: type=%u sender=0x%llx 23/24=%.1f/%.1f 04/05=%.1f/%.1f 3B/3C=%.1f/%.1f btn=%.0f",
-                     type, dbgSender, dbg23, dbg24, dbg04, dbg05, dbg3B, dbg3C, dbg2F);
-            }
-            if (type == 11 && sCollectArmed) {
-                // ===== v1.0.4 原版采集（一字未动）=====
+            if (type == 11) {
                 uint64_t sender = sGetSender(event);
-                double dx = sGetFloat ? sGetFloat(event, 0x23) : 0;
-                double dy = sGetFloat ? sGetFloat(event, 0x24) : 0;
-                double now = PTNowC();
-                if (sSessActive && now - sSessLastAt > 0.15) SFinishSession();
-                if (!sSessActive) {
-                    sSessActive = YES;
-                    sSessSender = sender;
-                    sSessDist = 0; sSessFirstDir = 0;
-                    sSessHasMove = NO; sSessSettled = NO;
+                // [日志观察] sender 变化才打（心跳同 sender 不打，防刷屏）
+                static uint64_t sLastLoggedSender = 0;
+                if (sender != sLastLoggedSender) {
+                    sLastLoggedSender = sender;
+                    SLog(@"addEvent: type=11 sender=0x%llx armed=%d", sender, sCollectArmed);
                 }
-                sSessLastAt = now;
-                double seg = hypot(dx, dy);
-                if (seg > 0) {
-                    sSessDist += seg;
-                    if (!sSessHasMove && sSessDist > 5) {
-                        sSessHasMove = YES;
-                        sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
-                    }
-                }
-                // 事件流停止 250ms 后结算样本（同运行端）
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    SFinishSession();
-                });
+                sCurSender = sender;
+                if (sCollectArmed) sWindowUntil = PTNowC() + 0.05;
             }
         }
     } @catch (NSException *e) {}
     if (gOrigAddEvent) ((void (*)(id, SEL, void *))gOrigAddEvent)(self, _cmd, event);
 }
 
-// 结算按键会话 → append 样本（与运行端 PTFinishHIDSession 同构，含停止校验）
-static void SFinishSession(void) {
-    if (!sSessActive || sSessSettled) return;
-    if (PTNowC() - sSessLastAt < 0.25) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            SFinishSession();
-        });
-        return;
-    }
-    sSessSettled = YES;
-    int phase = (sSessDist < 30.0) ? 0 : 1;
-    double dir = sSessHasMove ? sSessFirstDir : 0;
-    sCurSender = sSessSender;
-    SLog(@"settle: sender=0x%llx phase=%d dir=%.1f dist=%.1f hasMove=%d", sSessSender, phase, dir, sSessDist, sSessHasMove);
-    sSessActive = NO;
-    SAppendSample(phase, dir, sSessDist);
+static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
+    @try {
+        if (sCollectArmed && event && PTNowC() < sWindowUntil) {
+            NSSet *touches = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
+            UITouch *t = [touches anyObject];
+            if (t && sGetSender) {
+                CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+                // [日志观察] 窗口内 UITouch 事件（量小，逐条打）
+                SLog(@"sendEvent: phase=%ld pos=(%.1f,%.1f) sender=0x%llx sessActive=%d",
+                     (long)t.phase, p.x, p.y, sCurSender, sSessActive);
+                switch (t.phase) {
+                    case UITouchPhaseBegan: {
+                        sSessActive = YES; sSessDist = 0; sSessHasMove = NO; sSessFirstDir = 0;
+                        sSessLast = p;
+                        break;
+                    }
+                    case UITouchPhaseMoved: {
+                        if (sSessActive) {
+                            double dx = p.x - sSessLast.x, dy = p.y - sSessLast.y;
+                            double seg = hypot(dx, dy);
+                            if (seg > 0) {
+                                sSessDist += seg;
+                                if (!sSessHasMove && sSessDist > 5) {
+                                    sSessHasMove = YES;
+                                    sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
+                                }
+                            }
+                            sSessLast = p;
+                        }
+                        break;
+                    }
+                    case UITouchPhaseEnded: {
+                        if (sSessActive) {
+                            sSessActive = NO;
+                            int phase = (sSessDist < 30.0) ? 0 : 1;
+                            double dir = sSessHasMove ? sSessFirstDir : 0;
+                            SLog(@"end: dist=%.1f dir=%.1f hasMove=%d → phase=%d", sSessDist, sSessFirstDir, sSessHasMove, phase);
+                            SAppendSample(phase, dir, sSessDist);
+                        }
+                        break;
+                    }
+                    case UITouchPhaseCancelled: sSessActive = NO; break;
+                    default: break;
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
 
 static void SCollectHook(void) {
@@ -283,15 +280,19 @@ static void SCollectHook(void) {
         if (iokit) {
             sGetType = (IOHIDEventGetType_t)dlsym(iokit, "IOHIDEventGetType");
             sGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
-            sGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         Class addCls = NSClassFromString(@"_UIUpdateHIDDigitizerInput");
         SEL addSel = sel_registerName("addEvent:");
         Method am = addCls ? class_getInstanceMethod(addCls, addSel) : NULL;
         if (am) { gOrigAddEvent = method_getImplementation(am); method_setImplementation(am, (IMP)SImpAddEvent); }
 
-        sHooked = (gOrigAddEvent != NULL && sGetType != NULL && sGetSender != NULL);
-        SLog(@"collect: sHooked=%d getType=%d getSender=%d getFloat=%d", sHooked, sGetType!=NULL, sGetSender!=NULL, sGetFloat!=NULL);
+        Class appCls = NSClassFromString(@"UIApplication");
+        SEL sendSel = sel_registerName("sendEvent:");
+        Method sm = appCls ? class_getInstanceMethod(appCls, sendSel) : NULL;
+        if (sm) { gOrigSendEvent = method_getImplementation(sm); method_setImplementation(sm, (IMP)SImpSendEvent); }
+
+        sHooked = (gOrigAddEvent != NULL && gOrigSendEvent != NULL && sGetType != NULL && sGetSender != NULL);
+        SLog(@"collect: sHooked=%d addEvent=%d sendEvent=%d getType=%d getSender=%d", sHooked, gOrigAddEvent!=NULL, gOrigSendEvent!=NULL, sGetType!=NULL, sGetSender!=NULL);
     }
 }
 
@@ -406,18 +407,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [specs addObject:plans];
 
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"调试"]];
-        PSSpecifier *dbg = [PSSpecifier preferenceSpecifierNamed:@"调试模式"
-            target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-            detail:nil cell:PSSwitchCell edit:nil];
-        [dbg setProperty:@"debugMode" forKey:@"key"];
-        [dbg setProperty:@NO forKey:@"default"];
-        [dbg setProperty:@"开启后记录详细运行日志（拦截/特征/匹配/执行），排查映射不生效等问题" forKey:@"staticText"];
-        [specs addObject:dbg];
-
         PSSpecifier *log = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
             target:self set:nil get:nil detail:NSClassFromString(@"PTDebugLogVC")
             cell:PSLinkCell edit:nil];
-        [log setProperty:@"查看并复制 /var/mobile/Documents/PageTurner.log 的最近记录" forKey:@"staticText"];
+        [log setProperty:@"查看并复制最近日志（内存日志，100% 可见），发给开发者定位" forKey:@"staticText"];
         [specs addObject:log];
 
         _specifiers = [specs copy];
@@ -689,12 +682,6 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 // 方案页（名称 / 记录状态 / 映射区）
 // ============================================================
 @implementation PTPlanVC
-
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    // 从动作设置页/学习页返回时自动刷新（新映射、新特征立即显示）
-    if (self.nameField) [self reload];
-}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -1059,21 +1046,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         cfg[@"plans"] = plans;
         PTWrite(cfg);
         PTSetLearningLocal(NO);
-        // 原地更新栈内的方案页（不 push 新页）：返回一次直接回方案列表，看到的就是改好名的新方案
+        PTPlanVC *vc = [PTPlanVC new];
+        vc.planName = name;
         NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
-        [stack removeLastObject];   // 移除学习页
-        PTPlanVC *planVC = nil;
-        for (UIViewController *vc in stack) {
-            if ([vc isKindOfClass:[PTPlanVC class]]) { planVC = (PTPlanVC *)vc; break; }
-        }
-        if (planVC) {
-            planVC.planName = name;
-            [planVC reload];
-        } else {
-            PTPlanVC *vc = [PTPlanVC new];
-            vc.planName = name;
-            [stack addObject:vc];
-        }
+        [stack removeLastObject];
+        [stack addObject:vc];
         [self.navigationController setViewControllers:stack animated:YES];
     }]];
     [self presentViewController:al animated:YES completion:nil];
@@ -1128,15 +1105,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
     UIView *area = [[UIView alloc] initWithFrame:CGRectMake(0, top, w, areaH)];
     area.backgroundColor = [UIColor secondarySystemBackgroundColor];
+    area.userInteractionEnabled = YES;
     [self.view addSubview:area];
 
-    // 绿点直接挂全屏 view，可在屏幕任意位置拖动（点击/双击/滑动起点终点）
-    self.dot1 = [self makeDotOnView:self.view label:@"1" color:[UIColor systemGreenColor]];
-    self.dot1.center = CGPointMake(w * 0.3, h * 0.4);
+    self.dot1 = [self makeDot:area label:@"1" color:[UIColor systemGreenColor]];
+    self.dot1.center = CGPointMake(w * 0.3, areaH * 0.4);
 
     if (self.isSwipe) {
-        self.dot2 = [self makeDotOnView:self.view label:@"2" color:[UIColor systemOrangeColor]];
-        self.dot2.center = CGPointMake(w * 0.7, h * 0.6);
+        self.dot2 = [self makeDot:area label:@"2" color:[UIColor systemOrangeColor]];
+        self.dot2.center = CGPointMake(w * 0.7, areaH * 0.6);
         UILabel *speedLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, top + areaH + 44, 80, 30)];
         speedLabel.text = @"速度";
         speedLabel.font = [UIFont systemFontOfSize:14];
@@ -1149,7 +1126,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self updatePos];
 }
 
-- (UIView *)makeDotOnView:(UIView *)root label:(NSString *)label color:(UIColor *)color {
+- (UIView *)makeDot:(UIView *)area label:(NSString *)label color:(UIColor *)color {
     UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
     dot.layer.cornerRadius = 22;
     dot.backgroundColor = [color colorWithAlphaComponent:0.35];
@@ -1163,18 +1140,17 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [dot addSubview:l];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
     [dot addGestureRecognizer:pan];
-    [root addSubview:dot];
+    [area addSubview:dot];
     return dot;
 }
 
 - (void)drag:(UIPanGestureRecognizer *)g {
     UIView *dot = g.view;
-    UIView *root = dot.superview;
-    CGPoint t = [g translationInView:root];
+    CGPoint t = [g translationInView:dot.superview];
     dot.center = CGPointMake(dot.center.x + t.x, dot.center.y + t.y);
-    CGFloat w = root.bounds.size.width, h = root.bounds.size.height;
+    CGFloat w = dot.superview.bounds.size.width, h = dot.superview.bounds.size.height;
     dot.center = CGPointMake(MAX(22, MIN(w - 22, dot.center.x)), MAX(22, MIN(h - 22, dot.center.y)));
-    [g setTranslation:CGPointZero inView:root];
+    [g setTranslation:CGPointZero inView:dot.superview];
     [self updatePos];
 }
 
@@ -1219,7 +1195,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 @end
 
 // ============================================================
-// 调试日志页（读 PageTurner.log 尾部 + 复制）
+// 调试日志页（v1.0.17 加：读内存日志尾部 + 复制）
 // ============================================================
 @implementation PTDebugLogVC
 
@@ -1235,7 +1211,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
     UITextView *tv = [[UITextView alloc] initWithFrame:self.view.bounds];
     tv.editable = NO;
-    tv.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    tv.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     tv.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
     tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:tv];
@@ -1243,22 +1219,14 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
         style:UIBarButtonItemStyleDone target:self action:@selector(copyLog)];
 
-    NSString *path = @"/var/mobile/Documents/PageTurner.log";
-    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     // 优先内存日志（100% 可见，不受文件可写限制）
     if (sLogLines.count) {
         NSArray *lines = sLogLines;
         NSUInteger n = lines.count;
         NSUInteger from = n > 200 ? n - 200 : 0;
         tv.text = [[lines subarrayWithRange:NSMakeRange(from, n - from)] componentsJoinedByString:@"\n"];
-    } else if (content.length) {
-        NSArray *lines = [content componentsSeparatedByString:@"\n"];
-        NSUInteger n = lines.count;
-        NSUInteger from = n > 200 ? n - 200 : 0;
-        NSArray *tail = [lines subarrayWithRange:NSMakeRange(from, n - from)];
-        tv.text = [tail componentsJoinedByString:@"\n"];
     } else {
-        tv.text = @"日志为空。\n\n进入「记录与映射」→ 点进方案 → 新增记录（大白屏录制页）后按翻页器同一键，日志会实时写入此页。";
+        tv.text = @"日志为空。\n\n进「记录与映射」→ 新增方案 → 进方案页 → 新增记录（大白屏）后按翻页器同一键，再回到这里复制。";
     }
 }
 
