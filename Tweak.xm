@@ -1,5 +1,14 @@
 // ============================================================
-// PageTurner v1.0.8 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.9 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.9（录制回滚 v1.0.4 行为 + 学习轨迹可视化 + 日志修复）：
+//   - 【录制】去掉设备锚定锁定（v1.0.6 引入的 sAnchorSender 把录制锁死的根因，
+//     回滚到 v1.0.4 的"不锁设备"行为）：sender≠0 的外部 HID 事件一律接收，
+//     手指触摸（sender=0）天然排除 —— v1.0.4 是最后一个能正常录翻页器的版本
+//   - 【轨迹】学习页新增全屏轨迹 overlay：录制时显示最近一次按键的触摸轨迹
+//     （起点绿圈 → 沿线绿点 → 终点红点 + 蓝位移线 + 起终点坐标）
+//   - 【日志】PTLog 固定路径 /var/mobile/Documents/ 目录在 iOS 上不存在导致
+//     写入永远失败 → 日志永远空；现自动创建目录，并同时写 App 容器 Documents
 //
 // v1.0.8（拦截架构回滚到 sendEvent 层 —— 修复方向键完全没拦的根因）：
 //   - 【核心】v1.0.5 把拦截搬到 _UIUpdateHIDDigitizerInput -addEvent: 读 0x23/0x24
@@ -58,6 +67,12 @@ static const double kDistSlack = 30.0;        // 位移区间匹配裕度
 // 日志
 // ============================================================
 static const char *gLogPath = NULL;
+static void PTEnsureDir(NSString *dir) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:dir]) {
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+}
 static void PTLog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
@@ -67,10 +82,16 @@ static void PTLog(NSString *fmt, ...) {
     char tbuf[64]; strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &tmv);
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@\n", tbuf, (int)(tv.tv_usec/1000), msg];
     NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
+    // ① 注入进程容器 Documents（生效 App 的日志主位置）
     if (gLogPath) {
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:[NSString stringWithUTF8String:gLogPath]];
+        NSString *p = [NSString stringWithUTF8String:gLogPath];
+        PTEnsureDir([p stringByDeletingLastPathComponent]);
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
         if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:d]; [fh closeFile]; } @catch (NSException *e) {} }
     }
+    // ② 固定路径 /var/mobile/Documents/PageTurner.log
+    //    （旧 bug：该目录在 iOS 上不存在 → 写入一直失败 → 日志永远空。现自动建目录）
+    PTEnsureDir(@"/var/mobile/Documents");
     NSFileHandle *fh2 = [NSFileHandle fileHandleForWritingAtPath:@"/var/mobile/Documents/PageTurner.log"];
     if (fh2) { @try { [fh2 seekToEndOfFile]; [fh2 writeData:d]; [fh2 closeFile]; } @catch (NSException *e) {} }
 }
