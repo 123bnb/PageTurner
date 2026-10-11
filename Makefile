@@ -1,4 +1,4 @@
-# PageTurner v1.0.23 —— 翻页器按键拦截正式版（学习模式 + 映射 + 动作执行）
+# PageTurner v1.0.24 —— 翻页器按键拦截正式版（学习模式 + 映射 + 动作执行）
 # 架构：Filter = Bundles com.apple.UIKit（照抄 volumekeytapper）→ 所有 UIKit App 注入
 #       → Preferences（设置 App）进程收集学习样本（bundle 自 hook）→ 生效 App 拦截执行
 # 事件：hook UIApplication -sendEvent:（UIEvent 层，UITouch 真实坐标）
@@ -7,6 +7,10 @@
 # UI：全部在系统设置 → PageTurner 设置页（Preferences bundle），App 内零 UI
 # 日志：App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log
 #
+# v1.0.24 新增（照抄 volumekeytapper 注入可视化）：
+#   · 注入探针 ShowProbeAlert：第三方 App 启动 2.5s 弹窗（本App/注入✅/全局配置/总开关/
+#     crashTest/勾选App数/本App被勾选）→ 打开 App 一眼看出注入成功没
+#   · 提醒条 ShowToast（勾选生效 App）：黑底白字+黄边框、中上方、2 秒 = 注入成功标识
 # v1.0.23 关键修复（三路实证锁定终极根因 = Filter，不是符号）：
 #   · TrollCM deb 拆包：Filter={ Bundles=[com.apple.springboard] } + _MSHookMessageEx×4 → 注入 SB 成功
 #   · volumekeytapper Makefile：Filter={ Bundles=[com.apple.UIKit] } + -Wl,-undefined,dynamic_lookup
@@ -18,7 +22,7 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.23
+PACKAGE_VERSION := 1.0.24
 
 DEBUG = 0
 ARCHS = arm64 arm64e
