@@ -1,31 +1,34 @@
 // ============================================================
-// PageTurner v1.0.17 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.18 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.18：运行端双通道（修复"映射执行不到"）：
+//   方向键 = addEvent 层读 HID 相对位移（0x23/0x24）匹配（sender+方向±15°，
+//   跳过 dist 区间：HID 计数与 UITouch pt 量级不同），吞事件不让 UIKit 当滚动消费；
+//   点击键 = sendEvent 层 UITouch 会话匹配（真实 v1.0.4 原链路）。
+//   执行 = PTFakeMetaTouch（与 volumekeytapper 同源 KIF 合成触摸，已验证可点触）。
 //
 // v1.0.17：整包回滚到真实 v1.0.4（release tag v1.0.4 = commit 0cd50018），
-//   运行端本文件逐字未动；学习收集由设置页 bundle 内自 hook 负责
-//   （addEvent 拿 sender → 50ms 窗口 → sendEvent UITouch 坐标会话）。
+//   学习采集 = 设置页 bundle 内自 hook（addEvent 拿 sender → 50ms 窗口
+//   → sendEvent UITouch 坐标会话），采集逻辑逐字未动。
 //
 // v1.0.1 架构修正（用户定稿）：
-//   - 所有 UI（方案列表/方案页/学习页/动作设置）在【系统设置 → PageTurner 设置页】，
-//     App 内零 UI，删除三指手势
+//   - 所有 UI 在【系统设置 → PageTurner 设置页】，App 内零 UI
 //   - 来源 sender 录进特征，不写死设备：学什么拦什么
-//   - 学习宿主 = Preferences 进程：学习页打开时 tweak 收集翻页器事件 → plist，
-//     设置页轮询判定
+//   - 学习宿主 = Preferences 进程：学习页打开时收集 → plist，设置页轮询判定
 //
 // 注入范围：所有进程（roothide 黑名单默认）
 //   - Preferences 进程：旁路（学习收集由设置页 bundle 自 hook）
 //   - 其它 App：运行时检查 masterEnabled + enabledApps[bundleID] 才 hook
 //
 // 事件链路：
-//   _UIUpdateHIDDigitizerInput -addEvent:（IOHIDEvent 层，拿 sender）
-//   → 学过的 sender / 学习模式 → 开窗口
-//   → UIApplication -sendEvent:（UIEvent 层）会话 up 提取特征
-//   → 学习模式（Preferences）：append 样本到 plist learningSamples，不吞
-//   → 运行模式（生效 App）：sender+相位+方向+位移匹配唯一方案 → 吞 → 防抖 → 顺序执行
+//   addEvent（IOHIDEvent 层）
+//     → 方向键（已学 sender + HID 位移）：吞 + HID 会话 → 匹配 → 执行
+//     → 点击键（已学 sender + 无位移）：开窗口 → sendEvent 会话 → 匹配 → 执行
+//   sendEvent（UIEvent 层）会话：Began/Moved/Ended 结算 UITouch 位移特征
 //
 // 动作：PTFakeMetaTouch（点击/双击/滑动）+ AVSystemController（静音/音量±）
-// 防递归：gIsInjecting
-// 日志：App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log
+// 防递归：gIsInjecting；防抖：gDebounceMs
+// 日志：App 容器 Documents/PageTurner.log
 // ============================================================
 
 #import <UIKit/UIKit.h>
@@ -157,12 +160,14 @@ void PTSetLearning(BOOL on) {
 }
 
 // ============================================================
-// IOKit（sender 读取）
+// IOKit（sender 读取 + HID 相对位移）
 // ============================================================
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
+typedef double (*IOHIDEventGetFloatValue_t)(void *, uint32_t);
 static IOHIDEventGetType_t pGetType = NULL;
 static IOHIDEventGetSenderID_t pGetSender = NULL;
+static IOHIDEventGetFloatValue_t pGetFloat = NULL;
 
 static uint64_t gCurSender = 0;              // 最近 digitizer 事件 sender
 static double gPagerWindowUntil = 0;         // 翻页器活跃窗口
@@ -170,6 +175,91 @@ static double gPagerWindowUntil = 0;         // 翻页器活跃窗口
 static BOOL PTIsLearnedSender(uint64_t s) {
     for (int i = 0; i < gLearnedSenderCount; i++) if (gLearnedSenders[i] == s) return YES;
     return NO;
+}
+
+// ============================================================
+// 特征结构（前置：HID 通道与触摸会话共用）
+// ============================================================
+typedef struct {
+    int phase;        // 0=tap 1=swipe
+    double direction;
+    double dist;
+} PagerFeature;
+
+static void PTExecutePlan(NSString *name);                    // 前向声明（动作执行段定义）
+static NSString *PTMatchPlanHID(PagerFeature f, uint64_t sender); // 前向声明（匹配段定义）
+
+// ============================================================
+// HID 通道（v1.0.18 加）：addEvent 层读相对位移 0x23/0x24
+// 方向键在多数 App 不产生 UITouch 会话（UIKit 直接当滚动/悬停消费），
+// 真实 v1.0.4 的 sendEvent 会话匹配在目标 App 对方向键永远走不到。
+// HID 相对位移与 UITouch 位移方向一致（屏幕方向），量级不同（计数 vs pt），
+// 所以本通道匹配只比方向（±15°），不比 dist 区间。
+// ============================================================
+typedef struct {
+    BOOL active;
+    uint64_t sender;
+    double lastEventAt;
+    double totalDist;
+    double firstMoveDir;
+    BOOL hasMove;
+    BOOL settled;
+} PagerHIDSession;
+static PagerHIDSession gHID;
+static const double kPagerGapSec = 0.25;     // HID 事件流停止 250ms 判定按键结束
+
+static void PTFinishHIDSession(void);
+static void PTPagerAddDelta(double dx, double dy) {
+    double now = PTNow();
+    if (gHID.active && now - gHID.lastEventAt > kPagerGapSec) PTFinishHIDSession();
+    if (!gHID.active) {
+        gHID.active = YES;
+        gHID.sender = gCurSender;
+        gHID.totalDist = 0;
+        gHID.firstMoveDir = 0;
+        gHID.hasMove = NO;
+        gHID.settled = NO;
+    }
+    gHID.lastEventAt = now;
+    double seg = hypot(dx, dy);
+    if (seg > 0) {
+        gHID.totalDist += seg;
+        if (!gHID.hasMove && gHID.totalDist > 5) {
+            gHID.hasMove = YES;
+            gHID.firstMoveDir = atan2(dy, dx) * 180.0 / M_PI;
+        }
+    }
+    PTLog(@"[HID] sender=0x%llx dx=%.1f dy=%.1f 累计=%.1f dir=%.1f", gHID.sender, dx, dy, gHID.totalDist, gHID.firstMoveDir);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        PTFinishHIDSession();
+    });
+}
+
+// 结算 HID 按键：方向键特征 → 匹配（sender+方向，跳过 dist）→ 执行
+static void PTFinishHIDSession(void) {
+    if (!gHID.active || gHID.settled) return;
+    if (PTNow() - gHID.lastEventAt < 0.25) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            PTFinishHIDSession();
+        });
+        return;
+    }
+    gHID.settled = YES;
+    uint64_t sender = gHID.sender;
+    PagerFeature f;
+    f.phase = 1;                        // HID 通道只处理有位移的方向键（phase=1）
+    f.direction = gHID.hasMove ? gHID.firstMoveDir : 0;
+    f.dist = gHID.totalDist;
+    gHID.active = NO;
+    if (!gHID.hasMove) { PTLog(@"[HID] 无位移（点击键？走会话通道）"); return; }
+    PTLog(@"[HID] 结算 sender=0x%llx phase=%d dir=%.1f dist=%.1f", sender, f.phase, f.direction, f.dist);
+    NSString *plan = PTMatchPlanHID(f, sender);
+    if (plan) {
+        PTLog(@"[HID] 命中方案「%@」→ 执行", plan);
+        PTExecutePlan(plan);
+    } else {
+        PTLog(@"[HID] 未命中：sender=0x%llx dir=%.1f dist=%.1f 已学sender=%d", sender, f.direction, f.dist, gLearnedSenderCount);
+    }
 }
 
 // ============================================================
@@ -184,12 +274,6 @@ typedef struct {
     BOOL hasMove;
 } PagerSession;
 static PagerSession gSession;
-
-typedef struct {
-    int phase;        // 0=tap 1=swipe
-    double direction;
-    double dist;
-} PagerFeature;
 
 // ============================================================
 // 事件处理（学习收集 / 运行匹配+吞）
@@ -235,6 +319,28 @@ static NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
         }
         double score = d + (f.phase == 1 ? fabs(f.dist - (lo + hi) / 2.0) / 100.0 : 0);
         if (score < bestScore) { bestScore = score; best = name; }
+    }
+    return best;
+}
+
+// HID 通道匹配（v1.0.18 加）：sender + phase=1 + 方向±15°，跳过 dist 区间
+// （HID 相对位移量级是计数，与学习端 UITouch 位移的 pt 量级不同，不能共用区间）
+static NSString *PTMatchPlanHID(PagerFeature f, uint64_t sender) {
+    NSString *best = nil;
+    double bestScore = DBL_MAX;
+    for (NSString *name in gPlans) {
+        NSDictionary *ft = gPlans[name][@"feature"];
+        if (!ft) continue;
+        if (ft[@"sender"]) {
+            unsigned long long s = 0;
+            NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
+            if (![sc scanHexLongLong:&s] || s != sender) continue;
+        }
+        if ([ft[@"phase"] intValue] != 1) continue;         // 方向键特征（phase=1）
+        double pd = [ft[@"direction"] doubleValue];
+        double d = fabs(fabs(f.direction - pd)); if (d > 180) d = 360 - d;
+        if (d > kDirTolerance) continue;
+        if (d < bestScore) { bestScore = d; best = name; }
     }
     return best;
 }
@@ -429,9 +535,21 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
         if (type == 11) {
             gCurSender = sender;
             if (gIsPreferences && gLearnActive) {
-                gPagerWindowUntil = PTNow() + kPagerWindowSec;   // 学习：全部 digitizer
+                // 学习（Preferences 进程，设置页 bundle 自 hook 已处理，tweak 在此旁路不 hook）
+                gPagerWindowUntil = PTNow() + kPagerWindowSec;
             } else if (PTIsLearnedSender(sender)) {
-                gPagerWindowUntil = PTNow() + kPagerWindowSec;   // 运行：学过的 sender
+                // 运行（生效 App）：已学 sender
+                double dx = pGetFloat ? pGetFloat(event, 0x23) : 0;
+                double dy = pGetFloat ? pGetFloat(event, 0x24) : 0;
+                if (fabs(dx) + fabs(dy) > 0.001) {
+                    // 方向键（有 HID 相对位移）：HID 通道，吞事件不让 UIKit 当滚动/悬停消费
+                    PTLog(@"[addEvent] 方向键 sender=0x%llx dx=%.2f dy=%.2f → HID 通道（吞）", sender, dx, dy);
+                    PTPagerAddDelta(dx, dy);
+                    return;
+                }
+                // 点击键（无 HID 位移）：放行 → sendEvent 会话通道
+                PTLog(@"[addEvent] 点击键 sender=0x%llx dx=0 dy=0 → 会话通道", sender);
+                gPagerWindowUntil = PTNow() + kPagerWindowSec;
             }
         }
     }
@@ -480,9 +598,10 @@ static void PTInit() {
         if (iokit) {
             pGetType = (IOHIDEventGetType_t)dlsym(iokit, "IOHIDEventGetType");
             pGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
+            pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.17 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.18 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
