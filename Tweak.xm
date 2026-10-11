@@ -1,5 +1,11 @@
 // ============================================================
-// PageTurner v1.0.36 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.37 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.37（滑动时序参数扩展）：
+//   1. 滑动新增「弹起停留 liftMs」：到终点后停 liftMs 再 Ended（默认 0）
+//   2. 滑动分段 steps 从写死 12 改为可调（默认 12，范围 6~48，超范围自动钳制）
+//   3. PTFakeSwipeAsync 签名扩展（holdMs/liftMs/steps），PTRunAction 读取动作参数传入
+//   测试区（设置页）同步；旧滑动动作无 liftMs/steps 字段 → 走默认（0/12）兼容
 //
 // v1.0.36（点击特征位移矢量匹配）：
 //   点击样本/特征新增 tapDx（位移方向符号 +1右/-1左/0原地）：
@@ -778,23 +784,32 @@ static void PTFakeTap(CGPoint p, int pressMs) {
     gInFakeTouch = NO;
 }
 
-// 滑动（异步分步，不阻塞主线程；holdMs = 按下停留，完成后调 completion）
-static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int holdMs, int token, void (^done)(void)) {
+// 滑动（异步分步，不阻塞主线程；holdMs = 按下停留，liftMs = 弹起停留，steps = 分段数，完成后调 completion）
+// v1.0.37：steps 从写死 12 改为可调（默认 12）；到终点后先停 liftMs 再 Ended
+static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int holdMs, int liftMs, int steps, int token, void (^done)(void)) {
     // v1.0.32：注入触摸期间置 gInFakeTouch=YES → sendEvent 层放行（不走拦截）
     gInFakeTouch = YES;
     NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
     gInFakeTouch = NO;
-    int steps = 12;
+    if (steps < 2) steps = 2; if (steps > 48) steps = 48;
     double per = durationMs / steps / 1000.0;
     __block int i = 1;
     __block void (^step)(void);
     step = ^(void) {
         if (token != gExecToken) { if (done) done(); return; }
         if (i > steps) {
-            gInFakeTouch = YES;
-            [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
-            gInFakeTouch = NO;
-            if (done) done();
+            void (^liftEnd)(void) = ^{
+                if (token != gExecToken) { if (done) done(); return; }
+                gInFakeTouch = YES;
+                [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+                gInFakeTouch = NO;
+                if (done) done();
+            };
+            if (liftMs > 0) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), liftEnd);
+            } else {
+                liftEnd();
+            }
             return;
         }
         double t = (double)i / steps;
@@ -831,10 +846,13 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
         // v1.0.28：speed = 真实速度 pt/s；时长 = 距离/速度
         double speed = [a[@"speed"] doubleValue] ?: 200;
         int holdMs = [a[@"holdMs"] intValue] ?: 20;
+        // v1.0.37：弹起停留 + 滑动分段（默认 0 / 12）
+        int liftMs = [a[@"liftMs"] intValue] ?: 0;
+        int steps = [a[@"steps"] intValue] ?: 12;
         double dist = hypot(to.x - from.x, to.y - from.y);
         double durMs = (dist / MAX(speed, 1.0)) * 1000.0;
         if (durMs < 50) durMs = 50;
-        PTFakeSwipeAsync(from, to, durMs, holdMs, token, next);
+        PTFakeSwipeAsync(from, to, durMs, holdMs, liftMs, steps, token, next);
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
@@ -1001,7 +1019,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.36 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.37 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,

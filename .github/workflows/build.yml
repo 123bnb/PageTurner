@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.36-roothide.deb
+          DEB=PageTurner-1.0.37-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.36
-          NOTES=$'PageTurner v1.0.36（roothide 直装）—— 点击特征启用位移矢量匹配（区分同 sender 的双点击键）\n\n【v1.0.36 改了什么】\n1. 点击特征新增 tapDx（位移方向符号：向右/向左/原地）：会话按起点→终点 x 分量计算，录制页显示「位移：向右 0.4 pt」\n2. 点击匹配/去重启用位移判定：方向符号一致 + 位移区间（容差 0.15pt）——解决新 2 键翻页器（两键同 sender 0x1000786aa、位移仅 0.4/0.7 pt）第二键被误判「与已有方案高度相似」录不进的问题\n3. 正常录制与「增加特征」都保存点击位移；旧特征无 tapDx 自动按旧规则匹配（兼容不误伤）\n4. 特征列表与详情显示点击位移方向+大小\n\n【怎么测】\n1. 设置 → PageTurner → 记录与映射 → 学习：分别录新翻页器 0.4 键（右移）和 0.7 键（左移）两个方案，第二键不再被拒录\n2. 方案页测试：按 0.4 键命中方案 A、按 0.7 键命中方案 B，互不串\n3. 番茄小说实测：两个键各自触发各自映射、原翻页器动作被吞\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.37
+          NOTES=$'PageTurner v1.0.37（roothide 直装）—— 滑动时序参数扩展：弹起停留 + 滑动分段\n\n【v1.0.37 改了什么】\n1. 滑动动作参数页新增「弹起停留 liftMs」（默认 0ms，0~500）：滑到终点后停 liftMs 再弹起（Ended），默认 0 = 原行为不变\n2. 滑动分段 steps 从写死的 12 段改为可调（默认 12，6~48）：段数只影响插值密度/轨迹平滑度，不影响总时长（总时长 = 距离÷速度）\n3. 参数页滑动四项：按下停留 / 弹起停留 / 滑动速度 / 滑动分段，每条滑动动作独立\n4. 测试区与运行端（番茄小说）行为完全一致；旧滑动动作无新字段自动走默认兼容\n\n【怎么测】\n1. 方案页 → 长按一条滑动动作 → 动作参数：看到 4 个滑块，调弹起停留（如 300ms）和滑动分段（如 24）\n2. 方案页测试：滑动到终点会停 300ms 再消失，轨迹更平滑\n3. 番茄小说实测：翻页器滑动映射按新时序执行；滑动动作独立参数互不影响\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.27" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.37" --notes "$NOTES"
           fi

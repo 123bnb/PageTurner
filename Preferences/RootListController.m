@@ -1,5 +1,10 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.36）
+// RootListController.m —— PageTurner 设置页（v1.0.37）
+//
+// v1.0.37（滑动时序参数扩展，与运行端同步）：
+//   1. 动作参数页滑动分支：按下停留 + 弹起停留(liftMs) + 滑动速度 + 滑动分段(steps 默认12)
+//   2. 测试区滑动执行：读 holdMs/liftMs/steps，到终点停 liftMs 再 Ended（与运行端统一）
+//   3. 新建滑动动作默认存 liftMs=0/steps=12；编辑模式保留参数列表加 liftMs/steps
 //
 // v1.0.36（点击特征位移矢量匹配）：
 //   1. 点击样本新增 tapDx（位移方向符号 +1右/-1左/0原地）：会话起点 sSessStart 记录，
@@ -497,16 +502,28 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         double distT = hypot(to.x - from.x, to.y - from.y);
         double durMs = (distT / MAX(speed, 1.0)) * 1000.0;
         if (durMs < 50) durMs = 50;
+        // v1.0.37：按下停留/弹起停留/滑动分段 与运行端统一（可调）
+        int holdMs = [a[@"holdMs"] intValue] ?: 20;
+        int liftMs = [a[@"liftMs"] intValue] ?: 0;
+        int steps = [a[@"steps"] intValue] ?: 12;
+        if (steps < 2) steps = 2; if (steps > 48) steps = 48;
         PTTestShowDot(from, to, YES, durMs / 1000.0);
         NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
-        int steps = 12;
         double per = durMs / 1000.0 / steps;
         __block int i = 1;
         __block void (^step)(void);
         step = ^(void) {
             if (i > steps) {
-                [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
-                if (next) next();
+                // v1.0.37：弹起停留——到终点后停 liftMs 再 Ended
+                if (liftMs > 0) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                        [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+                        if (next) next();
+                    });
+                } else {
+                    [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+                    if (next) next();
+                }
                 return;
             }
             double t = (double)i / steps;
@@ -515,7 +532,7 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
             i++;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(per * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
         };
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.02 * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
@@ -2105,8 +2122,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"x1"] = @(self.dot1.center.x); a[@"y1"] = @(self.dot1.center.y);
         a[@"x2"] = @(self.dot2.center.x); a[@"y2"] = @(self.dot2.center.y);
         // v1.0.28：speed = 真实速度 pt/s（默认 200）；holdMs = 按下停留（默认 20）
+        // v1.0.37：liftMs = 弹起停留（默认 0）；steps = 滑动分段（默认 12）
         a[@"speed"] = @(200);
         a[@"holdMs"] = @(20);
+        a[@"liftMs"] = @(0);
+        a[@"steps"] = @(12);
     } else if ([self.actionType isEqualToString:@"doubleTap"]) {
         a[@"type"] = @"doubleTap";
         a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
@@ -2118,9 +2138,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
         a[@"pressMs"] = @(30);
     }
-    // v1.0.29 编辑模式：保留原时序参数（pressMs/gapMs/speed/holdMs/ms），只更新坐标
+    // v1.0.29 编辑模式：保留原时序参数（pressMs/gapMs/speed/holdMs/liftMs/steps/ms），只更新坐标
     if (self.editIndex >= 0 && self.editAction) {
-        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"ms"]) {
+        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"liftMs", @"steps", @"ms"]) {
             if (self.editAction[k]) a[k] = self.editAction[k];
         }
     }
@@ -2166,8 +2186,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         defs = @[ @{@"key": @"pressMs", @"name": @"按下时长", @"unit": @"ms", @"min": @10, @"max": @500, @"def": @30},
                   @{@"key": @"gapMs", @"name": @"两次间隔", @"unit": @"ms", @"min": @50, @"max": @800, @"def": @120} ];
     } else if ([type isEqualToString:@"swipe"]) {
+        // v1.0.37：弹起停留（liftMs）+ 滑动分段（steps）与按下停留放一起
         defs = @[ @{@"key": @"holdMs", @"name": @"按下停留", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @20},
-                  @{@"key": @"speed", @"name": @"滑动速度", @"unit": @"pt/s", @"min": @100, @"max": @2000, @"def": @200} ];
+                  @{@"key": @"liftMs", @"name": @"弹起停留", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @0},
+                  @{@"key": @"speed", @"name": @"滑动速度", @"unit": @"pt/s", @"min": @100, @"max": @2000, @"def": @200},
+                  @{@"key": @"steps", @"name": @"滑动分段", @"unit": @"段", @"min": @6, @"max": @48, @"def": @12} ];
     } else if ([type isEqualToString:@"delay"]) {
         defs = @[ @{@"key": @"ms", @"name": @"延迟时长", @"unit": @"ms", @"min": @50, @"max": @5000, @"def": @100} ];
     } else {
