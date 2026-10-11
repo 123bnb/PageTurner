@@ -45,10 +45,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.31-roothide.deb
+          DEB=PageTurner-1.0.32-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.31
-          NOTES=$'PageTurner v1.0.31（roothide 直装）—— 深色模式适配\n\n【v1.0.31 改了什么】\n1. 学习页大白屏：白底改系统自适应背景——深色模式下黑底白字，不再白底白字看不清\n2. 学习页/测试页实时记录区：浅灰底改系统次级背景（深色模式可读）\n\n【怎么测】\n1. 装 v1.0.31 → 注销 → 夜晚/深色模式下打开设置→PageTurner 各页应清晰可读\n2. 番茄小说双动作问题已在前版修（窗口 0.4s），如仍异常把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.32
+          NOTES=$'PageTurner v1.0.32（roothide 直装）—— 双动作彻底根除（执行中按键不再放行）\n\n【v1.0.32 改了什么】\n1. 双动作根因（v1.0.31 实测）：v1.0.30 的「执行中放行」把映射执行期间按的翻页器键也放行了——映射滑动要几秒，期间再按键 → 原始滑动+映射一起出现。\n2. 修复：注入触摸加 gInFakeTouch 标志精确识别（fakeTouchId 是同步调用，包住即可）——翻页器按键无论是否执行中一律拦截（防抖内忽略/防抖外中断旧序列重启新序列，绝不放行原始滑动）；注入触摸正常放行（映射不失效）。\n3. 提醒：你映射的滑动动作执行要 4 秒 = 速度设了 200pt/s 太慢——方案页长按该动作 → 速度调 500~800 就快了\n\n【怎么测】\n1. 装 v1.0.32 → 注销 → 番茄小说\n2. 按翻页器键：只应有映射动作；执行中再按也不该再出现原始滑动\n3. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else

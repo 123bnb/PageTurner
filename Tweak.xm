@@ -1,5 +1,15 @@
 // ============================================================
-// PageTurner v1.0.30 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.32 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.32（v1.0.31 实测：拦截已生效但仍见双动作）：
+//   根因：v1.0.30 的「执行中放行（!gIsInjecting）」把执行期间按的翻页器键也放行了——
+//   映射执行要数秒（滑动速度慢），期间再按键 → 原始滑动 + 映射同时出现 = 双动作。
+//   修复：gInFakeTouch 标志精确区分注入触摸（fakeTouchId 同步调用，包住即可）。
+//   翻页器按键无论是否执行中一律拦截（防抖内忽略/防抖外中断重启，绝不放行）；
+//   注入触摸靠 gInFakeTouch 放行（否则映射触摸 Began 被吞 → 映射失效）
+//
+// v1.0.31（深色模式适配）：
+//   设置页：学习页大白屏 whiteColor → systemBackgroundColor；记录区浅灰底 → 次级背景
 //
 // v1.0.30（v1.0.29 实测日志定位的双动作根因）：
 //   1. 窗口 50ms → 0.4s：翻页器按键起始 HID 事件有空隙（实测 73ms），
@@ -657,6 +667,9 @@ static void PTShowProbeAlert(void) {
 // 动作执行（PTFakeMetaTouch + AVSystemController）
 // ============================================================
 static BOOL gIsInjecting = NO;
+static BOOL gInFakeTouch = NO;   // v1.0.32：PTFakeMetaTouch 注入触摸期间置 YES（同步调用，包住即可）
+                                  // 用于精确区分「注入触摸（放行）」vs「翻页器按键（拦截）」——
+                                  // 注入触摸没有 addEvent、sender 残留翻页器，必须靠这个标志识别
 static int gExecToken = 0;
 static double gLastExec = 0;
 static float gMutedVolume = -1;   // 静音前音量（-1=未静音）
@@ -715,14 +728,22 @@ static void PTSetVolume(float v) {
 static void PTFakeTap(CGPoint p, int pressMs) {
     UIWindow *w = [UIApplication sharedApplication].keyWindow;
     if (!w) return;
+    // v1.0.32：注入触摸期间置 gInFakeTouch=YES → sendEvent 层放行（不走拦截，映射触摸不丢 Began）
+    gInFakeTouch = YES;
     NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
+    gInFakeTouch = NO;
     usleep(pressMs * 1000);
+    gInFakeTouch = YES;
     [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:UITouchPhaseEnded];
+    gInFakeTouch = NO;
 }
 
 // 滑动（异步分步，不阻塞主线程；holdMs = 按下停留，完成后调 completion）
 static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int holdMs, int token, void (^done)(void)) {
+    // v1.0.32：注入触摸期间置 gInFakeTouch=YES → sendEvent 层放行（不走拦截）
+    gInFakeTouch = YES;
     NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
+    gInFakeTouch = NO;
     int steps = 12;
     double per = durationMs / steps / 1000.0;
     __block int i = 1;
@@ -730,13 +751,17 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
     step = ^(void) {
         if (token != gExecToken) { if (done) done(); return; }
         if (i > steps) {
+            gInFakeTouch = YES;
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+            gInFakeTouch = NO;
             if (done) done();
             return;
         }
         double t = (double)i / steps;
         CGPoint p = CGPointMake(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+        gInFakeTouch = YES;
         [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:UITouchPhaseMoved];
+        gInFakeTouch = NO;
         i++;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(per * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
     };
@@ -851,12 +876,12 @@ static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
             PTDebugUpdate((__bridge void *)t, p, t.phase, (gCurSender != 0));
         }
     }
-    // v1.0.30：窗口/会话判断优先于 gIsInjecting（v1.0.29 已反转）——
-    // 已学 sender 会话无视 gIsInjecting 继续吞+执行（修双动作）；
-    // 但映射执行中（gIsInjecting=YES）注入触摸必须放行：注入触摸没有对应 addEvent、
-    // gCurSender 残留翻页器 sender，若走 PTHandlePagerEvent 会把映射触摸的 Began 吞掉→映射失效。
-    // 执行中按键（间隔>防抖）会中断旧序列重启新序列，放行一次原始滑动可接受。
-    if (event && !gIsInjecting && (PTNow() < gPagerWindowUntil || gSession.active)) {
+    // v1.0.32：窗口/会话判断始终优先（含映射执行中）——
+    // 翻页器按键（已学 sender）无论是否执行中，一律拦截整段吞：执行中按键会命中→
+    // 防抖内忽略 / 防抖外中断旧序列重启新序列，绝不放行原始滑动（根除双动作）；
+    // 注入触摸靠 gInFakeTouch 精确放行（注入触摸没有 addEvent、sender 残留翻页器，
+    // 若走 PTHandlePagerEvent 会把映射触摸的 Began 吞掉 → 映射失效）
+    if (event && !gInFakeTouch && (PTNow() < gPagerWindowUntil || gSession.active)) {
         if (PTHandlePagerEvent(event)) return;
     }
     if (gIsInjecting) {
@@ -936,7 +961,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.31 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.32 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
