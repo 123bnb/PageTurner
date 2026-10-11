@@ -1,4 +1,4 @@
-﻿# PageTurner v1.0.25 —— 翻页器按键拦截正式版（学习模式 + 映射 + 动作执行）
+# PageTurner v1.0.25 —— 翻页器按键拦截正式版（学习模式 + 映射 + 动作执行）
 # 架构：Filter = Bundles com.apple.UIKit（照抄 volumekeytapper）→ 所有 UIKit App 注入
 #       → Preferences（设置 App）进程收集学习样本（bundle 自 hook）→ 生效 App 拦截执行
 # 事件：hook UIApplication -sendEvent:（UIEvent 层，UITouch 真实坐标）

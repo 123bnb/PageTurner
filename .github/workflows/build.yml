@@ -1,4 +1,4 @@
-﻿name: Build PageTurner
+name: Build PageTurner
 
 on:
   push:
