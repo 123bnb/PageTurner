@@ -45,13 +45,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.11-roothide.deb
+          DEB=PageTurner-1.0.12-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.11
-          NOTES=$'PageTurner v1.0.11（roothide 直装）—— 录制端全链路日志 + 会话彻底复位\n\n【v1.0.11 改了什么】\n1. 【录制端日志】设置 App 里录制时，全链路写 /var/mobile/Documents/PageTurner.log：hook 是否成功、每个事件的 sender/dx/dy、结算的 phase/dir/dist、判重拒绝时新旧特征对比 —— 录不到/重复录入一眼定位\n2. 【会话复位】学习页进入/退出时全量复位会话状态，防止"录一半退出 → 残留状态 → 下次录不进"\n3. 【判重提示】被拒时显示新旧特征详细对比（方向/位移/sender），确认是真重复还是误判\n4. 录制逻辑仍是 v1.0.4 原版（addEvent 0x23/0x24，无过滤无锚定），没动\n\n【怎么测】\n1. 装 v1.0.11 → 注销 → 重开设置\n2. 新建方案 → 新增记录 → 连续按同一个键（手指勿碰屏幕）直到稳定\n3. 再新增记录录第二个键 —— 如果又提示重复，看提示里的新旧特征对比\n4. 设置页 → 日志（复制）把内容发我，或直接发 /var/mobile/Documents/PageTurner.log'
+          TAG=v1.0.12
+          NOTES=$'PageTurner v1.0.12（roothide 直装）—— 录制日志路径修复（日志这次真的能写出来）\n\n【v1.0.12 改了什么】\n上一版（v1.0.11）日志为空的原因找到了：录制日志写的是 /var/mobile/Documents/PageTurner.log，但 iOS 沙盒只允许 Preferences 进程写自己的容器，外部路径打开必失败（错误被忽略）→ 日志永远空；设置页"日志"页读的也是这个死路径。\n1. 【日志修复】录制日志改写到 Preferences 沙盒容器，设置页"日志"页同步读取 → 现在录完键回去就能看到每个事件的 sender/位移/结算/判重\n2. 录制逻辑仍是 v1.0.4 原版（addEvent 0x23/0x24，无过滤无锚定），没动\n\n【怎么测】\n1. 装 v1.0.12 → 注销 → 重开设置\n2. 设置 → PageTurner → 日志（先看是不是空）\n3. 新建方案 → 新增记录 → 连按同一个键（手指勿碰屏幕）直到稳定 → 返回\n4. 再新增记录录第二个键 —— 如果提示重复，记下提示里的新旧特征对比\n5. 回 设置 → PageTurner → 日志 → 复制，把内容完整发我（关键：第二个键的 sender/dx/dy 到底是什么）'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
             gh release delete "$TAG" --yes || true
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.11" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.12" --notes "$NOTES"
           fi
