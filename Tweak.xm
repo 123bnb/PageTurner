@@ -1,5 +1,5 @@
 // ============================================================
-// PageTurner v1.0.39 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.40 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.39（滑动参数上限 + 回滑防惯性 + 弃置式中断修复）：
 //   1. 弹起停留上限 500→2000ms；滑动分段上限 48→96（两处钳制同步）
@@ -9,6 +9,12 @@
 //   3. 弃置式中断修复（根除"连按滑动越来越短"）：执行中按新键 → 旧滑动 token 失效时
 //      立即在最后实际位置 Ended 复位（触摸不悬空）→ 新滑动干净开始；
 //      runNext 被替代时不再误清新序列的 gIsInjecting
+//
+// v1.0.40（惯性修复：时间插值 + 静止衰减）：
+//   1. 时间插值——滑动位置按真实经过时间算（帧间隔 max(16ms, 分段间隔)），主线程再忙速度也均匀
+//   2. 静止衰减——到终点（或回滑终点）后每帧(~16ms)发位置不变的 Moved，持续 max(停顿,300)ms
+//      再 Ended：模拟真实手指停住，手势速度采样窗口被"没动"填满 → velocity=0 → 弹起无惯性
+//      （修"弹起停留 2000ms/回滑 10pt 都还惯性"的根因：我们停住期间不发事件，速度采样停在高速度上）
 //
 // v1.0.38（设置页新增映射覆盖修复，Tweak.xm 无逻辑改动）：
 //
@@ -801,6 +807,9 @@ static void PTFakeTap(CGPoint p, int pressMs) {
 //          再停 backMs 再 Ended（Ended 时刻速度为反向，防惯性比纯停顿更稳）；backPt=0 走原地弹起停留；
 //          ③弃置式中断修复——token 失效（新按键打断旧滑动）时立即在当前实际位置 Ended 复位，
 //            触摸不再悬空，新滑动干净开始（根除"连按滑动越来越短"）
+// v1.0.40：①时间插值——位置按真实经过时间算（主线程再忙，速度也恒定均匀，修"速度不均匀"）；
+//          ②静止衰减——到终点（或回滑终点）后每帧(~16ms)发位置不变的 Moved，持续 max(停顿,300)ms，
+//            模拟真实手指停住：速度采样窗口被"没动"填满 → velocity=0 → 弹起无惯性（修"停多久都惯性"）
 static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int holdMs, int liftMs, double backPt, int backMs, int steps, int token, void (^done)(void)) {
     // v1.0.32：注入触摸期间置 gInFakeTouch=YES → sendEvent 层放行（不走拦截）
     gInFakeTouch = YES;
@@ -818,8 +827,9 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
             backPt = 0;
         }
     }
-    double per = durationMs / steps / 1000.0;
-    __block int i = 1;
+    double durSec = MAX(durationMs / 1000.0, 0.001);
+    // v1.0.40：帧间隔 = max(16ms, 分段间隔) —— 高速短距按 16ms 帧（时间插值），低速长距按分段密度
+    double frameMs = MAX(16.0, durationMs / steps);
     __block BOOL ended = NO;
     __block CGPoint lastP = from;              // v1.0.39：记录最后实际位置（弃置时原地 Ended，无瞬移）
     __block void (^abortEnd)(void) = ^{
@@ -837,12 +847,32 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
         gInFakeTouch = NO;
         if (done) done();
     };
+    // v1.0.40：静止衰减——在 pos 原地每帧发位置不变的 Moved，持续 ms 毫秒（模拟手指停住，速度衰减到 0）
+    __block void (^stillAt)(CGPoint, int);
+    stillAt = ^(CGPoint pos, int ms) {
+        __block int n = MAX(ms, 0) / 16;
+        __block void (^still)(void);
+        still = ^(void) {
+            if (token != gExecToken) { abortEnd(); if (done) done(); return; }
+            if (n <= 0) { doEnd(); return; }
+            n--;
+            lastP = pos;
+            gInFakeTouch = YES;
+            [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseMoved];
+            gInFakeTouch = NO;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), still);
+        };
+        still();
+    };
+    __block CFAbsoluteTime t0;
     __block void (^step)(void);
     step = ^(void) {
         if (token != gExecToken) { abortEnd(); if (done) done(); return; }
-        if (i > steps) {
+        // v1.0.40：位置按真实经过时间插值 → 速度恒定均匀
+        double t = MIN((CFAbsoluteTimeGetCurrent() - t0) / durSec, 1.0);
+        if (t >= 1.0) {
             if (backPt > 0 && !ended) {
-                // 回滑段：30ms 后往回滑到 backEnd，停 backMs 再 Ended（速度反向 → 无正向惯性）
+                // 回滑段：30ms 后往回滑到 backEnd，再静止衰减 max(backMs,300)（速度反向 + 归零双保险）
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
                     if (token != gExecToken) { abortEnd(); if (done) done(); return; }
                     if (ended) { if (done) done(); return; }
@@ -850,38 +880,25 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
                     gInFakeTouch = YES;
                     [PTFakeMetaTouch fakeTouchId:pid AtPoint:backEnd withTouchPhase:UITouchPhaseMoved];
                     gInFakeTouch = NO;
-                    if (backMs > 0) {
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(backMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                            if (token != gExecToken) { abortEnd(); if (done) done(); return; }
-                            doEnd();
-                        });
-                    } else {
-                        doEnd();
-                    }
+                    stillAt(backEnd, MAX(backMs, 300));
                 });
                 return;
             }
-            // 原地弹起停留（回滑=0 时）：停 liftMs 再 Ended
-            if (liftMs > 0) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                    if (token != gExecToken) { abortEnd(); if (done) done(); return; }
-                    doEnd();
-                });
-            } else {
-                doEnd();
-            }
+            // 原地静止衰减（回滑=0 时）：终点每帧不动，持续 max(liftMs,300) 再 Ended
+            stillAt(to, MAX(liftMs, 300));
             return;
         }
-        double t = (double)i / steps;
         CGPoint p = CGPointMake(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
         lastP = p;
         gInFakeTouch = YES;
         [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:UITouchPhaseMoved];
         gInFakeTouch = NO;
-        i++;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(per * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(frameMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
     };
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+        t0 = CFAbsoluteTimeGetCurrent();   // v1.0.40：按下停留结束后开始计时
+        step();
+    });
 }
 
 // 执行单条动作 → 完成后 next()
@@ -1085,7 +1102,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.39 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.40 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,

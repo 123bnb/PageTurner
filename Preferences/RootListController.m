@@ -1,11 +1,14 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.39）
+// RootListController.m —— PageTurner 设置页（v1.0.40）
 //
 // v1.0.39（滑动参数上限 + 回滑防惯性，与运行端同步）：
 //   1. 参数页滑动分支：弹起停留上限 500→2000ms、滑动分段上限 48→96
 //   2. 参数页滑动 6 滑块：按下停留/弹起停留/滑动速度/滑动分段/回滑距离(0~10pt)/回滑停顿(0~500ms)
 //   3. 测试区滑动执行：钳制 96；backPt>0 时回滑 backPt pt（30ms 后 Moved）停 backMs 再 Ended
 //   4. 新建滑动动作默认存 backPt=0/backMs=80；编辑保留参数列表加 backPt/backMs
+//
+// v1.0.40（测试区同步运行端惯性修复）：时间插值（速度均匀）+ 静止衰减（终点每帧位置不变
+// 的 Moved，持续 max(停顿,300)ms 再 Ended，velocity 归零防惯性）
 //
 // v1.0.37（滑动时序参数扩展，与运行端同步）：
 //   1. 动作参数页滑动分支：按下停留 + 弹起停留(liftMs) + 滑动速度 + 滑动分段(steps 默认12)
@@ -510,6 +513,7 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         if (durMs < 50) durMs = 50;
         // v1.0.37：按下停留/弹起停留/滑动分段 与运行端统一（可调）
         // v1.0.39：分段上限 96；回滑防惯性——backPt>0 到终点往回滑 backPt pt 再停 backMs 再 Ended
+        // v1.0.40：时间插值（速度均匀）+ 静止衰减（每帧发位置不变 Moved，velocity 归零防惯性）
         int holdMs = [a[@"holdMs"] intValue] ?: 20;
         int liftMs = [a[@"liftMs"] intValue] ?: 0;
         int steps = [a[@"steps"] intValue] ?: 12;
@@ -525,46 +529,49 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         }
         PTTestShowDot(from, to, YES, durMs / 1000.0);
         NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
-        double per = durMs / 1000.0 / steps;
-        __block int i = 1;
+        double frameMs = MAX(16.0, durMs / steps);
+        double durSec = MAX(durMs / 1000.0, 0.001);
+        __block CFAbsoluteTime t0;
+        __block void (^stillAt)(CGPoint, int);
+        stillAt = ^(CGPoint pos, int ms) {
+            __block int n = MAX(ms, 0) / 16;
+            __block void (^still)(void);
+            still = ^(void) {
+                if (n <= 0) {
+                    [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseEnded];
+                    if (next) next();
+                    return;
+                }
+                n--;
+                [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseMoved];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), still);
+            };
+            still();
+        };
         __block void (^step)(void);
         step = ^(void) {
-            if (i > steps) {
+            double t = MIN((CFAbsoluteTimeGetCurrent() - t0) / durSec, 1.0);
+            if (t >= 1.0) {
                 if (backPt > 0) {
-                    // v1.0.39：回滑段——30ms 后回滑到 backEnd，停 backMs 再 Ended（与运行端一致）
+                    // v1.0.39：回滑段——30ms 后回滑到 backEnd；v1.0.40：再静止衰减 max(backMs,300)（与运行端一致）
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
                         [PTFakeMetaTouch fakeTouchId:pid AtPoint:backEnd withTouchPhase:UITouchPhaseMoved];
-                        if (backMs > 0) {
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(backMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                                [PTFakeMetaTouch fakeTouchId:pid AtPoint:backEnd withTouchPhase:UITouchPhaseEnded];
-                                if (next) next();
-                            });
-                        } else {
-                            [PTFakeMetaTouch fakeTouchId:pid AtPoint:backEnd withTouchPhase:UITouchPhaseEnded];
-                            if (next) next();
-                        }
+                        stillAt(backEnd, MAX(backMs, 300));
                     });
                 } else {
-                    // v1.0.37：原地弹起停留——到终点后停 liftMs 再 Ended
-                    if (liftMs > 0) {
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                            [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
-                            if (next) next();
-                        });
-                    } else {
-                        [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
-                        if (next) next();
-                    }
+                    // v1.0.40：原地静止衰减——终点每帧不动，持续 max(liftMs,300) 再 Ended
+                    stillAt(to, MAX(liftMs, 300));
                 }
                 return;
             }
-            double t = (double)i / steps;
             CGPoint pp = CGPointMake(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:pp withTouchPhase:UITouchPhaseMoved];
-            i++;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(per * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(frameMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
         };
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+            t0 = CFAbsoluteTimeGetCurrent();
+            step();
+        });
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);

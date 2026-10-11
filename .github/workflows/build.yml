@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.39-roothide.deb
+          DEB=PageTurner-1.0.40-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.39
-          NOTES=$'PageTurner v1.0.39（roothide 直装）—— 滑动 6 参数 + 回滑防惯性 + 修复连按滑动越滑越短\n\n【v1.0.39 改了什么】\n1. 弹起停留上限 500→2000ms；滑动分段上限 48→96（轨迹更丝滑）\n2. 滑动动作新增回滑防惯性（两参数）：回滑距离 backPt（0~10pt，默认 0=不启用）+ 回滑停顿 backMs（0~500ms，默认 80）\n   - backPt>0：滑到终点往回滑 backPt pt（30ms 内）再停 backMs 再弹起——Ended 时刻速度反向，App 不会惯性滑\n   - backPt=0：走原地弹起停留（手动 liftMs）\n3. 修复严重 bug：滑动执行中连按翻页器导致滑动越滑越短（最后只剩 1pt）\n   - 根因：旧滑动被中断时触摸没弹起（悬空）→ 新滑动同 id 重启位置错乱\n   - 修复：执行中按新键 → 旧滑动立即弃置并在最后实际位置干净弹起（触摸复位）→ 新滑动完整执行\n\n【怎么测】\n1. 方案页 → 长按滑动动作 → 动作参数：确认 6 个滑块（按下停留/弹起停留/速度/分段/回滑距离/回滑停顿）\n2. 回滑距离设 2pt、回滑停顿 80ms → 测试：滑动到终点会往回挪一点再弹起，App 不惯性滑\n3. 番茄小说：映射滑动后快速连按翻页器 3~5 次 → 每次滑动距离完整、不再越滑越短、无双动作\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.40
+          NOTES=$'PageTurner v1.0.40（roothide 直装）—— 惯性修复：时间插值 + 静止衰减\n\n【v1.0.40 改了什么】\n1. 时间插值：滑动位置按真实经过时间算（帧间隔 max(16ms, 分段间隔)）\n   - 修：主线程忙时 Moved 事件忽快忽慢，App 看到的滑动速度不均匀\n2. 静止衰减：滑到终点（或回滑终点）后，每帧(~16ms)发一个位置不变的 Moved，持续 max(停顿,300)ms，再弹起\n   - 修：此前终点停下后不发任何事件，App 手势速度采样停在高速度上——\n     弹起停留 2000ms、回滑 10pt 都拦不住惯性（App 判定是快速甩动）\n   - 现在模拟真实手指停住：速度采样窗口被\"没动\"填满 → velocity=0 → 弹起无惯性\n3. 回滑（backPt）保留为第二道保险：回滑 N pt → 静止衰减 300ms+ → 弹起\n\n【怎么测】\n1. 方案页测试：滑动速度 2000 + 回滑距离 0 → 滑完页面停在目标位不再惯性前滑；轨迹速度均匀\n2. 回滑距离 2pt / 回滑停顿 80 → 回滑 + 静止衰减双保险，翻页不过头不回弹\n3. 番茄小说实测：速度 2000 滑动翻页 → 页面停在翻页后位置，不额外滚一段\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.39" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.40" --notes "$NOTES"
           fi
