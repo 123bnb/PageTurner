@@ -126,6 +126,21 @@ static double PTNowC(void) {
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
+// 录制端日志（写 /var/mobile/Documents/PageTurner.log，目录自动创建）——
+// Preferences 进程此前完全没有日志，"录不到/重复录入"只能靠这个定位
+static void SLog(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:@"/var/mobile/Documents"]) {
+        [fm createDirectoryAtPath:@"/var/mobile/Documents" withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@"/var/mobile/Documents/PageTurner.log"];
+    if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; } @catch (NSException *e) {} }
+}
+
 typedef uint32_t (*IOHIDEventGetType_t)(void *);
 typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
 typedef double (*IOHIDEventGetFloatValue_t)(void *, uint32_t);
@@ -187,6 +202,23 @@ static void SImpAddEvent(id self, SEL _cmd, void *event) {
                     sTraceX = 0; sTraceY = 0;
                     sTraceHas = YES;
                     [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(0, 0)]];
+                    SLog(@"recv: type=%u sender=0x%llx dx=%.1f dy=%.1f (会话开始)", type, sender, dx, dy);
+                } else {
+                    if (sender != sSessSender) {
+                        SLog(@"recv: type=%u sender=0x%llx (!!! 与当前会话 sender=0x%llx 不同，强制开新会话)", type, sender, sSessSender);
+                        SFinishSession();
+                        sSessActive = YES;
+                        sSessSender = sender;
+                        sSessDist = 0; sSessFirstDir = 0;
+                        sSessHasMove = NO; sSessSettled = NO;
+                        sTracePoints = [NSMutableArray array];
+                        sTraceX = 0; sTraceY = 0;
+                        sTraceHas = YES;
+                        [sTracePoints addObject:[NSValue valueWithCGPoint:CGPointMake(0, 0)]];
+                        SLog(@"recv: type=%u sender=0x%llx dx=%.1f dy=%.1f (会话开始/换sender)", type, sender, dx, dy);
+                    } else {
+                        SLog(@"recv: type=%u sender=0x%llx dx=%.1f dy=%.1f", type, sender, dx, dy);
+                    }
                 }
                 sSessLastAt = now;
                 double seg = hypot(dx, dy);
@@ -224,6 +256,7 @@ static void SFinishSession(void) {
     double dir = sSessHasMove ? sSessFirstDir : 0;
     sCurSender = sSessSender;
     sSessActive = NO;
+    SLog(@"settle: sender=0x%llx phase=%d dir=%.1f dist=%.1f", sSessSender, phase, dir, sSessDist);
     SAppendSample(phase, dir, sSessDist);
 }
 
@@ -243,6 +276,8 @@ static void SCollectHook(void) {
         if (am) { gOrigAddEvent = method_getImplementation(am); method_setImplementation(am, (IMP)SImpAddEvent); }
 
         sHooked = (gOrigAddEvent != NULL && sGetType != NULL && sGetSender != NULL);
+        SLog(@"collect: sHooked=%d addEvent=%p getType=%p getSender=%p getFloat=%p (armed=%d)",
+             sHooked, gOrigAddEvent, sGetType, sGetSender, sGetFloat, sCollectArmed);
     }
 }
 
@@ -887,9 +922,14 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.view addSubview:self.distLabel];
 
     PTSetLearningLocal(YES);
-    sCollectArmed = YES;   // v1.0.4 原版：进入即 armed（无武装延迟）
+    // 会话状态全复位（防上次录制残留：录一半退出后 sSessActive 残留 → 新会话永不开始）
+    sSessActive = NO; sSessSettled = NO;
+    sSessSender = 0; sSessDist = 0; sSessFirstDir = 0; sSessHasMove = NO;
+    sTraceHas = NO; sTraceX = 0; sTraceY = 0; sTracePoints = nil;
     sLastSampleAt = PTNowC();
+    sCollectArmed = YES;   // v1.0.4 原版：进入即 armed（无武装延迟）
     SCollectHook();
+    SLog(@"learn: viewDidLoad 会话已复位，armed=YES");
     // 轨迹 overlay（全屏透明，显示最近一次按键的相对位移路径）
     self.traceView = [[UIView alloc] initWithFrame:self.view.bounds];
     self.traceView.userInteractionEnabled = NO;
@@ -904,6 +944,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.timer invalidate];
     self.timer = nil;
     sCollectArmed = NO;
+    sSessActive = NO; sSessSettled = NO;   // 会话复位，防止下次进入残留
     PTSetLearningLocal(NO);
 }
 
@@ -986,7 +1027,19 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     // 去重：与已有方案高度相似 → 拒绝
     NSString *dup = PTDuplicate(s, plans);
     if (dup) {
-        self.status.text = [NSString stringWithFormat:@"⚠️ 与已有方案『%@』高度相似\n可能按错了键，请换一个键", dup];
+        // 找到冲突方案特征，展示对比（确认是不是误判）
+        NSDictionary *dupFt = nil;
+        for (NSDictionary *p in plans) if ([p[@"name"] isEqualToString:dup]) { dupFt = p[@"feature"]; break; }
+        int p1 = [s[@"phase"] intValue], p2 = [dupFt[@"phase"] intValue];
+        double d1 = [s[@"direction"] doubleValue], d2 = [dupFt[@"direction"] doubleValue];
+        double x1 = [s[@"dist"] doubleValue], lo2 = [dupFt[@"distMin"] doubleValue], hi2 = [dupFt[@"distMax"] doubleValue];
+        SLog(@"judge: REJECT duplicate with '%@' — new{sender=%@ phase=%d dir=%.1f dist=%.1f} old{sender=%@ phase=%d dir=%.1f dist=%.0f~%.0f}",
+             dup, s[@"sender"], p1, d1, x1, dupFt[@"sender"], p2, d2, lo2, hi2);
+        self.status.text = [NSString stringWithFormat:
+            @"⚠️ 与『%@』高度相似\n你的键: %@ %@ dist=%.0f\n已有: %@ %@ dist=%.0f~%.0f\n可能按错键，换一个键试试",
+            dup,
+            (p1 == 1 ? PTDirName(d1) : @"点击"), s[@"sender"], x1,
+            (p2 == 1 ? PTDirName(d2) : @"点击"), dupFt[@"sender"], lo2, hi2];
         self.status.textColor = [UIColor systemRedColor];
         [self.mem removeAllObjects];
         self.countLabel.text = @"已录：0 次";
