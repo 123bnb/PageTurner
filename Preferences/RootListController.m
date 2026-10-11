@@ -1,5 +1,18 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.23）
+// RootListController.m —— PageTurner 设置页（v1.0.28）
+//
+// v1.0.28（定稿版）：
+//   1. BUG-1 波动太大弹窗：弹出时暂停收集；「继续录」= 不清空已录、解除 15 次上限
+//      继续录到稳定（增强精准性）；「重录」= 清空已录+清样本重新录
+//   2. 学习页下方新增实时记录区（每次按键实时显示 sender/相位/方向/位移）
+//   3. BUG-2 命名保存后：空壳方案页+学习页一起移出导航栈，返回直接回记录与映射
+//   4. BUG-3 记录与映射列表 viewWillAppear 重新读 plist 刷新，返回即见新方案
+//   5. 动作设置页：标题实时显示动作（点击(200,600)/双击/滑动起点→终点）；
+//      内容区统一灰色；绿点全屏可拖；滑动页两绿点间画连线；速度滑块移除
+//   6. 方案页：方案名改「方案名： xxxxx」一行显示（点击弹框改名）；
+//      「映射区…全部动作」水平居中+字号15；长按动作弹出参数调整框
+//      （点击=按下时长；双击=按下时长+两次间隔；滑动=按下停留+真实速度pt/s；延迟=时长）
+//   7. 测试页下方新增实时记录区（吞了什么/映射了什么，返回即消失不保留）
 //
 // v1.0.23：首页「调试」组新增【调试可视化】开关（key=debugDots）：
 //   注入端 dylib（Tweak.xm）读取该键，开启后所有触摸显示绿点+轨迹
@@ -79,7 +92,7 @@
 
 @interface PTPlanVC : PSViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) NSString *planName;
-@property (nonatomic, strong) UITextField *nameField;
+@property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UILabel *recStatus;
 @property (nonatomic, strong) UITableView *tv;
 @property (nonatomic, strong) NSMutableArray *actions;
@@ -92,18 +105,29 @@
 @property (nonatomic, strong) UILabel *countLabel;
 @property (nonatomic, strong) UILabel *dirLabel;
 @property (nonatomic, strong) UILabel *distLabel;
+@property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) NSTimer *timer;
 @property (nonatomic, strong) NSMutableArray *mem;
 @property (nonatomic, assign) BOOL finished;
+@property (nonatomic, assign) BOOL limitExceeded;   // v1.0.28：继续录后跳过 15 次上限
+- (void)appendLog:(NSString *)s;
 @end
 
 @interface PTActionVC : PSViewController
 @property (nonatomic, strong) NSString *actionType;
 @property (nonatomic, strong) NSString *planName;
 @property (nonatomic, strong) UIView *dot1, *dot2;
-@property (nonatomic, strong) UILabel *posLabel;
-@property (nonatomic, strong) UISlider *speedSlider;
 @property (nonatomic, assign) BOOL isSwipe;
+@property (nonatomic, strong) CAShapeLayer *lineLayer;
+@end
+
+@interface PTActionParamVC : PSViewController   // v1.0.28：长按动作 → 参数调整页
+@property (nonatomic, strong) NSString *planName;
+@property (nonatomic, assign) NSInteger actionIndex;
+@property (nonatomic, strong) NSDictionary *action;
+@property (nonatomic, strong) NSArray *paramDefs;
+@property (nonatomic, strong) NSMutableArray *sliders;
+@property (nonatomic, strong) NSMutableArray *labels;
 @end
 
 @interface PTDebugLogVC : PSViewController
@@ -111,6 +135,8 @@
 
 @interface PTTestVC : PSViewController
 @property (nonatomic, strong) NSString *planName;
+@property (nonatomic, strong) UITextView *logView;   // v1.0.28：实时记录区
+- (void)appendLog:(NSString *)s;
 @end
 
 // ---------- 工具 ----------
@@ -268,6 +294,7 @@ static BOOL sTestArmed = NO;          // 测试页打开时置 YES
 static BOOL gTestInjecting = NO;      // 注入保护（防执行触摸再被本 hook 处理）
 static UIView *sTestDot = nil;        // 测试页绿点视图
 static double sLastTestExec = 0;      // 测试防抖
+static __weak PTTestVC *sTestLogSink = nil;   // v1.0.28：测试页实时记录区（页面销毁即失效）
 
 // 匹配（复制 Tweak.xm PTMatchPlan：sender + phase + 方向±15° + dist 区间）
 static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t sender) {
@@ -431,8 +458,14 @@ static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender) {
     if (plan) {
         SLog(@"[测试] 特征匹配 → 方案「%@」", plan);
         PTTestExecPlan(plan);
+        NSDictionary *pp = nil;
+        for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:plan]) { pp = p; break; }
+        [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作",
+            plan, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0)]];
     } else {
         SLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f（特征需先录制）", sender, phase, dir, dist);
+        [sTestLogSink appendLog:[NSString stringWithFormat:@"✗ 未命中（放行）：sender=0x%llx phase=%d dir=%.1f dist=%.1f",
+            sender, phase, dir, dist]];
     }
 }
 
@@ -855,6 +888,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self reload];
 }
 
+// v1.0.28 BUG-3：返回本页时重新读 plist（新方案/改名/删除即时可见，不用重进页面）
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reload];
+}
+
 - (void)reload {
     self.plans = [NSMutableArray arrayWithArray:PTRead()[@"plans"] ?: @[]];
     [self.tv reloadData];
@@ -947,13 +986,13 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (self.view.safeAreaInsets.top > 20) top = self.view.safeAreaInsets.top + 60;
     CGFloat w = self.view.bounds.size.width;
 
-    if (!self.nameField) {
-        self.nameField = [[UITextField alloc] initWithFrame:CGRectMake(16, top, w - 32, 36)];
-        self.nameField.borderStyle = UITextBorderStyleRoundedRect;
-        self.nameField.font = [UIFont systemFontOfSize:16];
-        self.nameField.placeholder = @"方案名称（如：左键）";
-        [self.nameField addTarget:self action:@selector(nameChanged) forControlEvents:UIControlEventEditingChanged];
-        [self.view addSubview:self.nameField];
+    if (!self.nameLabel) {
+        // v1.0.28：方案名一行显示「方案名： xxxxx」，点击弹框改名
+        self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, top, w - 32, 36)];
+        self.nameLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+        self.nameLabel.userInteractionEnabled = YES;
+        [self.nameLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(renameTapped)]];
+        [self.view addSubview:self.nameLabel];
 
         // 记录按钮：大按钮样式（蓝底白字），与下方「新增映射」视觉统一、紧凑
         self.recStatus = [[UILabel alloc] initWithFrame:CGRectMake(16, top + 44, w - 32, 44)];
@@ -973,13 +1012,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         self.tv.delegate = self;
         [self.view addSubview:self.tv];
 
+        // v1.0.28：映射区说明水平居中 + 字号 15
         UILabel *hv = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, w - 32, 34)];
         hv.text = @"映射区：按一次该键 → 从上到下依次执行全部动作";
-        hv.font = [UIFont systemFontOfSize:12];
-        hv.textColor = [UIColor secondaryLabelColor];
+        hv.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        hv.textColor = [UIColor labelColor];
+        hv.textAlignment = NSTextAlignmentCenter;
         self.tv.tableHeaderView = hv;
     }
-    self.nameField.text = self.planName;
+    self.nameLabel.text = [NSString stringWithFormat:@"方案名： %@", self.planName];
     if (plan[@"feature"]) {
         NSDictionary *ft = plan[@"feature"];
         NSString *d = PTDirName([ft[@"direction"] doubleValue]);
@@ -994,21 +1035,33 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.tv reloadData];
 }
 
-- (void)nameChanged {
-    NSString *newName = [self.nameField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    if (!newName.length || [newName isEqualToString:self.planName]) return;
-    NSMutableDictionary *cfg = PTRead();
-    NSMutableArray *plans = [NSMutableArray array];
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
-            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
-            np[@"name"] = newName;
-            [plans addObject:np];
-        } else [plans addObject:p];
-    }
-    cfg[@"plans"] = plans;
-    self.planName = newName;
-    PTWrite(cfg);
+// v1.0.28：点「方案名： xxxxx」弹框改名（保留改名功能）
+- (void)renameTapped {
+    UIAlertController *al = [UIAlertController alertControllerWithTitle:@"修改方案名"
+        message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [al addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = self.planName;
+        tf.placeholder = @"方案名";
+    }];
+    [al addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [al addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *newName = [al.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (!newName.length || [newName isEqualToString:self.planName]) return;
+        NSMutableDictionary *cfg = PTRead();
+        NSMutableArray *plans = [NSMutableArray array];
+        for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
+            if ([p[@"name"] isEqualToString:self.planName]) {
+                NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+                np[@"name"] = newName;
+                [plans addObject:np];
+            } else [plans addObject:p];
+        }
+        cfg[@"plans"] = plans;
+        self.planName = newName;
+        PTWrite(cfg);
+        self.nameLabel.text = [NSString stringWithFormat:@"方案名： %@", newName];
+    }]];
+    [self presentViewController:al animated:YES completion:nil];
 }
 
 - (void)recordTapped {
@@ -1053,6 +1106,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (ip.row < (NSInteger)self.actions.count) {
         c.textLabel.text = [NSString stringWithFormat:@"%ld. %@", (long)(ip.row + 1), PTActionText(self.actions[ip.row])];
         c.accessoryType = UITableViewCellAccessoryNone;
+        // v1.0.28：长按动作 → 参数调整框（左滑删除并存）
+        for (UIGestureRecognizer *g in c.gestureRecognizers)
+            if ([g isKindOfClass:[UILongPressGestureRecognizer class]]) [c removeGestureRecognizer:g];
+        UILongPressGestureRecognizer *lg = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressAction:)];
+        [c addGestureRecognizer:lg];
     } else if (ip.row == (NSInteger)self.actions.count) {
         c.textLabel.text = @"＋ 新增映射";
         c.textLabel.textColor = [UIColor systemBlueColor];
@@ -1071,6 +1129,18 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     // 最后一行：测试本方案（大白屏 + 绿点点触验证）
     PTTestVC *vc = [PTTestVC new];
     vc.planName = self.planName;
+    [self.navigationController pushViewController:vc animated:YES];
+}
+// v1.0.28：长按动作 → 参数调整页（时序/速度全可调）
+- (void)longPressAction:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    UITableViewCell *cell = (UITableViewCell *)g.view;
+    NSIndexPath *ip = [self.tv indexPathForCell:cell];
+    if (!ip || ip.row >= (NSInteger)self.actions.count) return;
+    PTActionParamVC *vc = [PTActionParamVC new];
+    vc.planName = self.planName;
+    vc.actionIndex = ip.row;
+    vc.action = self.actions[ip.row];
     [self.navigationController pushViewController:vc animated:YES];
 }
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
@@ -1177,6 +1247,16 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.distLabel.font = [UIFont systemFontOfSize:16];
     [self.view addSubview:self.distLabel];
 
+    // v1.0.28：实时记录区（每次按键实时显示 sender/相位/方向/位移，眼见为实）
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(16, h * 0.4 + 106, w - 32, h - (h * 0.4 + 106) - 30)];
+    self.logView.editable = NO;
+    self.logView.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+    self.logView.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0];
+    self.logView.layer.cornerRadius = 10;
+    self.logView.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
+    [self.view addSubview:self.logView];
+    [self appendLog:@"等待按键… 识别结果实时显示在这里"];
+
     PTSetLearningLocal(YES);
     sCollectArmed = YES;
     sLastSampleAt = PTNowC();
@@ -1199,6 +1279,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 // 轮询 plist：读走新样本 → 判定
 - (void)poll {
+    // v1.0.28 BUG-1：波动太大弹窗期间暂停收集（sCollectArmed=NO），不读样本不误报
+    if (!sCollectArmed || self.finished) return;
     NSMutableDictionary *cfg = PTRead();
     NSArray *samples = cfg[@"learningSamples"] ?: @[];
     cfg[@"learningSamples"] = @[];   // 清空已读
@@ -1229,6 +1311,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         self.countLabel.text = @"已录：0 次";
         self.dirLabel.text = @"方向：—";
         self.distLabel.text = @"位移：—";
+        [self appendLog:[NSString stringWithFormat:@"✗ 拒绝（与『%@』重复）  sender=%@ phase=%d dir=%.1f° dist=%.1f",
+            dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]]];
         return;
     }
     self.status.textColor = [UIColor labelColor];
@@ -1244,12 +1328,14 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.dirLabel.text = [NSString stringWithFormat:@"方向：%@（%.0f°）", PTDirName(dir), dir];
     if ([s[@"phase"] intValue] == 1) self.distLabel.text = [NSString stringWithFormat:@"位移：%.0f pt", dist];
     else self.distLabel.text = @"位移：点击（无滑动）";
+    [self appendLog:[NSString stringWithFormat:@"✓ 已录 %d 次  sender=%@ phase=%d dir=%.1f° dist=%.1f",
+        count, sender, [s[@"phase"] intValue], dir, dist]];
 
     if (PTStable(self.mem, sender)) {
         self.status.text = @"✅ 特征已稳定，可以停止";
         self.status.textColor = [UIColor systemGreenColor];
         [self onStable:sender phase:[s[@"phase"] intValue] dir:dir];
-    } else if (count >= kLearnMax) {
+    } else if (count >= kLearnMax && !self.limitExceeded) {
         [self onTooMany];
     } else {
         self.status.text = count < kLearnMin ? @"请继续按同一个键…" : @"特征收敛中，请继续…";
@@ -1303,8 +1389,17 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         PTSetLearningLocal(NO);
         PTPlanVC *vc = [PTPlanVC new];
         vc.planName = name;
+        // v1.0.28 BUG-2：把「空壳方案页 + 学习页」一起移出栈，返回直接回记录与映射
         NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
-        [stack removeLastObject];
+        NSUInteger base = NSNotFound;
+        for (NSUInteger i = 0; i < stack.count; i++) {
+            if ([stack[i] isKindOfClass:[PTPlansVC class]]) { base = i; break; }
+        }
+        if (base != NSNotFound && base + 1 < stack.count) {
+            [stack removeObjectsInRange:NSMakeRange(base + 1, stack.count - base - 1)];
+        } else if (stack.count) {
+            [stack removeLastObject];
+        }
         [stack addObject:vc];
         [self.navigationController setViewControllers:stack animated:YES];
     }]];
@@ -1317,11 +1412,21 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     return c;
 }
 
+// v1.0.28 BUG-1：弹窗出现 → 先暂停收集；继续录 = 不清空已录解除上限继续录（增强精准性）；
+// 重录 = 清空已录 + 清样本重新录
 - (void)onTooMany {
+    sCollectArmed = NO;   // 弹窗期间暂停收集（poll 直接 return，不误报不误录）
     UIAlertController *al = [UIAlertController alertControllerWithTitle:@"特征波动太大"
         message:@"已录 15 次仍未稳定，建议检查按键或重录" preferredStyle:UIAlertControllerStyleAlert];
-    [al addAction:[UIAlertAction actionWithTitle:@"继续录" style:UIAlertActionStyleDefault handler:nil]];
+    [al addAction:[UIAlertAction actionWithTitle:@"继续录" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        self.limitExceeded = YES;          // 解除 15 次上限，继续按同一键直到稳定
+        sCollectArmed = YES;
+        sLastSampleAt = PTNowC();
+        self.status.textColor = [UIColor labelColor];
+        self.status.text = @"已解除上限，继续按同一个键直到稳定…";
+    }]];
     [al addAction:[UIAlertAction actionWithTitle:@"重录" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        self.limitExceeded = NO;
         [self.mem removeAllObjects];
         self.countLabel.text = @"已录：0 次";
         self.dirLabel.text = @"方向：—";
@@ -1331,8 +1436,20 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         NSMutableDictionary *cfg = PTRead();
         cfg[@"learningSamples"] = @[];
         PTWrite(cfg);
+        sCollectArmed = YES;
+        sLastSampleAt = PTNowC();
+        [self appendLog:@"已重录：样本已清空"];
     }]];
     [self presentViewController:al animated:YES completion:nil];
+}
+
+// v1.0.28：实时记录区追加一行并滚动到底部
+- (void)appendLog:(NSString *)s {
+    if (!self.logView) return;
+    NSString *cur = self.logView.text;
+    self.logView.text = cur.length ? [cur stringByAppendingFormat:@"\n%@", s] : s;
+    NSRange r = NSMakeRange(self.logView.text.length - 1, 1);
+    [self.logView scrollRangeToVisible:r];
 }
 @end
 
@@ -1345,43 +1462,33 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [super viewDidLoad];
     self.isSwipe = [self.actionType isEqualToString:@"swipe"];
     self.title = self.isSwipe ? @"滑动设置" : ([self.actionType isEqualToString:@"doubleTap"] ? @"双击设置" : @"点击设置");
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    // v1.0.28：标题栏白色，下方内容区统一灰色
+    self.view.backgroundColor = [UIColor secondarySystemBackgroundColor];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
         style:UIBarButtonItemStyleDone target:self action:@selector(done)];
 
-    CGFloat top = 110;
-    if (self.view.safeAreaInsets.top > 20) top = self.view.safeAreaInsets.top + 60;
     CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-    CGFloat areaH = h - top - 190;
-
-    self.posLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, top + areaH + 8, w - 32, 30)];
-    self.posLabel.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
-    [self.view addSubview:self.posLabel];
-
-    UIView *area = [[UIView alloc] initWithFrame:CGRectMake(0, top, w, areaH)];
-    area.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    area.userInteractionEnabled = YES;
-    [self.view addSubview:area];
-
-    self.dot1 = [self makeDot:area label:@"1" color:[UIColor systemGreenColor]];
-    self.dot1.center = CGPointMake(w * 0.3, areaH * 0.4);
 
     if (self.isSwipe) {
-        self.dot2 = [self makeDot:area label:@"2" color:[UIColor systemOrangeColor]];
-        self.dot2.center = CGPointMake(w * 0.7, areaH * 0.6);
-        UILabel *speedLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, top + areaH + 44, 80, 30)];
-        speedLabel.text = @"速度";
-        speedLabel.font = [UIFont systemFontOfSize:14];
-        [self.view addSubview:speedLabel];
-        self.speedSlider = [[UISlider alloc] initWithFrame:CGRectMake(100, top + areaH + 44, w - 116, 30)];
-        self.speedSlider.minimumValue = 100; self.speedSlider.maximumValue = 600; self.speedSlider.value = 200;
-        [self.speedSlider addTarget:self action:@selector(updatePos) forControlEvents:UIControlEventValueChanged];
-        [self.view addSubview:self.speedSlider];
+        // v1.0.28：两绿点之间画连线（看滑得直不直）；速度滑块已移除（改方案页长按调）
+        self.lineLayer = [CAShapeLayer layer];
+        self.lineLayer.strokeColor = [UIColor systemGrayColor].CGColor;
+        self.lineLayer.fillColor = [UIColor clearColor].CGColor;
+        self.lineLayer.lineWidth = 2.5;
+        self.lineLayer.lineDashPattern = @[@6, @4];
+        [self.view.layer addSublayer:self.lineLayer];
+        self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
+        self.dot1.center = CGPointMake(w * 0.3, h * 0.45);
+        self.dot2 = [self makeDot:self.view label:@"2" color:[UIColor systemOrangeColor]];
+        self.dot2.center = CGPointMake(w * 0.7, h * 0.55);
+    } else {
+        self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
+        self.dot1.center = CGPointMake(w * 0.5, h * 0.5);
     }
     [self updatePos];
 }
 
-- (UIView *)makeDot:(UIView *)area label:(NSString *)label color:(UIColor *)color {
+- (UIView *)makeDot:(UIView *)superview label:(NSString *)label color:(UIColor *)color {
     UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
     dot.layer.cornerRadius = 22;
     dot.backgroundColor = [color colorWithAlphaComponent:0.35];
@@ -1395,7 +1502,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [dot addSubview:l];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
     [dot addGestureRecognizer:pan];
-    [area addSubview:dot];
+    [superview addSubview:dot];   // v1.0.28：绿点加到全屏视图，可拖区域 = 全屏幕
     return dot;
 }
 
@@ -1409,13 +1516,21 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self updatePos];
 }
 
+// v1.0.28：标题实时显示动作 + 滑动连线实时更新（不再用下方小字）
 - (void)updatePos {
     if (self.isSwipe) {
-        self.posLabel.text = [NSString stringWithFormat:@"滑动 起点(%d,%d) → 终点(%d,%d)  速度%.0fms",
-            (int)self.dot1.center.x, (int)self.dot1.center.y, (int)self.dot2.center.x, (int)self.dot2.center.y,
-            self.speedSlider.value];
+        if (self.lineLayer) {
+            CGMutablePathRef path = CGPathCreateMutable();
+            CGPathMoveToPoint(path, NULL, self.dot1.center.x, self.dot1.center.y);
+            CGPathAddLineToPoint(path, NULL, self.dot2.center.x, self.dot2.center.y);
+            self.lineLayer.path = path;
+            CGPathRelease(path);
+        }
+        self.title = [NSString stringWithFormat:@"滑动起点(%d,%d)→终点(%d,%d)",
+            (int)self.dot1.center.x, (int)self.dot1.center.y,
+            (int)self.dot2.center.x, (int)self.dot2.center.y];
     } else {
-        self.posLabel.text = [NSString stringWithFormat:@"%@(%d, %d)",
+        self.title = [NSString stringWithFormat:@"%@(%d, %d)",
             [self.actionType isEqualToString:@"doubleTap"] ? @"双击" : @"点击",
             (int)self.dot1.center.x, (int)self.dot1.center.y];
     }
@@ -1427,10 +1542,19 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"type"] = @"swipe";
         a[@"x1"] = @(self.dot1.center.x); a[@"y1"] = @(self.dot1.center.y);
         a[@"x2"] = @(self.dot2.center.x); a[@"y2"] = @(self.dot2.center.y);
-        a[@"speed"] = @(self.speedSlider.value);
+        // v1.0.28：speed = 真实速度 pt/s（默认 200）；holdMs = 按下停留（默认 20）
+        a[@"speed"] = @(200);
+        a[@"holdMs"] = @(20);
+    } else if ([self.actionType isEqualToString:@"doubleTap"]) {
+        a[@"type"] = @"doubleTap";
+        a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
+        // v1.0.28：pressMs = 按下时长（默认 30）；gapMs = 两次间隔（默认 120）
+        a[@"pressMs"] = @(30);
+        a[@"gapMs"] = @(120);
     } else {
         a[@"type"] = self.actionType;
         a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
+        a[@"pressMs"] = @(30);
     }
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
@@ -1439,6 +1563,97 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
             [acts addObject:a];
+            np[@"actions"] = acts;
+            [plans addObject:np];
+        } else [plans addObject:p];
+    }
+    cfg[@"plans"] = plans;
+    PTWrite(cfg);
+    [self.navigationController popViewControllerAnimated:YES];
+}
+@end
+
+// ============================================================
+// 动作参数调整页（v1.0.28 加）：方案页长按动作进入
+// 点击=按下时长；双击=按下时长+两次间隔；滑动=按下停留+真实速度(pt/s)；延迟=时长
+// ============================================================
+@implementation PTActionParamVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"动作参数";
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
+        style:UIBarButtonItemStyleDone target:self action:@selector(done)];
+
+    NSString *type = self.action[@"type"];
+    NSArray *defs = nil;
+    if ([type isEqualToString:@"tap"]) {
+        defs = @[ @{@"key": @"pressMs", @"name": @"按下时长", @"unit": @"ms", @"min": @10, @"max": @500, @"def": @30} ];
+    } else if ([type isEqualToString:@"doubleTap"]) {
+        defs = @[ @{@"key": @"pressMs", @"name": @"按下时长", @"unit": @"ms", @"min": @10, @"max": @500, @"def": @30},
+                  @{@"key": @"gapMs", @"name": @"两次间隔", @"unit": @"ms", @"min": @50, @"max": @800, @"def": @120} ];
+    } else if ([type isEqualToString:@"swipe"]) {
+        defs = @[ @{@"key": @"holdMs", @"name": @"按下停留", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @20},
+                  @{@"key": @"speed", @"name": @"滑动速度", @"unit": @"pt/s", @"min": @100, @"max": @2000, @"def": @200} ];
+    } else if ([type isEqualToString:@"delay"]) {
+        defs = @[ @{@"key": @"ms", @"name": @"延迟时长", @"unit": @"ms", @"min": @50, @"max": @5000, @"def": @100} ];
+    } else {
+        [self.navigationController popViewControllerAnimated:YES];
+        return;
+    }
+    self.paramDefs = defs;
+    self.sliders = [NSMutableArray array];
+    self.labels = [NSMutableArray array];
+
+    CGFloat top = 110;
+    if (self.view.safeAreaInsets.top > 20) top = self.view.safeAreaInsets.top + 60;
+    CGFloat w = self.view.bounds.size.width;
+    for (int i = 0; i < (int)defs.count; i++) {
+        NSDictionary *p = defs[i];
+        CGFloat y = top + i * 118;
+        UILabel *name = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 26)];
+        name.text = [NSString stringWithFormat:@"%@（%@）", p[@"name"], p[@"unit"]];
+        name.font = [UIFont systemFontOfSize:15];
+        [self.view addSubview:name];
+        UILabel *val = [[UILabel alloc] initWithFrame:CGRectMake(20, y + 28, w - 40, 26)];
+        val.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightMedium];
+        val.textAlignment = NSTextAlignmentRight;
+        [self.view addSubview:val];
+        UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(20, y + 58, w - 40, 34)];
+        sl.minimumValue = [p[@"min"] doubleValue];
+        sl.maximumValue = [p[@"max"] doubleValue];
+        double cur = [self.action[p[@"key"]] doubleValue];
+        sl.value = cur > 0 ? cur : [p[@"def"] doubleValue];
+        [self.view addSubview:sl];
+        [self.labels addObject:val];
+        [self.sliders addObject:sl];
+        [sl addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
+        [self changed:sl];
+    }
+}
+
+- (void)changed:(UISlider *)sl {
+    NSUInteger i = [self.sliders indexOfObject:sl];
+    if (i == NSNotFound || i >= self.labels.count) return;
+    ((UILabel *)self.labels[i]).text = [NSString stringWithFormat:@"%.0f", sl.value];
+}
+
+- (void)done {
+    NSMutableDictionary *cfg = PTRead();
+    NSMutableArray *plans = [NSMutableArray array];
+    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
+        if ([p[@"name"] isEqualToString:self.planName]) {
+            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+            NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
+            if (self.actionIndex >= 0 && self.actionIndex < (NSInteger)acts.count) {
+                NSMutableDictionary *a = [NSMutableDictionary dictionaryWithDictionary:acts[self.actionIndex]];
+                for (int i = 0; i < (int)self.sliders.count && i < (int)self.paramDefs.count; i++) {
+                    NSString *key = self.paramDefs[i][@"key"];
+                    a[key] = @(roundf(((UISlider *)self.sliders[i]).value));
+                }
+                acts[self.actionIndex] = a;
+            }
             np[@"actions"] = acts;
             [plans addObject:np];
         } else [plans addObject:p];
@@ -1519,6 +1734,17 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     tip.text = [NSString stringWithFormat:@"按翻页器按键测试方案「%@」\n\n匹配成功会执行动作序列，\n绿点 = 注入点触的位置\n（点击原地显示；滑动从起点到终点）", self.planName ?: @""];
     [self.view addSubview:tip];
 
+    // v1.0.28：测试页下方实时记录区（吞了什么/映射了什么；返回即消失不保留）
+    CGFloat h = self.view.bounds.size.height, w = self.view.bounds.size.width;
+    self.logView = [[UITextView alloc] initWithFrame:CGRectMake(12, h - 210, w - 24, 190)];
+    self.logView.editable = NO;
+    self.logView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    self.logView.backgroundColor = [UIColor colorWithWhite:0.9 alpha:1.0];
+    self.logView.layer.cornerRadius = 10;
+    self.logView.textContainerInset = UIEdgeInsetsMake(8, 8, 8, 8);
+    [self.view addSubview:self.logView];
+    [self appendLog:@"等待按键… 命中/未命中实时显示在这里"];
+
     // 绿点：全屏可移动的可视化圆点（不拦截触摸）
     UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 72, 72)];
     dot.layer.cornerRadius = 36;
@@ -1531,6 +1757,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
     sTestDot = dot;
     sTestArmed = YES;
+    sTestLogSink = self;
     SCollectHook();
     SLog(@"test: viewDidLoad armed=YES（方案 %@）", self.planName ?: @"");
 }
@@ -1539,5 +1766,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [super viewDidDisappear:animated];
     sTestArmed = NO;
     sTestDot = nil;
+    sTestLogSink = nil;   // 返回即消失，测试记录不保留
+}
+
+// v1.0.28：实时记录区追加一行并滚动到底部
+- (void)appendLog:(NSString *)s {
+    if (!self.logView) return;
+    NSString *cur = self.logView.text;
+    self.logView.text = cur.length ? [cur stringByAppendingFormat:@"\n%@", s] : s;
+    NSRange r = NSMakeRange(self.logView.text.length - 1, 1);
+    [self.logView scrollRangeToVisible:r];
 }
 @end

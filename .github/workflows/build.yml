@@ -45,10 +45,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.27-roothide.deb
+          DEB=PageTurner-1.0.28-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.27
-          NOTES=$'PageTurner v1.0.27（roothide 直装）—— 触摸 sender 诊断：实测证明手指≠翻页器\n\n【v1.0.27 改了什么】\n1. 新增诊断日志：每个触摸会话 Began 打一行 [touch] sender=0x... phase=Began pos=(x,y)（手指、翻页器都记）\n2. 目的：方案 A（整段吞翻页器会话）的前置验证——用日志实测手指 sender 和翻页器 sender 是否不同，证明不会误吞手指\n\n【怎么测】\n1. 装 v1.0.27 → 注销 → 打开番茄小说（或其他 App）\n2. 用手指点屏幕 3 下（间隔 2 秒）\n3. 用翻页器按 3 次点击键、3 次方向键（间隔 2 秒）\n4. 把 /var/mobile/Documents/PageTurner.log 完整发我\n\n（v1.0.26 已修：总开关=总闸，探针/提醒条/调试可视化全纳入）'
+          TAG=v1.0.28
+          NOTES=$'PageTurner v1.0.28（roothide 直装）—— 定稿版：方案 B 整段拦截 + 未命中重放 + 时序参数可调\n\n【v1.0.28 改了什么】\n1. 拦截方案 B（核心）：翻页器按键会话 Began/Moved 整段吞掉（App 收不到原始滑动，不会先滚动）；Ended 判定命中已录特征 → 执行映射；未命中 → 暂存轨迹重放给 App（放行，未录键保留原行为）。手指/非已学来源完全不进拦截\n2. 动作时序全可调：方案页长按动作 → 参数框（点击=按下时长；双击=按下时长+两次间隔；滑动=按下停留+真实速度 pt/s；延迟=时长）\n3. 学习页下方实时记录区：每次按键实时显示 sender/相位/方向/位移\n4. 修复：波动太大弹窗期间暂停收集（继续录=不清空解除15次上限继续录到稳定；重录=清空重录）\n5. 修复：命名保存后返回直接回记录与映射（不再经过未录入空壳页）；记录与映射列表返回即刷新\n6. 动作设置页：标题实时显示坐标（点击(200,600)/双击/滑动起点→终点）；内容区统一灰色；绿点全屏可拖；滑动页两绿点间画连线；速度滑块移除\n7. 方案页：方案名改「方案名： xxxxx」一行（点击弹框改名）；映射区说明居中\n8. 测试页下方实时记录区（命中/未命中实时显示，返回即消失）\n\n【怎么测】\n1. 装 v1.0.28 → 注销 → 设置 → PageTurner → 记录与映射\n2. 新增方案 → 新增记录 → 学习页下方记录区看识别结果（确定键 sender 当场可见）→ 录完命名\n3. 方案页长按动作调时序/速度 → 测试本方案验证代指\n4. 指定 App 勾选番茄小说 → 打开实测拦截替换\n5. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else

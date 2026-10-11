@@ -1,5 +1,17 @@
 // ============================================================
-// PageTurner v1.0.27 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.28 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.28（定稿版）：
+//   拦截方案 B（整段吞 + 未命中重放，用户定稿）：
+//     · Began（已学 sender 会话）→ 吞 + 记录起点（App 收不到，不会先滚动）
+//     · Moved → 吞 + 记录轨迹点
+//     · Ended → 判定：命中已录特征 → 执行映射（App 全程未收到原始滑动）；
+//                        未命中 → 用暂存轨迹重放给 App（放行，未录键保留原行为）
+//     · 手指 / 非已学 sender → 不拦截，自然放行（用户录的是翻页器特征，碰不到手指）
+//   动作时序参数化（长按方案页动作可调）：
+//     · tap: pressMs 按下时长（默认30ms）  · doubleTap: pressMs + gapMs 两次间隔（默认120ms）
+//     · swipe: holdMs 按下停留（默认20ms）+ speed 真实速度 pt/s（默认200，距离/速度换算时长）
+//     · delay: ms
 //
 // v1.0.24（注入可视化，照抄 volumekeytapper）：用户要求"打开 App 一眼看出注入成功没"
 //   - 提醒条（勾选生效 App）：黑底白字+黄边框、屏幕中上方、2 秒——
@@ -282,6 +294,9 @@ typedef struct {
 } PagerSession;
 static PagerSession gSession;
 
+// v1.0.28：前向声明（实现放在动作执行段，gIsInjecting/PTFakeMetaTouch 定义之后）
+static void PTReplayTrailAsync(void);
+
 // ============================================================
 // 事件处理（学习收集 / 运行匹配+吞）
 // ============================================================
@@ -331,8 +346,11 @@ static NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
 }
 
 // 返回 YES = 吞（命中：防 App 同时收到翻页器滚动）；NO = 放行（未命中：App 保留原行为）
-static BOOL PTHandlePagerEvent(UIEvent *event) {
-    if (![event respondsToSelector:@selector(allTouches)]) return NO;
+// v1.0.28 方案 B：已学 sender 会话 Began/Moved 即吞 + 记录轨迹；Ended 判定——
+//   命中 → 执行映射（整个会话 App 未收到）；未命中 → 暂存轨迹重放给 App（放行）
+static NSMutableArray *gSessTrail = nil;   // 当前会话轨迹点（NSValue<CGPoint>）
+
+static BOOL PTHandlePagerEvent(UIEvent *event) {    if (![event respondsToSelector:@selector(allTouches)]) return NO;
     NSSet *touches = event.allTouches;
     if (!touches.count) return NO;
     UITouch *t = [touches anyObject];
@@ -346,7 +364,8 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
             gSession.totalDist = 0;
             gSession.hasMove = NO;
             gSession.firstMoveDir = 0;
-            return gIsPreferences ? NO : NO;   // 不吞 Began（放行，会话由 Ended 决定）
+            gSessTrail = [NSMutableArray arrayWithObject:[NSValue valueWithCGPoint:p]];
+            return YES;   // 方案 B：Began 即吞（App 收不到，由 Ended 决定放行/替换）
         }
         case UITouchPhaseMoved: {
             if (!gSession.active) return NO;
@@ -361,36 +380,44 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
                 }
             }
             gSession.last = p;
-            return NO;   // 放行 Moved
+            if (gSessTrail && gSessTrail.count < 64) [gSessTrail addObject:[NSValue valueWithCGPoint:p]];
+            return YES;   // 吞 Moved（轨迹已记录，未命中时重放）
         }
         case UITouchPhaseEnded: {
             if (!gSession.active) return NO;
             gSession.active = NO;
+            if (gSessTrail && gSessTrail.count < 64) [gSessTrail addObject:[NSValue valueWithCGPoint:p]];
             PagerFeature f;
             f.phase = (gSession.totalDist < kTapDistThreshold) ? 0 : 1;
             f.direction = gSession.hasMove ? gSession.firstMoveDir : 0;
             f.dist = gSession.totalDist;
             if (gIsPreferences && gLearnActive) {
                 PTAppendLearnSample(f, gCurSender);
-                return NO;
+                gSessTrail = nil;
+                return NO;   // 学习端由设置页 bundle 收集，tweak 旁路不吞
             }
             NSString *plan = PTMatchPlan(f, gCurSender);
             if (plan) {
-                PTLog(@"[会话] 命中「%@」→ 执行 + 吞事件", plan);
+                gSessTrail = nil;
+                PTLog(@"[会话] 命中「%@」→ 执行映射（原始滑动已整段吞掉）", plan);
                 PTExecutePlan(plan);
-                return YES;   // 命中：吞 Ended，App 收不到这次滑动
+                return YES;   // 吞 Ended（整个会话 App 未收到）
             }
-            PTLog(@"[会话] 未命中：sender=0x%llx phase=%d dir=%.1f dist=%.1f（放行，App 保留原行为）",
+            PTLog(@"[会话] 未命中：sender=0x%llx phase=%d dir=%.1f dist=%.1f → 重放轨迹放行",
                   gCurSender, f.phase, f.direction, f.dist);
-            return NO;   // 未命中：放行
+            PTReplayTrailAsync();
+            return YES;   // 吞原 Ended，重放合成版给 App
         }
         case UITouchPhaseCancelled:
             gSession.active = NO;
+            gSessTrail = nil;
             return NO;
         default:
             return NO;
     }
 }
+
+// v1.0.28 方案 B：PTReplayTrailAsync 实现见动作执行段（gIsInjecting 定义之后）
 
 // ============================================================
 // 调试可视化（v1.0.23 加，按用户要求抄 TrollCM 触摸轨迹思路）
@@ -586,6 +613,40 @@ static int gExecToken = 0;
 static double gLastExec = 0;
 static float gMutedVolume = -1;   // 静音前音量（-1=未静音）
 
+// v1.0.28 方案 B：未命中时把暂存轨迹重放给 App（恢复原行为 = 放行）
+// 中间点均匀抽样最多 10 个，异步分步，gIsInjecting 防递归
+static void PTReplayTrailAsync(void) {
+    if (!gSessTrail || gSessTrail.count < 2) { gSessTrail = nil; return; }
+    NSArray *pts = [gSessTrail copy];
+    gSessTrail = nil;
+    CGPoint from = [pts.firstObject CGPointValue];
+    CGPoint to = [pts.lastObject CGPointValue];
+    NSMutableArray *mids = [NSMutableArray array];
+    NSUInteger n = pts.count;
+    NSUInteger k = MIN(n - 2, 10u);
+    for (NSUInteger i = 0; i < k; i++) {
+        NSUInteger idx = 1 + (i * (n - 2)) / k;
+        if (idx >= n - 1) idx = n - 2;
+        [mids addObject:pts[idx]];
+    }
+    gIsInjecting = YES;
+    NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
+    __block NSUInteger i = 0;
+    __block void (^step)(void);
+    step = ^(void) {
+        if (i >= mids.count) {
+            [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+            gIsInjecting = NO;
+            PTLog(@"[重放] 未命中：原始轨迹已重放给 App（%lu 中间点）", (unsigned long)mids.count);
+            return;
+        }
+        [PTFakeMetaTouch fakeTouchId:pid AtPoint:[mids[i] CGPointValue] withTouchPhase:UITouchPhaseMoved];
+        i++;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.012 * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.016 * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
+}
+
 static float PTGetVolume(void) {
     @try {
         id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
@@ -602,17 +663,17 @@ static void PTSetVolume(float v) {
     } @catch (NSException *e) {}
 }
 
-// 点击（同步短阻塞，DVT 验证过的方案）
-static void PTFakeTap(CGPoint p) {
+// 点击（同步短阻塞，DVT 验证过的方案；pressMs = 按下时长）
+static void PTFakeTap(CGPoint p, int pressMs) {
     UIWindow *w = [UIApplication sharedApplication].keyWindow;
     if (!w) return;
     NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
-    usleep(30000);
+    usleep(pressMs * 1000);
     [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:UITouchPhaseEnded];
 }
 
-// 滑动（异步分步，不阻塞主线程；完成后调 completion）
-static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int token, void (^done)(void)) {
+// 滑动（异步分步，不阻塞主线程；holdMs = 按下停留，完成后调 completion）
+static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int holdMs, int token, void (^done)(void)) {
     NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
     int steps = 12;
     double per = durationMs / steps / 1000.0;
@@ -631,28 +692,36 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int to
         i++;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(per * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
     };
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.02 * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
 }
 
 // 执行单条动作 → 完成后 next()
 static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
     NSString *type = a[@"type"];
     if ([type isEqualToString:@"tap"]) {
-        PTFakeTap(CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]));
+        int pressMs = [a[@"pressMs"] intValue] ?: 30;
+        PTFakeTap(CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]), pressMs);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else if ([type isEqualToString:@"doubleTap"]) {
         CGPoint p = CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]);
-        PTFakeTap(p);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        int pressMs = [a[@"pressMs"] intValue] ?: 30;
+        int gapMs = [a[@"gapMs"] intValue] ?: 120;
+        PTFakeTap(p, pressMs);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gapMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
             if (token != gExecToken) { if (next) next(); return; }
-            PTFakeTap(p);
+            PTFakeTap(p, pressMs);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
         });
     } else if ([type isEqualToString:@"swipe"]) {
         CGPoint from = CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]);
         CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
-        double dur = [a[@"speed"] doubleValue] ?: 200;
-        PTFakeSwipeAsync(from, to, dur, token, next);
+        // v1.0.28：speed = 真实速度 pt/s；时长 = 距离/速度
+        double speed = [a[@"speed"] doubleValue] ?: 200;
+        int holdMs = [a[@"holdMs"] intValue] ?: 20;
+        double dist = hypot(to.x - from.x, to.y - from.y);
+        double durMs = (dist / MAX(speed, 1.0)) * 1000.0;
+        if (durMs < 50) durMs = 50;
+        PTFakeSwipeAsync(from, to, durMs, holdMs, token, next);
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
@@ -748,7 +817,8 @@ static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
             }
         }
     }
-    if (event && PTNow() < gPagerWindowUntil) {
+    // v1.0.28 方案 B：会话一旦开始（Began 已吞）持续处理到 Ended，不再受 50ms 窗口限制
+    if (event && (PTNow() < gPagerWindowUntil || gSession.active)) {
         if (PTHandlePagerEvent(event)) return;
     }
     ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
@@ -806,7 +876,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.27 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.28 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
