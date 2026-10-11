@@ -45,13 +45,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.14-roothide.deb
+          DEB=PageTurner-1.0.15-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.14
-          NOTES=$'PageTurner v1.0.14（roothide 直装）—— 录制端双通道采集（根治"位移丢失+心跳污染"）\n\n【v1.0.14 改了什么】\n你的日志是铁证：录制时只有空闲心跳（dx=0 dy=0 每秒几十条）涌入 addEvent 层，方向键位移一个都没有 —— addEvent 层（HID 原始层）读不出方向键位移，所有键都收敛成"点击"，判重必然全拒；心跳还被当成"点击"录进方案（你截图 sender 全是心跳就是这个原因）。\n采集改双通道：\n1. addEvent 层只收位移事件（dx≠0）；dx=0 的心跳/点击一律跳过\n2. 新增 sendEvent 层（UIApplication -sendEvent:）：收翻页器合成触摸 —— UITouch 屏幕坐标增量=真实位移（运行端和画布都证明这层位移真实）；点击键坐标不变=点击；手指 sender=0 天然忽略；心跳不合成触摸，这层根本不存在\n3. 双通道 8ms 去重，同一按键只计一次\n4. 判重/结算/阈值不变\n\n【怎么测】\n1. 装 v1.0.14 → 注销 → 重开设置\n2. 新建方案 → 新增记录 → 连续按同一个键（如左键）直到稳定 → 命名保存\n3. 再新增记录录第二个键（如右键/上键）→ 这次应能录出独立特征\n4. 有问题把 设置 → PageTurner → 日志 → 复制 发我（日志标了 feed(addEvent)/feed(sendEvent) 来源，能看出哪个通道在工作）'
+          TAG=v1.0.15
+          NOTES=$'PageTurner v1.0.15（roothide 直装）—— 录制采集双通道修复（设置 App 内直接录 + 任意 App 都能录）\n\n【v1.0.15 改了什么】\n你说翻页器在系统设置里能操作（点击/左/右都响应）—— 这推翻了"设置 App 收不到事件"的判断，v1.0.14 没录上是采集代码 bug：\n1. 【方向键=hover】方向键（鼠标移动）合成的是 UIEventTypeHover（type=11），v1.0.14 只收 touches（type=0）→ 方向键全被过滤。现在 touches+hover 都收\n2. 【sender 溯源兜底】合成触摸读不到 sender 时，用最近 30ms addEvent 层收到的 sender 关联（点击键在 addEvent 层必有 type=11 sender）\n3. 【addEvent 层放开 type】所有 type 都读，位移从 0x23/24、0x04/05、0x3B/3C 多个候选字段取\n4. 【Tweak 全 App 学习采集】设置页学习页打开后，切到任意 App（番茄小说/备忘录）按翻页器也能录（sendEvent 层，运行端验证过的通道），样本写回设置页\n\n【怎么测】\n1. 装 v1.0.15 → 注销 → 重开设置 → PageTurner → 新建方案 → 新增记录\n2. 学习页里直接用翻页器按同一个键（如左键）多次，或切到任意 App 按完再回设置页\n3. 提示"特征已稳定"后命名保存；再录第二个键（右键/上键）\n4. 有问题：设置 → PageTurner → 日志 → 复制 发我（feed(addEvent)/feed(sendEvent) 标了来源）'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
             gh release delete "$TAG" --yes || true
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.14" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.15" --notes "$NOTES"
           fi
