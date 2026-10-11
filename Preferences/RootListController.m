@@ -1,5 +1,16 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.28）
+// RootListController.m —— PageTurner 设置页（v1.0.29）
+//
+// v1.0.29（用户定稿 + 实测反馈）：
+//   1. 学习页：特征稳定后不再弹命名框——背景变绿色提示「特征已稳定」，
+//      右上角「保存」自己点（稳定后才可点）；保存用默认名「新方案N」（跳过重名），
+//      名字以后在方案页点「方案名： xxx」再改；保存后直接回记录与映射列表（自动刷新）
+//   2. 方案页 viewWillAppear 重读动作 → 新增映射/修改后返回立即显示
+//   3. 学习页/测试页轨迹可视化换成调试可视化同款：起点绿点 + 方向线 + P 标记
+//   4. 首页「调试」组新增【注入探针】独立开关（key=probeEnabled）：
+//      探针弹窗+提醒条归它管，与调试可视化互相独立、不跟总开关
+//   5. 动作设置页支持编辑：点击方案页动作行 → 进动作设置页（预填原坐标），
+//      完成=覆盖更新该条（保留已调好的时序参数）；长按仍调参数
 //
 // v1.0.28（定稿版）：
 //   1. BUG-1 波动太大弹窗：弹出时暂停收集；「继续录」= 不清空已录、解除 15 次上限
@@ -110,7 +121,12 @@
 @property (nonatomic, strong) NSMutableArray *mem;
 @property (nonatomic, assign) BOOL finished;
 @property (nonatomic, assign) BOOL limitExceeded;   // v1.0.28：继续录后跳过 15 次上限
+@property (nonatomic, strong) NSDictionary *readyFt;      // v1.0.29：稳定后的特征，等右上角保存
+@property (nonatomic, strong) CAShapeLayer *trailLayer;   // v1.0.29：调试可视化同款轨迹
+@property (nonatomic, strong) UIView *trailDot;
+@property (nonatomic, strong) UILabel *trailLabel;
 - (void)appendLog:(NSString *)s;
+- (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase;
 @end
 
 @interface PTActionVC : PSViewController
@@ -119,6 +135,8 @@
 @property (nonatomic, strong) UIView *dot1, *dot2;
 @property (nonatomic, assign) BOOL isSwipe;
 @property (nonatomic, strong) CAShapeLayer *lineLayer;
+@property (nonatomic, assign) NSInteger editIndex;   // v1.0.29：-1=新增，>=0=编辑已有动作
+@property (nonatomic, strong) NSDictionary *editAction;
 @end
 
 @interface PTActionParamVC : PSViewController   // v1.0.28：长按动作 → 参数调整页
@@ -136,7 +154,11 @@
 @interface PTTestVC : PSViewController
 @property (nonatomic, strong) NSString *planName;
 @property (nonatomic, strong) UITextView *logView;   // v1.0.28：实时记录区
+@property (nonatomic, strong) CAShapeLayer *trailLayer;   // v1.0.29：调试可视化同款轨迹
+@property (nonatomic, strong) UIView *trailDot;
+@property (nonatomic, strong) UILabel *trailLabel;
 - (void)appendLog:(NSString *)s;
+- (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase;
 @end
 
 // ---------- 工具 ----------
@@ -467,6 +489,8 @@ static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender) {
         [sTestLogSink appendLog:[NSString stringWithFormat:@"✗ 未命中（放行）：sender=0x%llx phase=%d dir=%.1f dist=%.1f",
             sender, phase, dir, dist]];
     }
+    // v1.0.29：测试页画调试可视化同款轨迹（翻页器按键真实轨迹，命中与否都画）
+    [sTestLogSink drawTrailWithDirection:dir dist:dist phase:phase];
 }
 
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
@@ -678,6 +702,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [specs addObject:plans];
 
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"调试"]];
+        // v1.0.29：探针独立开关（探针弹窗+提醒条），与调试可视化互相独立，不跟总开关
+        PSSpecifier *probe = [PSSpecifier preferenceSpecifierNamed:@"注入探针"
+            target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+            detail:nil cell:PSSwitchCell edit:nil];
+        [probe setProperty:@"probeEnabled" forKey:@"key"];
+        [probe setProperty:@NO forKey:@"default"];
+        [probe setProperty:@"开启后目标 App 启动时显示探针弹窗 + 提醒条（黑底黄框），一眼确认注入成功。与调试可视化互相独立。" forKey:@"staticText"];
+        [specs addObject:probe];
+
         PSSpecifier *dots = [PSSpecifier preferenceSpecifierNamed:@"调试可视化"
             target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
             detail:nil cell:PSSwitchCell edit:nil];
@@ -974,6 +1007,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self reload];
 }
 
+// v1.0.29（问题2）：从动作设置页/参数页返回时重读动作，映射区立即显示新增/修改
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reload];
+}
+
 - (void)reload {
     NSDictionary *plan = nil;
     for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
@@ -1124,7 +1163,27 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (ip.row < (NSInteger)self.actions.count) return;
+    if (ip.row < (NSInteger)self.actions.count) {
+        // v1.0.29（问题6）：点击动作行 → 进动作设置页编辑（预填坐标，完成覆盖更新）
+        NSDictionary *act = self.actions[ip.row];
+        NSString *type = act[@"type"];
+        if (![type isEqualToString:@"delay"] && ![type isEqualToString:@"muteToggle"]
+            && ![type isEqualToString:@"volumeUp"] && ![type isEqualToString:@"volumeDown"]) {
+            PTActionVC *vc = [PTActionVC new];
+            vc.planName = self.planName;
+            vc.actionType = type;
+            vc.editIndex = ip.row;
+            vc.editAction = act;
+            [self.navigationController pushViewController:vc animated:YES];
+        } else {
+            PTActionParamVC *vc = [PTActionParamVC new];
+            vc.planName = self.planName;
+            vc.actionIndex = ip.row;
+            vc.action = act;
+            [self.navigationController pushViewController:vc animated:YES];
+        }
+        return;
+    }
     if (ip.row == (NSInteger)self.actions.count) { [self addActionMenu]; return; }
     // 最后一行：测试本方案（大白屏 + 绿点点触验证）
     PTTestVC *vc = [PTTestVC new];
@@ -1218,6 +1277,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.title = @"录制特征";
     self.view.backgroundColor = [UIColor whiteColor];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"返回" style:UIBarButtonItemStylePlain target:self action:@selector(back)];
+    // v1.0.29：右上角「保存」（录稳后变可点），名字用默认名以后再改
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存"
+        style:UIBarButtonItemStyleDone target:self action:@selector(saveTapped)];
+    self.navigationItem.rightBarButtonItem.enabled = NO;
     self.finished = NO;
     self.mem = [NSMutableArray array];
 
@@ -1330,6 +1393,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     else self.distLabel.text = @"位移：点击（无滑动）";
     [self appendLog:[NSString stringWithFormat:@"✓ 已录 %d 次  sender=%@ phase=%d dir=%.1f° dist=%.1f",
         count, sender, [s[@"phase"] intValue], dir, dist]];
+    // v1.0.29：每次按键画调试可视化同款轨迹（方向线 + 绿点 + P 标记）
+    [self drawTrailWithDirection:dir dist:dist phase:[s[@"phase"] intValue]];
 
     if (PTStable(self.mem, sender)) {
         self.status.text = @"✅ 特征已稳定，可以停止";
@@ -1353,57 +1418,101 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         if (v < lo) lo = v;
         if (v > hi) hi = v;
     }
-    UIAlertController *al = [UIAlertController alertControllerWithTitle:@"特征已稳定"
-        message:[NSString stringWithFormat:@"来源 %@｜方向 %@｜位移 %.0f~%.0f pt\n给这个按键命名：", sender, PTDirName(dir), lo, hi]
-        preferredStyle:UIAlertControllerStyleAlert];
-    [al addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"如：左键";
-        tf.text = self.planName.length ? self.planName : @"";
-    }];
-    [al addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) { self.finished = NO; }]];
-    [al addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        NSString *name = [al.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if (!name.length) name = @"新按键";
-        NSMutableDictionary *ft = [NSMutableDictionary dictionary];
-        ft[@"sender"] = sender;
-        ft[@"phase"] = @(phase);
-        ft[@"direction"] = @(dir);
-        ft[@"distMin"] = @(lo);
-        ft[@"distMax"] = @(hi);
-        ft[@"recordCount"] = @([self countForSender:sender]);
-        // 写入方案（同名更新 feature / 否则新增）
-        NSMutableDictionary *cfg = PTRead();
-        NSMutableArray *plans = [NSMutableArray array];
-        BOOL updated = NO;
-        for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-            if ([p[@"name"] isEqualToString:name]) {
-                NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
-                np[@"feature"] = ft;
-                [plans addObject:np];
-                updated = YES;
-            } else [plans addObject:p];
-        }
-        if (!updated) [plans addObject:@{@"name": name, @"feature": ft, @"actions": @[]}];
-        cfg[@"plans"] = plans;
-        PTWrite(cfg);
-        PTSetLearningLocal(NO);
-        PTPlanVC *vc = [PTPlanVC new];
-        vc.planName = name;
-        // v1.0.28 BUG-2：把「空壳方案页 + 学习页」一起移出栈，返回直接回记录与映射
-        NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
-        NSUInteger base = NSNotFound;
-        for (NSUInteger i = 0; i < stack.count; i++) {
-            if ([stack[i] isKindOfClass:[PTPlansVC class]]) { base = i; break; }
-        }
-        if (base != NSNotFound && base + 1 < stack.count) {
-            [stack removeObjectsInRange:NSMakeRange(base + 1, stack.count - base - 1)];
-        } else if (stack.count) {
-            [stack removeLastObject];
-        }
-        [stack addObject:vc];
+    NSMutableDictionary *ft = [NSMutableDictionary dictionary];
+    ft[@"sender"] = sender;
+    ft[@"phase"] = @(phase);
+    ft[@"direction"] = @(dir);
+    ft[@"distMin"] = @(lo);
+    ft[@"distMax"] = @(hi);
+    ft[@"recordCount"] = @([self countForSender:sender]);
+    self.readyFt = ft;
+    // v1.0.29：稳定后不弹框——背景绿色提示，你自己按够了点右上角「保存」；名字以后再改
+    self.status.text = [NSString stringWithFormat:@"✅ 特征已稳定\n来源 %@｜方向 %@｜位移 %.0f~%.0f pt\n\n点右上角「保存」完成录制", sender, PTDirName(dir), lo, hi];
+    self.status.textColor = [UIColor whiteColor];
+    self.view.backgroundColor = [UIColor systemGreenColor];
+    self.logView.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1.0];
+    self.navigationItem.rightBarButtonItem.enabled = YES;
+    sCollectArmed = NO;   // 稳定后暂停收集（防误录）
+    SLog(@"learn: 特征已稳定（不弹框），等右上角保存 sender=%@ phase=%d dir=%.1f dist=%.0f~%.0f", sender, phase, dir, lo, hi);
+}
+
+// v1.0.29：右上角保存——默认名「新方案N」（N 跳过重名），保存后回记录与映射列表
+- (void)saveTapped {
+    if (!self.finished || !self.readyFt) return;
+    NSDictionary *ft = self.readyFt;
+    NSArray *plans = PTRead()[@"plans"] ?: @[];
+    NSString *name = nil;
+    for (int i = 1; i < 1000; i++) {
+        NSString *cand = [NSString stringWithFormat:@"新方案%d", i];
+        BOOL dupName = NO;
+        for (NSDictionary *p in plans) if ([p[@"name"] isEqualToString:cand]) { dupName = YES; break; }
+        if (!dupName) { name = cand; break; }
+    }
+    if (!name) name = @"新按键";
+    NSMutableDictionary *cfg = PTRead();
+    NSMutableArray *nplans = [NSMutableArray arrayWithArray:cfg[@"plans"] ?: @[]];
+    [nplans addObject:@{@"name": name, @"feature": ft, @"actions": @[]}];
+    cfg[@"plans"] = nplans;
+    PTWrite(cfg);
+    PTSetLearningLocal(NO);
+    [self appendLog:[NSString stringWithFormat:@"已保存「%@」（名字可在方案页点方案名修改）", name]];
+    // 回记录与映射列表（清掉学习页；列表 viewWillAppear 自动刷新，立刻看到新方案）
+    NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
+    NSUInteger base = NSNotFound;
+    for (NSUInteger i = 0; i < stack.count; i++) {
+        if ([stack[i] isKindOfClass:[PTPlansVC class]]) { base = i; break; }
+    }
+    if (base != NSNotFound) {
+        [stack removeObjectsInRange:NSMakeRange(base + 1, stack.count - base - 1)];
         [self.navigationController setViewControllers:stack animated:YES];
-    }]];
-    [self presentViewController:al animated:YES completion:nil];
+    } else {
+        [self.navigationController popViewControllerAnimated:YES];
+    }
+}
+
+// v1.0.29：调试可视化同款轨迹——起点绿点 + 方向线 + 终点 P 标记（点击只有 P 标记）
+- (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase {
+    [self.trailLayer removeFromSuperlayer];
+    [self.trailDot removeFromSuperview];
+    [self.trailLabel removeFromSuperview];
+    CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
+    CGPoint start = CGPointMake(w * 0.5, h * 0.38);   // 避开上方状态/标签区
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
+    dot.layer.cornerRadius = 18;
+    dot.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.3];
+    dot.layer.borderWidth = 2;
+    dot.layer.borderColor = [UIColor systemGreenColor].CGColor;
+    dot.center = start;
+    [self.view addSubview:dot];
+    self.trailDot = dot;
+    UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
+    lb.text = @"P";
+    lb.textAlignment = NSTextAlignmentCenter;
+    lb.font = [UIFont boldSystemFontOfSize:18];
+    lb.textColor = [UIColor whiteColor];
+    lb.backgroundColor = [UIColor systemGreenColor];
+    lb.layer.cornerRadius = 18;
+    lb.clipsToBounds = YES;
+    if (phase == 1) {
+        double rad = dir * M_PI / 180.0;
+        CGPoint end = CGPointMake(start.x + cos(rad) * dist, start.y + sin(rad) * dist);
+        CAShapeLayer *l = [CAShapeLayer layer];
+        CGMutablePathRef path = CGPathCreateMutable();
+        CGPathMoveToPoint(path, NULL, start.x, start.y);
+        CGPathAddLineToPoint(path, NULL, end.x, end.y);
+        l.path = path;
+        CGPathRelease(path);
+        l.strokeColor = [UIColor systemGreenColor].CGColor;
+        l.fillColor = [UIColor clearColor].CGColor;
+        l.lineWidth = 3;
+        [self.view.layer addSublayer:l];
+        self.trailLayer = l;
+        lb.center = end;
+    } else {
+        lb.center = start;
+    }
+    [self.view addSubview:lb];
+    self.trailLabel = lb;
 }
 
 - (int)countForSender:(NSString *)sender {
@@ -1478,12 +1587,23 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         self.lineLayer.lineDashPattern = @[@6, @4];
         [self.view.layer addSublayer:self.lineLayer];
         self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
-        self.dot1.center = CGPointMake(w * 0.3, h * 0.45);
         self.dot2 = [self makeDot:self.view label:@"2" color:[UIColor systemOrangeColor]];
-        self.dot2.center = CGPointMake(w * 0.7, h * 0.55);
+        if (self.editIndex >= 0 && self.editAction) {
+            // v1.0.29 编辑模式：预填原坐标
+            self.dot1.center = CGPointMake([self.editAction[@"x1"] doubleValue], [self.editAction[@"y1"] doubleValue]);
+            self.dot2.center = CGPointMake([self.editAction[@"x2"] doubleValue], [self.editAction[@"y2"] doubleValue]);
+        } else {
+            self.dot1.center = CGPointMake(w * 0.3, h * 0.45);
+            self.dot2.center = CGPointMake(w * 0.7, h * 0.55);
+        }
     } else {
         self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
-        self.dot1.center = CGPointMake(w * 0.5, h * 0.5);
+        if (self.editIndex >= 0 && self.editAction) {
+            // v1.0.29 编辑模式：预填原坐标
+            self.dot1.center = CGPointMake([self.editAction[@"x"] doubleValue], [self.editAction[@"y"] doubleValue]);
+        } else {
+            self.dot1.center = CGPointMake(w * 0.5, h * 0.5);
+        }
     }
     [self updatePos];
 }
@@ -1556,13 +1676,23 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
         a[@"pressMs"] = @(30);
     }
+    // v1.0.29 编辑模式：保留原时序参数（pressMs/gapMs/speed/holdMs/ms），只更新坐标
+    if (self.editIndex >= 0 && self.editAction) {
+        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"ms"]) {
+            if (self.editAction[k]) a[k] = self.editAction[k];
+        }
+    }
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
     for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
         if ([p[@"name"] isEqualToString:self.planName]) {
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
-            [acts addObject:a];
+            if (self.editIndex >= 0 && self.editIndex < (NSInteger)acts.count) {
+                acts[self.editIndex] = a;   // 覆盖更新该条
+            } else {
+                [acts addObject:a];         // 新增
+            }
             np[@"actions"] = acts;
             [plans addObject:np];
         } else [plans addObject:p];
@@ -1776,5 +1906,50 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.logView.text = cur.length ? [cur stringByAppendingFormat:@"\n%@", s] : s;
     NSRange r = NSMakeRange(self.logView.text.length - 1, 1);
     [self.logView scrollRangeToVisible:r];
+}
+
+// v1.0.29：调试可视化同款轨迹——起点绿点 + 方向线 + 终点 P 标记（点击只有 P 标记）
+- (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase {
+    [self.trailLayer removeFromSuperlayer];
+    [self.trailDot removeFromSuperview];
+    [self.trailLabel removeFromSuperview];
+    CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
+    CGPoint start = CGPointMake(w * 0.5, h * 0.38);   // 避开上方提示/下方记录区
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
+    dot.layer.cornerRadius = 18;
+    dot.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.3];
+    dot.layer.borderWidth = 2;
+    dot.layer.borderColor = [UIColor systemGreenColor].CGColor;
+    dot.center = start;
+    [self.view addSubview:dot];
+    self.trailDot = dot;
+    UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
+    lb.text = @"P";
+    lb.textAlignment = NSTextAlignmentCenter;
+    lb.font = [UIFont boldSystemFontOfSize:18];
+    lb.textColor = [UIColor whiteColor];
+    lb.backgroundColor = [UIColor systemGreenColor];
+    lb.layer.cornerRadius = 18;
+    lb.clipsToBounds = YES;
+    if (phase == 1) {
+        double rad = dir * M_PI / 180.0;
+        CGPoint end = CGPointMake(start.x + cos(rad) * dist, start.y + sin(rad) * dist);
+        CAShapeLayer *l = [CAShapeLayer layer];
+        CGMutablePathRef path = CGPathCreateMutable();
+        CGPathMoveToPoint(path, NULL, start.x, start.y);
+        CGPathAddLineToPoint(path, NULL, end.x, end.y);
+        l.path = path;
+        CGPathRelease(path);
+        l.strokeColor = [UIColor systemGreenColor].CGColor;
+        l.fillColor = [UIColor clearColor].CGColor;
+        l.lineWidth = 3;
+        [self.view.layer addSublayer:l];
+        self.trailLayer = l;
+        lb.center = end;
+    } else {
+        lb.center = start;
+    }
+    [self.view addSubview:lb];
+    self.trailLabel = lb;
 }
 @end

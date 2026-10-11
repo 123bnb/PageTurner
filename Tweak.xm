@@ -1,5 +1,15 @@
 // ============================================================
-// PageTurner v1.0.28 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.29 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.29（用户定稿 + 实测反馈）：
+//   1. 拦截修复（问题5/7）：窗口/会话判断优先于 gIsInjecting——
+//      已学 sender 会话无视 gIsInjecting 继续吞+执行（修双动作+卡顿）；
+//      注入触摸 sender 不是已学 sender（addEvent 不开窗），照旧放行防递归
+//   2. 探针独立开关（probeEnabled）：探针弹窗+提醒条归它管，不跟总开关；
+//      调试可视化归 debugDots，互相独立
+//   3. 日志落盘修复：PTLog 自动创建文件（旧 fileHandleForWritingAtPath 不建文件，
+//      运行端日志一直静默丢失）；候选 App容器+/var/mobile/Documents/+jbroot，
+//      全失败 NSLog 兜底；注入标记加 jbroot 路径
 //
 // v1.0.28（定稿版）：
 //   拦截方案 B（整段吞 + 未命中重放，用户定稿）：
@@ -91,6 +101,21 @@ static const double kDistSlack = 30.0;           // 位移区间匹配裕度
 // 日志
 // ============================================================
 static const char *gLogPath = NULL;
+static NSString *PTJbrootRoot(void);   // 前向声明（139 行定义）
+
+// v1.0.29：日志文件自动创建（fileHandleForWritingAtPath 不会建文件，旧版静默丢日志）
+static void PTEnsureLogFile(NSString *path) {
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *dir = [path stringByDeletingLastPathComponent];
+        if (dir.length && ![fm fileExistsAtPath:dir]) {
+            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        }
+        if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
+    } @catch (NSException *e) {}
+}
+
+// 运行端日志：App 容器 + /var/mobile/Documents + jbroot 三候选，自动创建，全失败 NSLog 兜底
 static void PTLog(NSString *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
@@ -100,12 +125,18 @@ static void PTLog(NSString *fmt, ...) {
     char tbuf[64]; strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &tmv);
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@\n", tbuf, (int)(tv.tv_usec/1000), msg];
     NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
-    if (gLogPath) {
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:[NSString stringWithUTF8String:gLogPath]];
-        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:d]; [fh closeFile]; } @catch (NSException *e) {} }
+    BOOL wrote = NO;
+    NSMutableArray *paths = [NSMutableArray array];
+    if (gLogPath) [paths addObject:[NSString stringWithUTF8String:gLogPath]];
+    [paths addObject:@"/var/mobile/Documents/PageTurner.log"];
+    NSString *jb = PTJbrootRoot();
+    if (jb.length) [paths addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents/PageTurner.log"]];
+    for (NSString *p in paths) {
+        PTEnsureLogFile(p);
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
+        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:d]; [fh closeFile]; wrote = YES; } @catch (NSException *e) {} }
     }
-    NSFileHandle *fh2 = [NSFileHandle fileHandleForWritingAtPath:@"/var/mobile/Documents/PageTurner.log"];
-    if (fh2) { @try { [fh2 seekToEndOfFile]; [fh2 writeData:d]; [fh2 closeFile]; } @catch (NSException *e) {} }
+    if (!wrote) NSLog(@"[PageTurner] %@", line);   // 全失败：系统日志兜底（Console/Filza 可查）
 }
 
 static double PTNow(void) {
@@ -124,6 +155,7 @@ static BOOL gMasterEnabled = NO;
 static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
 static BOOL gDebugDots = NO;                // v1.0.23：调试可视化（TrollCM 触摸轨迹）
+static BOOL gProbeEnabled = NO;             // v1.0.29：探针独立开关（探针弹窗+提醒条）
 static BOOL gCrashTest = NO;                // v1.0.24：注入测试（探针字段，照抄 VKT）
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
@@ -211,6 +243,7 @@ static void PTLoadConfig(BOOL force) {
     double db = [gConfig[@"debounceMs"] doubleValue];
     gDebounceMs = (db > 0) ? db : 300;
     gDebugDots = [gConfig[@"debugDots"] boolValue];
+    gProbeEnabled = (gConfig[@"probeEnabled"] == nil) ? NO : [gConfig[@"probeEnabled"] boolValue];
     gCrashTest = (gConfig[@"crashTest"] == nil) ? NO : [gConfig[@"crashTest"] boolValue];
     gPlans = [NSMutableDictionary dictionary];
     gLearnedSenderCount = 0;
@@ -803,6 +836,12 @@ static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
             PTDebugUpdate((__bridge void *)t, p, t.phase, (gCurSender != 0));
         }
     }
+    // v1.0.29（问题5/7）：窗口/会话判断优先于 gIsInjecting——
+    // 已学 sender 会话无视 gIsInjecting 继续吞+执行（修双动作：映射序列执行中按键不再放行原始滑动）；
+    // 注入触摸 sender 不是已学 sender（addEvent 不开窗），正常走下方 gIsInjecting 放行防递归
+    if (event && (PTNow() < gPagerWindowUntil || gSession.active)) {
+        if (PTHandlePagerEvent(event)) return;
+    }
     if (gIsInjecting) {
         ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
         return;
@@ -816,10 +855,6 @@ static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                 PTLog(@"[touch] sender=0x%llx phase=Began pos=(%.1f,%.1f)", gCurSender, p.x, p.y);
             }
         }
-    }
-    // v1.0.28 方案 B：会话一旦开始（Began 已吞）持续处理到 Ended，不再受 50ms 窗口限制
-    if (event && (PTNow() < gPagerWindowUntil || gSession.active)) {
-        if (PTHandlePagerEvent(event)) return;
     }
     ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
 }
@@ -846,10 +881,18 @@ static void PTWriteInjectMarker(NSString *bid) {
     @try {
         NSString *line = [NSString stringWithFormat:@"%@ 注入标记 进程=%@ bundleID=%@\n",
                           [NSDate date], NSProcessInfo.processInfo.processName, bid];
-        for (NSString *p in @[
+        NSMutableArray *paths = [NSMutableArray arrayWithArray:@[
             [NSString stringWithFormat:@"/var/mobile/Documents/PageTurner-injected-%@.txt", bid],
             @"/var/mobile/Documents/PageTurner-injected.txt",
-            [NSString stringWithFormat:@"/tmp/PageTurner-injected-%@.txt", bid]]) {
+            [NSString stringWithFormat:@"/tmp/PageTurner-injected-%@.txt", bid]]];
+        // v1.0.29：jbroot 真实路径兜底（roothide 下 /var/mobile/Documents 可能被沙盒重定向）
+        NSString *jb = PTJbrootRoot();
+        if (jb.length) {
+            [paths addObject:[jb stringByAppendingPathComponent:
+                [NSString stringWithFormat:@"var/mobile/Documents/PageTurner-injected-%@.txt", bid]]];
+        }
+        for (NSString *p in paths) {
+            PTEnsureLogFile(p);
             FILE *f = fopen(p.UTF8String, "a");
             if (f) { fputs(line.UTF8String, f); fclose(f); }
         }
@@ -876,9 +919,10 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.28 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
-        PTLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
-              gCfgPath, gMasterEnabled, (unsigned long)gEnabledApps.count, gDebounceMs,
+        PTLog(@"PageTurner v1.0.29 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
+              gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
+              (unsigned long)gEnabledApps.count, gDebounceMs,
               (unsigned long)gPlans.count, gLearnedSenderCount);
         // 注入标记（无条件写）：Filza 看 /var/mobile/Documents/PageTurner-injected-<bid>.txt
         PTWriteInjectMarker(bundleID);
@@ -899,14 +943,14 @@ static void PTInit() {
         // v1.0.24 注入探针（照抄 VKT ShowProbeAlert）：第三方 App 启动 2.5s 弹，
         // 显示 本App/注入✅/全局配置/总开关/crashTest/勾选App数/本App被勾选 ——
         // 打开番茄小说一眼看出注入成功没、有没有勾选
-        // v1.0.26：探针纳入总开关（总开关=总闸，关掉插件完全静默）
-        if (!gIsPreferences && gMasterEnabled && ![bundleID hasPrefix:@"com.apple."]) {
+        // v1.0.29：探针独立开关（不跟总开关），调试可视化归 debugDots
+        if (!gIsPreferences && gProbeEnabled && ![bundleID hasPrefix:@"com.apple."]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ PTShowProbeAlert(); });
         }
         // v1.0.24 提醒条（勾选生效 App）：黑底白字+黄边框、中上方、2 秒。
-        // 有提醒条 = 注入成功（用户要求：打勾了那这个提醒条就有）
-        if (!gIsPreferences && gMasterEnabled && [gEnabledApps containsObject:bundleID]) {
+        // 有提醒条 = 注入成功（用户要求：打勾了那这个提醒条就有）；v1.0.29 归探针开关
+        if (!gIsPreferences && gProbeEnabled && [gEnabledApps containsObject:bundleID]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ PTShowToast(@"PageTurner 注入成功 · 翻页键映射生效中"); });
         }
