@@ -45,13 +45,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.9-roothide.deb
+          DEB=PageTurner-1.0.10-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.9
-          NOTES=$'PageTurner v1.0.9（roothide 直装）—— 录制回滚 v1.0.4 行为 + 学习轨迹可视化 + 日志修复\n\n【v1.0.9 改了什么】\n1. 【录制回滚 v1.0.4】去掉设备锚定锁定（v1.0.6 引入的 sAnchorSender 是"录不了翻页器"的根因）：现在 sender≠0 的外部 HID 事件一律接收，手指触摸（sender=0）天然排除。v1.0.4 是最后一个能正常录翻页器的版本，这版把录制行为还原成它\n2. 【学习轨迹】录制页面新增全屏轨迹显示：每按一次键，屏幕会画出这次按键的触摸轨迹——起点绿圈、沿线绿点、终点红点、蓝色位移线，底部显示起终点坐标。一眼看出方向键录到的是哪段位移\n3. 【日志修复】日志一直空的原因：代码写死 /var/mobile/Documents/PageTurner.log，但 iOS 上这个目录根本不存在 → 每次写入都失败。现在自动创建目录，同时写生效 App 容器日志\n\n【怎么测】\n1. 装 v1.0.9 → 注销\n2. 设置 → PageTurner → 新建方案 → 新增记录\n3. 等提示"请按翻页器要录的键"后，只按翻页器键（手指勿碰屏幕）→ 应正常录制 + 屏幕出现轨迹（绿点线+红终点）\n4. 录完映射动作 → 开调试模式 → 打开生效 App → 按学过的键 → 绿大圆点 = 映射动作落点\n5. 日志：/var/mobile/Documents/PageTurner.log 现在会有内容（生效 App 里操作时）'
+          TAG=v1.0.10
+          NOTES=$'PageTurner v1.0.10（roothide 直装）—— 录制端真正回滚 v1.0.4 原版\n\n【v1.0.10 改了什么（核心）】\n上一版（v1.0.9）只是删了锚定，录制采集层仍是 v1.0.8 的 sendEvent 坐标版，在设置 App 里收不到翻页器 → 还是录不了。这版把录制代码【整段还原成 v1.0.4 原版】：\n1. 【录制】hook _UIUpdateHIDDigitizerInput -addEvent:，type=11 全收（无过滤、无锚定），读 IOHIDEvent 相对位移 0x23/0x24 —— 用户实测唯一能正常录翻页器的版本\n2. 【学习页】恢复 v1.0.4 的"进入即开始录制"（去掉 v1.0.7 的 1 秒延迟）\n3. 【轨迹】保留：每按一次键屏幕画出相对位移路径——起点绿圈（屏幕中心）、沿线绿点、终点红点、蓝色位移线，底部标注 Δ(x,y)\n4. 【日志】自动建目录修复保留\n\n【怎么测】\n1. 装 v1.0.10 → 注销\n2. 设置 → PageTurner → 新建方案 → 新增记录\n3. 直接按翻页器键（手指勿碰屏幕）→ 应正常录制 + 屏幕出现轨迹\n4. 录完映射 → 开调试模式 → 打开生效 App → 按学过的键 → 绿大圆点=映射动作落点\n5. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
             gh release delete "$TAG" --yes || true
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.9" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.10" --notes "$NOTES"
           fi
