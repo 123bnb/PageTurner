@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.37-roothide.deb
+          DEB=PageTurner-1.0.38-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.37
-          NOTES=$'PageTurner v1.0.37（roothide 直装）—— 滑动时序参数扩展：弹起停留 + 滑动分段\n\n【v1.0.37 改了什么】\n1. 滑动动作参数页新增「弹起停留 liftMs」（默认 0ms，0~500）：滑到终点后停 liftMs 再弹起（Ended），默认 0 = 原行为不变\n2. 滑动分段 steps 从写死的 12 段改为可调（默认 12，6~48）：段数只影响插值密度/轨迹平滑度，不影响总时长（总时长 = 距离÷速度）\n3. 参数页滑动四项：按下停留 / 弹起停留 / 滑动速度 / 滑动分段，每条滑动动作独立\n4. 测试区与运行端（番茄小说）行为完全一致；旧滑动动作无新字段自动走默认兼容\n\n【怎么测】\n1. 方案页 → 长按一条滑动动作 → 动作参数：看到 4 个滑块，调弹起停留（如 300ms）和滑动分段（如 24）\n2. 方案页测试：滑动到终点会停 300ms 再消失，轨迹更平滑\n3. 番茄小说实测：翻页器滑动映射按新时序执行；滑动动作独立参数互不影响\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.38
+          NOTES=$'PageTurner v1.0.38（roothide 直装）—— 修复新增映射覆盖已有映射的 bug\n\n【v1.0.38 改了什么】\n1. 修复严重 bug：新增映射会覆盖已有第 1 条映射，导致无论新增多少次都只剩 1 条\n   - 根因：新增入口未初始化 editIndex（默认 0），保存逻辑把 editIndex=0 当成\u201c编辑第 0 条\u201d走覆盖分支\n   - 修复：新增入口显式 editIndex=-1；保存逻辑加 editAction 条件双保险（只有编辑模式才覆盖，新增一律追加）\n2. 影响说明：此前被覆盖的旧映射已丢失无法找回，需重新添加\n\n【怎么测】\n1. 方案页 → ＋ 新增记录 → 添加点击/双击/滑动 → 完成\n2. 连续新增 3 条不同映射 → 返回方案页：应显示 3 条，逐条存在不覆盖\n3. 点击已有动作行 → 修改坐标 → 完成：该条被更新、其余条不动\n4. 番茄小说实测正常'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.37" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.38" --notes "$NOTES"
           fi

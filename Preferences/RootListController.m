@@ -1,5 +1,9 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.37）
+// RootListController.m —— PageTurner 设置页（v1.0.38）
+//
+// v1.0.38（修复新增映射覆盖已有映射的 bug）：
+//   1. 新增入口（configAction）显式 vc.editIndex = -1（此前默认 0，保存时误走"覆盖第0条"分支）
+//   2. done 保存加 self.editAction 双保险：仅编辑模式覆盖，新增一律追加
 //
 // v1.0.37（滑动时序参数扩展，与运行端同步）：
 //   1. 动作参数页滑动分支：按下停留 + 弹起停留(liftMs) + 滑动速度 + 滑动分段(steps 默认12)
@@ -1377,6 +1381,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         PTActionVC *vc = [PTActionVC new];
         vc.actionType = type;
         vc.planName = self.planName;
+        vc.editIndex = -1;   // v1.0.38：修复新增覆盖 bug——此前未设 editIndex 默认 0，done 里 0<count 命中"覆盖"分支把已有第 1 条映射顶掉
         [self.navigationController pushViewController:vc animated:YES];
     }
 }
@@ -2150,7 +2155,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         if ([p[@"name"] isEqualToString:self.planName]) {
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
-            if (self.editIndex >= 0 && self.editIndex < (NSInteger)acts.count) {
+            // v1.0.38：覆盖条件加 self.editAction 双保险——只有编辑模式（带原动作）才覆盖，
+            // 新增（editAction 为 nil）一律追加，杜绝 editIndex 默认 0 误覆盖第 1 条
+            if (self.editIndex >= 0 && self.editAction && self.editIndex < (NSInteger)acts.count) {
                 acts[self.editIndex] = a;   // 覆盖更新该条
             } else {
                 [acts addObject:a];         // 新增

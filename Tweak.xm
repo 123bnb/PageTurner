@@ -1,5 +1,7 @@
 // ============================================================
-// PageTurner v1.0.37 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.38 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.38（设置页新增映射覆盖修复，Tweak.xm 无逻辑改动）：
 //
 // v1.0.37（滑动时序参数扩展）：
 //   1. 滑动新增「弹起停留 liftMs」：到终点后停 liftMs 再 Ended（默认 0）
@@ -1019,7 +1021,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.37 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.38 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
