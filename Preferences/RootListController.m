@@ -328,6 +328,21 @@ static void SLogRefreshCfg(void) {
     NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:PT_PREFS];
     sLogEnabled = (cfg[@"debugLogEnabled"] == nil) ? YES : [cfg[@"debugLogEnabled"] boolValue];
 }
+static NSString *SLogProbePath(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *cands = @[
+        [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject],
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
+        NSTemporaryDirectory(),
+        @"/var/mobile/Documents",
+    ];
+    for (NSString *d in cands) {
+        if (!d.length) continue;
+        if (![fm fileExistsAtPath:d]) [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
+        if ([fm isWritableFileAtPath:d]) return [d stringByAppendingPathComponent:@"PageTurner.log"];
+    }
+    return nil;
+}
 // v1.0.42：文件日志只保留最近 1000 行，超过循环（删最旧，保留尾部 1000 行）
 static void SLogTrimFile(NSString *path) {
     @try {
