@@ -1,5 +1,5 @@
 // ============================================================
-// PageTurner v1.0.41 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.42 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.39（滑动参数上限 + 回滑防惯性 + 弃置式中断修复）：
 //   1. 弹起停留上限 500→2000ms；滑动分段上限 48→96（两处钳制同步）
@@ -23,6 +23,11 @@
 //      轨迹点间距忽大忽小→视觉速度不均）；位置仍按真实时间插值 → 点密且间距均匀
 //   3. 【防惯性】显式开关 noInertia（默认开）：开=终点静止衰减 300ms+→弹起无惯性；
 //      关=干净利落（停 liftMs 直接弹起，有轻微惯性用户自担）；回滑距离/回滑停顿参数已删除
+//
+// v1.0.42（调试日志总开关 + 日志上限）：debugLogEnabled（设置页「调试」组，调试日志上方开关）——
+//   开（默认）= 记录日志；关 = 完全无日志（PTLog 直接返回，内存/文件都不记）。
+//   日志上限：内存（设置页）只存最近 200 条；文件 PageTurner.log 循环保留 1000 行（超过删最旧）。
+//   运行端 PTLoadConfig 缓存 gDebugLogEnabled，改开关后重启目标 App 生效。
 //
 // v1.0.38（设置页新增映射覆盖修复，Tweak.xm 无逻辑改动）：
 //
@@ -183,8 +188,24 @@ static void PTEnsureLogFile(NSString *path) {
     } @catch (NSException *e) {}
 }
 
+// v1.0.42：日志文件只保留最近 1000 行，超过循环（删最旧，保留尾部 1000 行）
+static void PTTrimLogFile(NSString *path) {
+    @try {
+        NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+        if (!content) return;
+        NSArray *lines = [content componentsSeparatedByString:@"\n"];
+        if (lines.count > 1000) {
+            NSArray *keep = [lines subarrayWithRange:NSMakeRange(lines.count - 1000, 1000)];
+            [[keep componentsJoinedByString:@"\n"] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+    } @catch (NSException *e) {}
+}
+
 // 运行端日志：App 容器 + /var/mobile/Documents + jbroot 三候选，自动创建，全失败 NSLog 兜底
+// v1.0.42：受【调试日志】开关（debugLogEnabled）控制，关=完全不写（省电省空间）；
+// 文件只保留最近 1000 行，超过循环（trim 保留尾部 1000 行）
 static void PTLog(NSString *fmt, ...) {
+    if (!gDebugLogEnabled) return;
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
@@ -194,6 +215,7 @@ static void PTLog(NSString *fmt, ...) {
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@\n", tbuf, (int)(tv.tv_usec/1000), msg];
     NSData *d = [line dataUsingEncoding:NSUTF8StringEncoding];
     BOOL wrote = NO;
+    static int gPTFileLines = 0;   // v1.0.42：行数计数（多候选路径共享，触发时逐路径 trim）
     NSMutableArray *paths = [NSMutableArray array];
     if (gLogPath) [paths addObject:[NSString stringWithUTF8String:gLogPath]];
     [paths addObject:@"/var/mobile/Documents/PageTurner.log"];
@@ -202,7 +224,11 @@ static void PTLog(NSString *fmt, ...) {
     for (NSString *p in paths) {
         PTEnsureLogFile(p);
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
-        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:d]; [fh closeFile]; wrote = YES; } @catch (NSException *e) {} }
+        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:d]; [fh closeFile]; wrote = YES; gPTFileLines++; } @catch (NSException *e) {} }
+    }
+    if (gPTFileLines > 1000) {
+        for (NSString *p in paths) PTTrimLogFile(p);   // 每个路径保留尾部 1000 行
+        gPTFileLines = 1000;
     }
     if (!wrote) NSLog(@"[PageTurner] %@", line);   // 全失败：系统日志兜底（Console/Filza 可查）
 }
@@ -224,6 +250,7 @@ static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
 static BOOL gDebugDots = NO;                // v1.0.23：调试可视化（TrollCM 触摸轨迹）
 static BOOL gProbeEnabled = NO;             // v1.0.29：探针独立开关（探针弹窗+提醒条）
+static BOOL gDebugLogEnabled = YES;         // v1.0.42：调试日志开关（关=不写 PageTurner.log）
 static BOOL gCrashTest = NO;                // v1.0.24：注入测试（探针字段，照抄 VKT）
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
@@ -312,6 +339,7 @@ static void PTLoadConfig(BOOL force) {
     gDebounceMs = (db > 0) ? db : 300;
     gDebugDots = [gConfig[@"debugDots"] boolValue];
     gProbeEnabled = (gConfig[@"probeEnabled"] == nil) ? NO : [gConfig[@"probeEnabled"] boolValue];
+    gDebugLogEnabled = (gConfig[@"debugLogEnabled"] == nil) ? YES : [gConfig[@"debugLogEnabled"] boolValue];   // v1.0.42：缺省开
     gCrashTest = (gConfig[@"crashTest"] == nil) ? NO : [gConfig[@"crashTest"] boolValue];
     gPlans = [NSMutableDictionary dictionary];
     gLearnedSenderCount = 0;
@@ -1107,7 +1135,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.41 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.42 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,

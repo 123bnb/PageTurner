@@ -1,5 +1,5 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.41）
+// RootListController.m —— PageTurner 设置页（v1.0.42）
 //
 // v1.0.39（滑动参数上限 + 回滑防惯性，与运行端同步）：
 //   1. 参数页滑动分支：弹起停留上限 500→2000ms、滑动分段上限 48→96
@@ -13,6 +13,10 @@
 // v1.0.41（测试区同步运行端 v1.0.41）：①Began 延迟 40ms（弃置复位不掐死新触摸）；
 // ②固定 16ms 帧（60fps 采样，轨迹点间距均匀）；③防惯性开关 noInertia（默认开，
 // 开=静止衰减无惯性，关=干净利落）；④删回滑距离/回滑停顿两参数
+//
+// v1.0.42（调试日志总开关 + 日志上限）：调试组「调试日志」条目上方新增开关（key=debugLogEnabled，默认开），
+// 下方 staticText 写明位置与作用；开关控制所有日志（设置页内存+文件、运行端文件），关=完全无日志；
+// 内存日志只存最近 200 条，文件日志循环保留 1000 行（超过删最旧）；运行端改动重启目标 App 后生效
 //
 // v1.0.37（滑动时序参数扩展，与运行端同步）：
 //   1. 动作参数页滑动分支：按下停留 + 弹起停留(liftMs) + 滑动速度 + 滑动分段(steps 默认12)
@@ -311,25 +315,34 @@ static double PTNowC(void) {
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
-// ---------- 日志系统（v1.0.17 加：内存+文件双写，只观察不改采集逻辑）----------
-static NSMutableArray *sLogLines = nil;      // 内存日志（日志页直接显示，100% 可见）
+// ---------- 日志系统（v1.0.17 加：内存+文件双写；v1.0.42：受调试日志开关控制）----------
+static NSMutableArray *sLogLines = nil;      // 内存日志（日志页直接显示；v1.0.42 只存最近 200 条）
 static NSString *sLogPath = nil;             // 文件日志实际路径（nil=全部不可写）
-static NSString *SLogProbePath(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *cands = @[
-        [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject],
-        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
-        NSTemporaryDirectory(),
-        @"/var/mobile/Documents",
-    ];
-    for (NSString *d in cands) {
-        if (!d.length) continue;
-        if (![fm fileExistsAtPath:d]) [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
-        if ([fm isWritableFileAtPath:d]) return [d stringByAppendingPathComponent:@"PageTurner.log"];
-    }
-    return nil;
+static double sLogCfgMtime = -1;             // v1.0.42：配置 mtime 缓存（开关改动即时生效）
+static BOOL sLogEnabled = YES;               // v1.0.42：受 debugLogEnabled 控制
+static void SLogRefreshCfg(void) {
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:PT_PREFS error:nil];
+    double mtime = attrs ? [attrs.fileModificationDate timeIntervalSince1970] : 0;
+    if (mtime == sLogCfgMtime) return;
+    sLogCfgMtime = mtime;
+    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:PT_PREFS];
+    sLogEnabled = (cfg[@"debugLogEnabled"] == nil) ? YES : [cfg[@"debugLogEnabled"] boolValue];
+}
+// v1.0.42：文件日志只保留最近 1000 行，超过循环（删最旧，保留尾部 1000 行）
+static void SLogTrimFile(NSString *path) {
+    @try {
+        NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+        if (!content) return;
+        NSArray *lines = [content componentsSeparatedByString:@"\n"];
+        if (lines.count > 1000) {
+            NSArray *keep = [lines subarrayWithRange:NSMakeRange(lines.count - 1000, 1000)];
+            [[keep componentsJoinedByString:@"\n"] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+    } @catch (NSException *e) {}
 }
 static void SLog(NSString *fmt, ...) {
+    SLogRefreshCfg();
+    if (!sLogEnabled) return;   // v1.0.42：日志开关关=内存/文件都不记
     if (!sLogLines) sLogLines = [NSMutableArray array];
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
@@ -338,12 +351,14 @@ static void SLog(NSString *fmt, ...) {
     time_t sec = tv.tv_sec; struct tm tmv; localtime_r(&sec, &tmv);
     char tbuf[64]; strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tmv);
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@", tbuf, (int)(tv.tv_usec/1000), msg];
-    if (sLogLines.count > 6000) [sLogLines removeObjectsInRange:NSMakeRange(0, 2000)];
+    if (sLogLines.count >= 200) [sLogLines removeObjectsInRange:NSMakeRange(0, 100)];   // v1.0.42：只存最近 200 条
     [sLogLines addObject:line];
     if (!sLogPath) sLogPath = SLogProbePath();
     if (sLogPath) {
+        static int sFileLines = 0;   // v1.0.42：文件行数计数（>1000 循环）
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
-        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; } @catch (NSException *e) {} }
+        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; sFileLines++; } @catch (NSException *e) {} }
+        if (sFileLines > 1000) { SLogTrimFile(sLogPath); sFileLines = 1000; }
     } else {
         static BOOL sWarned = NO;
         if (!sWarned) { sWarned = YES; [sLogLines addObject:@"[SLog] ⚠️ 所有候选路径都不可写（仅内存日志）"]; }
@@ -879,10 +894,19 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [dots setProperty:@"开启后所有触摸显示绿点+轨迹（翻页器带P标记，映射执行也可见）。用于确认注入和点触生效。" forKey:@"staticText"];
         [specs addObject:dots];
 
+        // v1.0.42：调试日志开关（放在日志页上方；staticText 写明位置和作用）
+        PSSpecifier *logSw = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
+            target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+            detail:nil cell:PSSwitchCell edit:nil];
+        [logSw setProperty:@"debugLogEnabled" forKey:@"key"];
+        [logSw setProperty:@YES forKey:@"default"];
+        [logSw setProperty:@"总日志开关：开启后记录注入/命中/执行全过程——内存保留最近 200 条，文件（/var/mobile/Documents/PageTurner.log）循环保留 1000 条；关闭则完全无日志。设置页即时生效，目标 App 重启后生效。" forKey:@"staticText"];
+        [specs addObject:logSw];
+
         PSSpecifier *log = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
             target:self set:nil get:nil detail:NSClassFromString(@"PTDebugLogVC")
             cell:PSLinkCell edit:nil];
-        [log setProperty:@"查看并复制最近日志（内存日志，100% 可见），发给开发者定位" forKey:@"staticText"];
+        [log setProperty:@"查看并复制最近日志（内存日志，最近 200 条，100% 可见），发给开发者定位" forKey:@"staticText"];
         [specs addObject:log];
 
         _specifiers = [specs copy];

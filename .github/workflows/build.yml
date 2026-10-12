@@ -45,12 +45,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.41-roothide.deb
+          DEB=PageTurner-1.0.42-roothide.deb
           cp "$RAW" "$DEB"
-          TAG=v1.0.41
-          NOTES=$'PageTurner v1.0.41（roothide 直装）—— 狂按根因修复 + 固定 60fps + 防惯性开关\n\n【v1.0.41 改了什么】\n1. 狂按修复（根因实锤）：滑动 Began 延迟 40ms\n   - 之前：新滑动的 Began 立即发出，旧滑动被弃置后的 Ended 稍后才补发\n     → 迟到的 Ended 把刚 Began 的新触摸掐死 → 连按滑动残缺、越按越短\n   - 现在：旧复位的 Ended 先发完（≤16ms），新触摸才 Began → 每次按键完整执行\n2. 固定 16ms 一帧（60fps 采样）\n   - 之前：帧间隔随\"滑动分段\"变大（12 段高速滑动 = 62ms/帧），主线程一抖\n     轨迹点间距忽大忽小 → 视觉速度不均匀\n   - 现在：位置仍按真实时间插值，固定 16ms 采样 → 轨迹点密且间距均匀\n3. 【防惯性】显式开关（滑动参数页，默认开）\n   - 开（默认）：滑到终点每帧不动（静止衰减 300ms+）→ 弹起无惯性\n   - 关：干净利落（停弹起停留后直接弹起，有轻微惯性，自己权衡）\n   - 回滑距离/回滑停顿两参数已删除（由开关统一管理）\n\n【怎么测】\n1. 设置→滑动参数页：确认【防惯性】开关默认开；关掉后滑动明显干脆（可能有惯性）\n2. 番茄小说快速连按 5~10 次：每次都翻页、距离完整，不再越按越短、不再残缺\n3. 速度 2000 滑动：轨迹均匀、停在目标位不惯性前滑\n4. 有问题把 /var/mobile/Documents/PageTurner.log 发我'
+          TAG=v1.0.42
+$'PageTurner v1.0.42（roothide 直装）—— 调试日志总开关 + 日志上限\n\n【v1.0.42 改了什么】\n1. 【调试日志】总开关（设置→调试组，日志查看页上方，默认开）\n   - 开：记录注入/命中/执行全过程；关：完全无日志（内存/文件都不记）\n   - 开关下方写明位置与作用：内存保留最近 200 条，文件循环 1000 条\n2. 日志上限\n   - 内存日志（设置页调试日志页可见）：只存最近 200 条，超过循环\n   - 文件日志 /var/mobile/Documents/PageTurner.log：循环保留 1000 行，超过删最旧\n3. 开关控制所有日志：设置页内存+文件、运行端文件，全部受 debugLogEnabled 管控\n\n【怎么测】\n1. 设置→调试：看到【调试日志】开关（默认开）+ 下方说明文字；关掉后\n   录特征/测试不再产生任何日志（日志页空白、文件不增长）\n2. 打开日志开关，狂按测试：日志页最多显示 200 条；PageTurner.log 最多 1000 行\n3. 关闭开关重启番茄小说：PageTurner.log 不再增长，确认无日志落盘'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.41" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.42" --notes "$NOTES"
           fi
