@@ -569,7 +569,6 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         };
         // v1.0.41：Began 延迟 40ms（与运行端一致，避免旧复位掐死新触摸）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(40 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-            began = YES;
             pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
                 t0 = CFAbsoluteTimeGetCurrent();
