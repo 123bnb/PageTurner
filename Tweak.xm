@@ -174,6 +174,7 @@ static const double kTapDxThresh = 0.05;         // v1.0.36：点击位移方向
 // 日志
 // ============================================================
 static const char *gLogPath = NULL;
+static BOOL gDebugLogEnabled = YES;   // v1.0.42：调试日志总开关（PTLog 使用，须在 PTLog 前声明）
 static NSString *PTJbrootRoot(void);   // 前向声明（139 行定义）
 
 // v1.0.29：日志文件自动创建（fileHandleForWritingAtPath 不会建文件，旧版静默丢日志）
@@ -250,7 +251,6 @@ static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
 static BOOL gDebugDots = NO;                // v1.0.23：调试可视化（TrollCM 触摸轨迹）
 static BOOL gProbeEnabled = NO;             // v1.0.29：探针独立开关（探针弹窗+提醒条）
-static BOOL gDebugLogEnabled = YES;         // v1.0.42：调试日志开关（关=不写 PageTurner.log）
 static BOOL gCrashTest = NO;                // v1.0.24：注入测试（探针字段，照抄 VKT）
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
