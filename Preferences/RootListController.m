@@ -1,5 +1,5 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.40）
+// RootListController.m —— PageTurner 设置页（v1.0.41）
 //
 // v1.0.39（滑动参数上限 + 回滑防惯性，与运行端同步）：
 //   1. 参数页滑动分支：弹起停留上限 500→2000ms、滑动分段上限 48→96
@@ -9,6 +9,10 @@
 //
 // v1.0.40（测试区同步运行端惯性修复）：时间插值（速度均匀）+ 静止衰减（终点每帧位置不变
 // 的 Moved，持续 max(停顿,300)ms 再 Ended，velocity 归零防惯性）
+//
+// v1.0.41（测试区同步运行端 v1.0.41）：①Began 延迟 40ms（弃置复位不掐死新触摸）；
+// ②固定 16ms 帧（60fps 采样，轨迹点间距均匀）；③防惯性开关 noInertia（默认开，
+// 开=静止衰减无惯性，关=干净利落）；④删回滑距离/回滑停顿两参数
 //
 // v1.0.37（滑动时序参数扩展，与运行端同步）：
 //   1. 动作参数页滑动分支：按下停留 + 弹起停留(liftMs) + 滑动速度 + 滑动分段(steps 默认12)
@@ -511,27 +515,15 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         double distT = hypot(to.x - from.x, to.y - from.y);
         double durMs = (distT / MAX(speed, 1.0)) * 1000.0;
         if (durMs < 50) durMs = 50;
-        // v1.0.37：按下停留/弹起停留/滑动分段 与运行端统一（可调）
-        // v1.0.39：分段上限 96；回滑防惯性——backPt>0 到终点往回滑 backPt pt 再停 backMs 再 Ended
+        // v1.0.37：按下停留/弹起停留 与运行端统一（可调）
         // v1.0.40：时间插值（速度均匀）+ 静止衰减（每帧发位置不变 Moved，velocity 归零防惯性）
+        // v1.0.41：固定 16ms 帧（60fps）+ Began 延迟 40ms + 防惯性开关（删回滑），与运行端一致
         int holdMs = [a[@"holdMs"] intValue] ?: 20;
         int liftMs = [a[@"liftMs"] intValue] ?: 0;
-        int steps = [a[@"steps"] intValue] ?: 12;
-        if (steps < 2) steps = 2; if (steps > 96) steps = 96;
-        double backPt = [a[@"backPt"] doubleValue];
-        int backMs = [a[@"backMs"] intValue] ?: 80;
-        CGPoint backEnd = to;
-        if (backPt > 0) {
-            double bdx = to.x - from.x, bdy = to.y - from.y;
-            double bd = hypot(bdx, bdy);
-            if (bd > 0.001) backEnd = CGPointMake(to.x - bdx / bd * backPt, to.y - bdy / bd * backPt);
-            else backPt = 0;
-        }
+        BOOL noInertia = a[@"noInertia"] ? [a[@"noInertia"] boolValue] : YES;   // 缺省开
         PTTestShowDot(from, to, YES, durMs / 1000.0);
-        NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
-        double frameMs = MAX(16.0, durMs / steps);
         double durSec = MAX(durMs / 1000.0, 0.001);
-        __block CFAbsoluteTime t0;
+        __block NSInteger pid = -1;
         __block void (^stillAt)(CGPoint, int);
         stillAt = ^(CGPoint pos, int ms) {
             __block int n = MAX(ms, 0) / 16;
@@ -548,29 +540,41 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
             };
             still();
         };
+        __block CFAbsoluteTime t0;
         __block void (^step)(void);
         step = ^(void) {
             double t = MIN((CFAbsoluteTimeGetCurrent() - t0) / durSec, 1.0);
             if (t >= 1.0) {
-                if (backPt > 0) {
-                    // v1.0.39：回滑段——30ms 后回滑到 backEnd；v1.0.40：再静止衰减 max(backMs,300)（与运行端一致）
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                        [PTFakeMetaTouch fakeTouchId:pid AtPoint:backEnd withTouchPhase:UITouchPhaseMoved];
-                        stillAt(backEnd, MAX(backMs, 300));
-                    });
-                } else {
-                    // v1.0.40：原地静止衰减——终点每帧不动，持续 max(liftMs,300) 再 Ended
+                if (noInertia) {
+                    // v1.0.40 防惯性：终点每帧不动（静止衰减），持续 max(liftMs,300) 再 Ended
                     stillAt(to, MAX(liftMs, 300));
+                } else {
+                    // v1.0.41 关防惯性：干净利落——停 liftMs（不发事件）→ 直接弹起
+                    if (liftMs > 0) {
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                            [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+                            if (next) next();
+                        });
+                    } else {
+                        [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+                        if (next) next();
+                    }
                 }
                 return;
             }
             CGPoint pp = CGPointMake(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:pp withTouchPhase:UITouchPhaseMoved];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(frameMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
+            // v1.0.41：固定 16ms 一帧（60fps 采样）
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
         };
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-            t0 = CFAbsoluteTimeGetCurrent();
-            step();
+        // v1.0.41：Began 延迟 40ms（与运行端一致，避免旧复位掐死新触摸）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(40 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+            began = YES;
+            pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                t0 = CFAbsoluteTimeGetCurrent();
+                step();
+            });
         });
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
@@ -2163,13 +2167,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"x2"] = @(self.dot2.center.x); a[@"y2"] = @(self.dot2.center.y);
         // v1.0.28：speed = 真实速度 pt/s（默认 200）；holdMs = 按下停留（默认 20）
         // v1.0.37：liftMs = 弹起停留（默认 0）；steps = 滑动分段（默认 12）
-        // v1.0.39：backPt = 回滑距离（默认 0 不启用）；backMs = 回滑停顿（默认 80）
+        // v1.0.41：noInertia = 防惯性开关（默认开）；回滑参数已删除
         a[@"speed"] = @(200);
         a[@"holdMs"] = @(20);
         a[@"liftMs"] = @(0);
         a[@"steps"] = @(12);
-        a[@"backPt"] = @(0);
-        a[@"backMs"] = @(80);
+        a[@"noInertia"] = @(YES);
     } else if ([self.actionType isEqualToString:@"doubleTap"]) {
         a[@"type"] = @"doubleTap";
         a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
@@ -2181,9 +2184,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
         a[@"pressMs"] = @(30);
     }
-    // v1.0.29 编辑模式：保留原时序参数（pressMs/gapMs/speed/holdMs/liftMs/steps/backPt/backMs/ms），只更新坐标
+    // v1.0.29 编辑模式：保留原时序参数（pressMs/gapMs/speed/holdMs/liftMs/steps/noInertia/ms），只更新坐标
     if (self.editIndex >= 0 && self.editAction) {
-        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"liftMs", @"steps", @"backPt", @"backMs", @"ms"]) {
+        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"liftMs", @"steps", @"noInertia", @"ms"]) {
             if (self.editAction[k]) a[k] = self.editAction[k];
         }
     }
@@ -2232,13 +2235,13 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
                   @{@"key": @"gapMs", @"name": @"两次间隔", @"unit": @"ms", @"min": @50, @"max": @800, @"def": @120} ];
     } else if ([type isEqualToString:@"swipe"]) {
         // v1.0.37：弹起停留（liftMs）+ 滑动分段（steps）与按下停留放一起
-        // v1.0.39：liftMs 上限 500→2000；steps 上限 48→96；新增回滑防惯性两参数（回滑距离/回滑停顿）
+        // v1.0.39：liftMs 上限 500→2000；steps 上限 48→96
+        // v1.0.41：删回滑距离/回滑停顿（防惯性开关统一管理）；新增【防惯性】开关（默认开）
         defs = @[ @{@"key": @"holdMs", @"name": @"按下停留", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @20},
                   @{@"key": @"liftMs", @"name": @"弹起停留", @"unit": @"ms", @"min": @0, @"max": @2000, @"def": @0},
                   @{@"key": @"speed", @"name": @"滑动速度", @"unit": @"pt/s", @"min": @100, @"max": @2000, @"def": @200},
                   @{@"key": @"steps", @"name": @"滑动分段", @"unit": @"段", @"min": @6, @"max": @96, @"def": @12},
-                  @{@"key": @"backPt", @"name": @"回滑距离", @"unit": @"pt", @"min": @0, @"max": @10, @"def": @0},
-                  @{@"key": @"backMs", @"name": @"回滑停顿", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @80} ];
+                  @{@"key": @"noInertia", @"name": @"防惯性", @"type": @"switch", @"def": @YES} ];
     } else if ([type isEqualToString:@"delay"]) {
         defs = @[ @{@"key": @"ms", @"name": @"延迟时长", @"unit": @"ms", @"min": @50, @"max": @5000, @"def": @100} ];
     } else {
