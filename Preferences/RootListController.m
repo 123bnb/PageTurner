@@ -1,5 +1,17 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.42）
+// RootListController.m —— PageTurner 设置页（v1.0.43）
+//
+// v1.0.43（9 项改进，与运行端同步）：
+//   1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）
+//   2. 调试可视化：测试页命中方案时不再画翻页器原始轨迹（只显示 App 实际收到的触摸）
+//   3. 动作参数页「防惯性」开关：文字不再被遮挡（标签在左、开关在右）
+//   4. 方案列表页：已录制方案不再误显示「未录制」（兼容新格式 features[] 数组）
+//   5. 滑动速度默认 1000pt/s（上下限不变 100~2000）；参数页滑块新增预设值可点击；
+//      行距缩短（118→104）
+//   6. 动作设置页绿点：解除 22pt 最小坐标钳制，可拖到屏幕任意位置/边缘
+//   7. 方案页映射区新增排序：右上角「排序」→ 按住行最右侧 ≡ 手柄拖动调整执行顺序
+//   8. 设置页最底部居中显示版本号
+//   9. 测试区防抖同步严谨化：序列执行中（gTestInjecting）一律忽略新按键
 //
 // v1.0.39（滑动参数上限 + 回滑防惯性，与运行端同步）：
 //   1. 参数页滑动分支：弹起停留上限 500→2000ms、滑动分段上限 48→96
@@ -223,6 +235,7 @@
 @property (nonatomic, strong) NSArray *paramDefs;
 @property (nonatomic, strong) NSMutableArray *sliders;
 @property (nonatomic, strong) NSMutableArray *labels;
+@property (nonatomic, strong) NSMutableArray *chips;   // v1.0.43：每行预设按钮数组（对应滑块行）
 @end
 
 @interface PTDebugLogVC : PSViewController
@@ -541,7 +554,8 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
         // v1.0.33：修测试区速度 bug——旧代码把 speed 当毫秒时长（固定 1 秒，与距离无关，
         // 短距离比运行端慢数倍）；现在与运行端统一：时长 = 距离/速度
-        double speed = [a[@"speed"] doubleValue] ?: 200;
+        // v1.0.43：默认 1000pt/s 与运行端一致（旧动作缺 speed 字段兜底 1000）
+        double speed = [a[@"speed"] doubleValue] ?: 1000;
         double distT = hypot(to.x - from.x, to.y - from.y);
         double durMs = (distT / MAX(speed, 1.0)) * 1000.0;
         if (durMs < 50) durMs = 50;
@@ -624,10 +638,10 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
     }
 }
 
-// 顺序执行方案动作序列（测试防抖 300ms）
+// 顺序执行方案动作序列（测试防抖 300ms；v1.0.43：执行中同样忽略，与运行端防抖严谨化一致）
 static void PTTestExecPlan(NSString *name) {
     double now = PTNowC();
-    if (now - sLastTestExec < 0.3) { SLog(@"[测试] 防抖：忽略 %@", name); return; }
+    if (gTestInjecting || now - sLastTestExec < 0.3) { SLog(@"[测试] 防抖：忽略 %@", name); return; }
     sLastTestExec = now;
     NSDictionary *plan = nil;
     for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:name]) { plan = p; break; }
@@ -658,13 +672,14 @@ static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender, i
         // v1.0.33：命中日志加特征细节（sender/相位/方向/位移），与未命中格式一致
         [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作（sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d）",
             plan, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0), sender, phase, dir, dist, tapDx]];
+        // v1.0.43：命中 → 原始轨迹已被"吞掉"，不再画翻页器原始轨迹（只显示注入点触）
     } else {
         SLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d（特征需先录制）", sender, phase, dir, dist, tapDx);
         [sTestLogSink appendLog:[NSString stringWithFormat:@"✗ 未命中（放行）：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d",
             sender, phase, dir, dist, tapDx]];
+        // v1.0.43：未命中/放行 → 画翻页器原始轨迹（App 实际会收到它，属于该显示的轨迹）
+        [sTestLogSink drawTrailWithDirection:dir dist:dist phase:phase];
     }
-    // v1.0.29：测试页画调试可视化同款轨迹（翻页器按键真实轨迹，命中与否都画）
-    [sTestLogSink drawTrailWithDirection:dir dist:dist phase:phase];
 }
 
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
@@ -924,9 +939,29 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [log setProperty:@"查看并复制最近日志（内存日志，最近 200 条，100% 可见），发给开发者定位" forKey:@"staticText"];
         [specs addObject:log];
 
+        // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
+        [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
+        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.43"
+            target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
+        [specs addObject:ver];
+
         _specifiers = [specs copy];
     }
     return _specifiers;
+}
+
+// v1.0.43：版本号行居中 + 弱化颜色（置于页面最底部）
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UITableViewCell *c in self.table.visibleCells) {
+            if ([c.textLabel.text hasPrefix:@"PageTurner v"]) {
+                c.textLabel.textAlignment = NSTextAlignmentCenter;
+                c.textLabel.textColor = [UIColor secondaryLabelColor];
+                c.textLabel.font = [UIFont systemFontOfSize:13];
+            }
+        }
+    });
 }
 
 - (id)readPreferenceValue:(PSSpecifier *)spec {
@@ -1143,12 +1178,16 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (ip.row < (NSInteger)self.plans.count) {
         NSDictionary *p = self.plans[ip.row];
         c.textLabel.text = p[@"name"] ?: @"（未命名）";
-        NSDictionary *ft = p[@"feature"];
+        // v1.0.43：用 PTFeaturesOfPlan 兼容新格式 features[]（旧代码只查 p[@"feature"]，
+        // 多特征方案一律误显示「未录制」——方案列表页全未录制的 bug 根因）
+        NSArray *fts = PTFeaturesOfPlan(p);
         NSArray *acts = p[@"actions"] ?: @[];
-        if (ft) {
+        if (fts.count) {
+            NSDictionary *ft = fts.firstObject;
             NSString *d = PTDirName([ft[@"direction"] doubleValue]);
             NSString *ph = [ft[@"phase"] intValue] == 0 ? @"点击" : [NSString stringWithFormat:@"滑动%@", d];
-            c.detailTextLabel.text = [NSString stringWithFormat:@"来源%@ ｜ 特征：%@ ｜ 动作 %lu 条", ft[@"sender"], ph, (unsigned long)acts.count];
+            c.detailTextLabel.text = [NSString stringWithFormat:@"来源%@ ｜ 特征 %lu 条（%@） ｜ 动作 %lu 条",
+                ft[@"sender"], (unsigned long)fts.count, ph, (unsigned long)acts.count];
         } else {
             c.detailTextLabel.text = [NSString stringWithFormat:@"未录制 ｜ 动作 %lu 条", (unsigned long)acts.count];
         }
@@ -1207,6 +1246,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [super viewDidLoad];
     // v1.0.35：统一成系统设置灰分组背景
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    // v1.0.43：右上角「排序」→ 编辑态显示行最右侧 ≡ 手柄，按住拖动调整映射顺序
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"排序"
+        style:UIBarButtonItemStylePlain target:self action:@selector(toggleEdit)];
     [self reload];
 }
 
@@ -1272,8 +1314,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [self.view addSubview:self.tv];
 
         // v1.0.28：映射区说明水平居中 + 字号 15
+        // v1.0.43：补充排序入口提示
         UILabel *hv = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, w - 32, 34)];
-        hv.text = @"映射区：按一次该键 → 从上到下依次执行全部动作";
+        hv.text = @"映射区：按一次该键 → 从上到下依次执行全部动作（右上角「排序」可拖动调整）";
         hv.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
         hv.textColor = [UIColor labelColor];
         hv.textAlignment = NSTextAlignmentCenter;
@@ -1402,9 +1445,12 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.navigationController pushViewController:vc animated:YES];
 }
 // v1.0.28：长按动作 → 参数调整页（时序/速度全可调）
+// v1.0.43：最右侧是排序手柄区（编辑态），长按让给系统拖拽，不弹参数页
 - (void)longPressAction:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
     UITableViewCell *cell = (UITableViewCell *)g.view;
+    CGPoint loc = [g locationInView:cell];
+    if (loc.x > cell.bounds.size.width - 56) return;   // 右侧 ≡ 排序手柄区
     NSIndexPath *ip = [self.tv indexPathForCell:cell];
     if (!ip || ip.row >= (NSInteger)self.actions.count) return;
     PTActionParamVC *vc = [PTActionParamVC new];
@@ -1423,6 +1469,34 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         done(YES);
     }];
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
+}
+
+// v1.0.43：映射区排序——右上角「排序」进入编辑态，按住行最右侧 ≡ 手柄拖动调整顺序
+- (void)toggleEdit {
+    BOOL on = !self.tv.editing;
+    [self.tv setEditing:on animated:YES];
+    self.navigationItem.rightBarButtonItem.title = on ? @"完成" : @"排序";
+}
+- (BOOL)tableView:(UITableView *)tv canEditRowAtIndexPath:(NSIndexPath *)ip {
+    return ip.row < (NSInteger)self.actions.count;   // 只有映射动作行可编辑（显示排序手柄）
+}
+- (BOOL)tableView:(UITableView *)tv canMoveRowAtIndexPath:(NSIndexPath *)ip {
+    return ip.row < (NSInteger)self.actions.count;
+}
+- (UITableViewCellEditingStyle)tableView:(UITableView *)tv editingStyleForRowAtIndexPath:(NSIndexPath *)ip {
+    return UITableViewCellEditingStyleNone;   // 编辑态不显示删除红圈（删除走左滑）
+}
+- (BOOL)tableView:(UITableView *)tv shouldIndentWhileEditingRowAtIndexPath:(NSIndexPath *)ip {
+    return NO;
+}
+- (void)tableView:(UITableView *)tv moveRowAtIndexPath:(NSIndexPath *)from toIndexPath:(NSIndexPath *)to {
+    if (from.row >= (NSInteger)self.actions.count) return;
+    // 目标钳制在动作行范围内（系统不允许拖到非动作行，这里双保险）
+    NSUInteger dest = MIN((NSUInteger)to.row, (NSUInteger)(self.actions.count - 1));
+    id a = self.actions[from.row];
+    [self.actions removeObjectAtIndex:from.row];
+    [self.actions insertObject:a atIndex:dest];
+    [self saveActions];
 }
 
 - (void)addActionMenu {
@@ -1757,6 +1831,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         self.status.text = [NSString stringWithFormat:@"⚠️ 与已有方案『%@』高度相似\n可能按错了键，请换一个键", dup];
         self.status.textColor = [UIColor systemRedColor];
         [self.mem removeAllObjects];
+        // v1.0.43：重复特征 → 清空已记录 + 禁止保存（双保险，与增加特征模式一致）
+        self.readyFt = nil;
+        self.finished = NO;
+        self.navigationItem.rightBarButtonItem.enabled = NO;
         self.countLabel.text = @"已录：0 次";
         self.dirLabel.text = @"方向：—";
         self.distLabel.text = @"位移：—";
@@ -1810,6 +1888,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         self.status.textColor = [UIColor systemRedColor];
         [self appendLog:[NSString stringWithFormat:@"✗ 拒绝（与『%@』重复）  sender=%@ phase=%d dir=%.1f° dist=%.1f",
             dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]]];
+        // v1.0.43：重复特征 → 右上角禁止保存 + 已记录清空（防止把之前录的旧记录
+        // 当新特征保存——旧版只提示，右上角仍可点，会把旧 readyFt 存进去）
+        self.readyFt = nil;
+        self.finished = NO;
+        self.onceCount = 0;
+        self.navigationItem.rightBarButtonItem.enabled = NO;
+        self.countLabel.text = @"已记录：0 次";
+        self.dirLabel.text = @"方向：—";
+        self.distLabel.text = @"位移：—";
         return;
     }
     self.status.textColor = [UIColor labelColor];
@@ -2171,8 +2258,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     UIView *dot = g.view;
     CGPoint t = [g translationInView:dot.superview];
     dot.center = CGPointMake(dot.center.x + t.x, dot.center.y + t.y);
-    CGFloat w = dot.superview.bounds.size.width, h = dot.superview.bounds.size.height;
-    dot.center = CGPointMake(MAX(22, MIN(w - 22, dot.center.x)), MAX(22, MIN(h - 22, dot.center.y)));
+    // v1.0.43：解除坐标钳制（原 MAX(22,…) 把绿点限死在最小 22pt）——现在可拖到
+    // 屏幕任意位置（含边缘/屏幕外），标题坐标如实显示，保存原值
     [g setTranslation:CGPointZero inView:dot.superview];
     [self updatePos];
 }
@@ -2203,10 +2290,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         a[@"type"] = @"swipe";
         a[@"x1"] = @(self.dot1.center.x); a[@"y1"] = @(self.dot1.center.y);
         a[@"x2"] = @(self.dot2.center.x); a[@"y2"] = @(self.dot2.center.y);
-        // v1.0.28：speed = 真实速度 pt/s（默认 200）；holdMs = 按下停留（默认 20）
+        // v1.0.28：speed = 真实速度 pt/s（默认 1000，v1.0.43 由 200 上调）；
+        // holdMs = 按下停留（默认 20）
         // v1.0.37：liftMs = 弹起停留（默认 0）；steps = 滑动分段（默认 12）
         // v1.0.41：noInertia = 防惯性开关（默认开）；回滑参数已删除
-        a[@"speed"] = @(200);
+        a[@"speed"] = @(1000);
         a[@"holdMs"] = @(20);
         a[@"liftMs"] = @(0);
         a[@"steps"] = @(12);
@@ -2254,7 +2342,23 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 // ============================================================
 // 动作参数调整页（v1.0.28 加）：方案页长按动作进入
 // 点击=按下时长；双击=按下时长+两次间隔；滑动=按下停留+真实速度(pt/s)；延迟=时长
+// v1.0.43：滑块加预设值可点击 + 行距缩短（118→104）+ 防惯性开关文字不再被遮挡
 // ============================================================
+// v1.0.43：各参数预设值（点一下直接跳到该值）
+static NSDictionary *PTParamPresets(void) {
+    return @{
+        @"pressMs": @[ @10, @30, @50, @100, @200, @400 ],
+        @"gapMs":   @[ @50, @120, @200, @300, @500 ],
+        @"holdMs":  @[ @0, @20, @50, @100, @200 ],
+        @"liftMs":  @[ @0, @100, @300, @500, @1000 ],
+        @"speed":   @[ @100, @300, @500, @1000, @1500, @2000 ],
+        @"steps":   @[ @6, @12, @24, @48, @96 ],
+        @"ms":      @[ @50, @100, @300, @500, @1000, @3000 ],
+    };
+}
+static void *PTParamSliderKey = &PTParamSliderKey;   // UIButton -> 所属 UISlider（弱引用，slider 由 self.sliders 持有）
+static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
+
 @implementation PTActionParamVC
 
 - (void)viewDidLoad {
@@ -2275,9 +2379,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         // v1.0.37：弹起停留（liftMs）+ 滑动分段（steps）与按下停留放一起
         // v1.0.39：liftMs 上限 500→2000；steps 上限 48→96
         // v1.0.41：删回滑距离/回滑停顿（防惯性开关统一管理）；新增【防惯性】开关（默认开）
+        // v1.0.43：滑动速度默认 1000pt/s（上下限仍 100~2000）
         defs = @[ @{@"key": @"holdMs", @"name": @"按下停留", @"unit": @"ms", @"min": @0, @"max": @500, @"def": @20},
                   @{@"key": @"liftMs", @"name": @"弹起停留", @"unit": @"ms", @"min": @0, @"max": @2000, @"def": @0},
-                  @{@"key": @"speed", @"name": @"滑动速度", @"unit": @"pt/s", @"min": @100, @"max": @2000, @"def": @200},
+                  @{@"key": @"speed", @"name": @"滑动速度", @"unit": @"pt/s", @"min": @100, @"max": @2000, @"def": @1000},
                   @{@"key": @"steps", @"name": @"滑动分段", @"unit": @"段", @"min": @6, @"max": @96, @"def": @12},
                   @{@"key": @"noInertia", @"name": @"防惯性", @"type": @"switch", @"def": @YES} ];
     } else if ([type isEqualToString:@"delay"]) {
@@ -2289,48 +2394,98 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.paramDefs = defs;
     self.sliders = [NSMutableArray array];
     self.labels = [NSMutableArray array];
+    self.chips = [NSMutableArray array];
+    NSDictionary *presets = PTParamPresets();
 
     CGFloat top = 110;
     if (self.view.safeAreaInsets.top > 20) top = self.view.safeAreaInsets.top + 60;
     CGFloat w = self.view.bounds.size.width;
+    CGFloat rowH = 104;   // v1.0.43：行距缩短（原 118）
     for (int i = 0; i < (int)defs.count; i++) {
         NSDictionary *p = defs[i];
-        CGFloat y = top + i * 118;
+        CGFloat y = top + i * rowH;
         UILabel *name = [[UILabel alloc] initWithFrame:CGRectMake(20, y, w - 40, 26)];
         name.text = [NSString stringWithFormat:@"%@%@", p[@"name"],
             [p[@"type"] isEqualToString:@"switch"] ? @"" : [NSString stringWithFormat:@"（%@）", p[@"unit"]]];
         name.font = [UIFont systemFontOfSize:15];
         [self.view addSubview:name];
         if ([p[@"type"] isEqualToString:@"switch"]) {
-            // 参数页通用 switch 支持（v1.0.39 曾用；当前 6 滑块方案无开关项，保留备用）
-            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(20, y + 4, w - 40, 34)];
-            sw.on = [self.action[p[@"key"]] boolValue] || [p[@"def"] boolValue];
+            // v1.0.43：开关放右侧（标签在左、开关在右），文字不再被开关遮挡；
+            // 默认值判定改为「有值取存的值，无值取默认」——旧代码 `|| 默认` 会让
+            // 存了 NO 的防惯性开关显示/保存成 ON
+            UISwitch *sw = [[UISwitch alloc] init];
+            id v = self.action[p[@"key"]];
+            sw.on = v ? [v boolValue] : [p[@"def"] boolValue];
+            sw.frame = CGRectMake(w - 80, y - 2, 60, 34);
             [self.view addSubview:sw];
             [self.labels addObject:[NSNull null]];
             [self.sliders addObject:sw];
+            [self.chips addObject:[NSMutableArray array]];
         } else {
-            UILabel *val = [[UILabel alloc] initWithFrame:CGRectMake(20, y + 28, w - 40, 26)];
+            // 数值行：值在右侧同一行，中间是预设按钮，下面才是滑块
+            UILabel *val = [[UILabel alloc] initWithFrame:CGRectMake(w - 120, y, 100, 26)];
             val.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightMedium];
             val.textAlignment = NSTextAlignmentRight;
             [self.view addSubview:val];
-            UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(20, y + 58, w - 40, 34)];
+            UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(20, y + 54, w - 40, 34)];
             sl.minimumValue = [p[@"min"] doubleValue];
             sl.maximumValue = [p[@"max"] doubleValue];
-            double cur = [self.action[p[@"key"]] doubleValue];
-            sl.value = cur > 0 ? cur : [p[@"def"] doubleValue];
+            // v1.0.43：有存储值取存储值（含 0），无值才取默认——旧代码 `cur>0?cur:默认`
+            // 会把用户调成 0 的参数（如按下停留 0）在重进页面时覆盖回默认
+            id vv0 = self.action[p[@"key"]];
+            sl.value = vv0 ? [vv0 doubleValue] : [p[@"def"] doubleValue];
             [self.view addSubview:sl];
             [self.labels addObject:val];
             [self.sliders addObject:sl];
+            NSArray *ps = presets[p[@"key"]];
+            NSMutableArray *rowChips = [NSMutableArray array];
+            if (ps.count) {
+                CGFloat cw = (w - 40) / ps.count;
+                for (int j = 0; j < (int)ps.count; j++) {
+                    double vv = [ps[j] doubleValue];
+                    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+                    b.frame = CGRectMake(20 + j * cw, y + 28, cw - 4, 22);
+                    [b setTitle:[NSString stringWithFormat:@"%.0f", vv] forState:UIControlStateNormal];
+                    b.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
+                    b.layer.cornerRadius = 6;
+                    b.layer.borderWidth = 0.8;
+                    b.layer.borderColor = [UIColor systemGray4Color].CGColor;
+                    b.backgroundColor = [UIColor secondarySystemBackgroundColor];
+                    objc_setAssociatedObject(b, PTParamSliderKey, sl, OBJC_ASSOCIATION_ASSIGN);
+                    objc_setAssociatedObject(b, PTParamValueKey, @(vv), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    [b addTarget:self action:@selector(presetTapped:) forControlEvents:UIControlEventTouchUpInside];
+                    [self.view addSubview:b];
+                    [rowChips addObject:b];
+                }
+            }
+            [self.chips addObject:rowChips];
             [sl addTarget:self action:@selector(changed:) forControlEvents:UIControlEventValueChanged];
             [self changed:sl];
         }
     }
 }
 
+// v1.0.43：点预设值 → 滑块跳到该值并刷新（高亮由 changed: 统一处理）
+- (void)presetTapped:(UIButton *)b {
+    UISlider *sl = objc_getAssociatedObject(b, PTParamSliderKey);
+    NSNumber *v = objc_getAssociatedObject(b, PTParamValueKey);
+    if (!sl || !v) return;
+    sl.value = v.doubleValue;
+    [self changed:sl];
+}
+
 - (void)changed:(UISlider *)sl {
     NSUInteger i = [self.sliders indexOfObject:sl];
     if (i == NSNotFound || i >= self.labels.count) return;
     ((UILabel *)self.labels[i]).text = [NSString stringWithFormat:@"%.0f", sl.value];
+    // v1.0.43：高亮当前值对应的预设按钮（蓝色边框+蓝字），非当前恢复灰
+    NSArray *rowChips = (i < self.chips.count) ? self.chips[i] : @[];
+    for (UIButton *b in rowChips) {
+        double vv = [(NSNumber *)objc_getAssociatedObject(b, PTParamValueKey) doubleValue];
+        BOOL near = fabs(sl.value - vv) < 1.0;
+        [b setTitleColor:near ? [UIColor systemBlueColor] : [UIColor secondaryLabelColor] forState:UIControlStateNormal];
+        b.layer.borderColor = near ? [UIColor systemBlueColor].CGColor : [UIColor systemGray4Color].CGColor;
+    }
 }
 
 - (void)done {

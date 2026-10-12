@@ -1,5 +1,19 @@
 // ============================================================
-// PageTurner v1.0.42 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.43 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.43（防抖严谨化 + 可视化只画实际收到的触摸 + 滑动速度默认 1000）：
+//   1. 防抖严谨化（根除狂按打断滑动）：新增 gExecRunning——序列执行中一律忽略新按键，
+//      不再只看「距上次执行开始 < 防抖间隔」。旧版只在执行开始记 gLastExec，长滑动
+//      （执行时长 > 防抖间隔）期间按新键会越过防抖去中断旧序列 → 滑动残缺/掐死的根因；
+//      现在执行窗口也被防抖覆盖，序列不可能被新键掐断（v1.0.39 弃置中断、v1.0.40 静止
+//      衰减、v1.0.41 Began 延迟 40ms 等修复保留作纵深防御，正常情况下不再被触发）
+//   2. 调试可视化：只画「App 实际收到的触摸」——被整段吞掉的翻页器原始轨迹不再可见
+//      （原代码在拦截判定前对所有触摸画点，命中执行时原始轨迹 + 注入轨迹同时可见，
+//      误以为拦截没吞干净）；注入动作 / 未命中重放 / 手指触摸照常画点
+//   3. 未命中重放补 gInFakeTouch：PTReplayTrailAsync 注入的合成触摸此前没置
+//      gInFakeTouch，0.4s 窗口内会被 PTHandlePagerEvent 当成翻页器会话再次吞掉
+//      → 重放被掐死 / 甚至反复重放；现与 PTFakeTap 一致，注入期间精确放行
+//   4. 滑动速度默认 1000pt/s（新动作在设置页存 1000；旧动作缺 speed 字段兜底 1000）
 //
 // v1.0.39（滑动参数上限 + 回滑防惯性 + 弃置式中断修复）：
 //   1. 弹起停留上限 500→2000ms；滑动分段上限 48→96（两处钳制同步）
@@ -766,6 +780,7 @@ static void PTShowProbeAlert(void) {
 // 动作执行（PTFakeMetaTouch + AVSystemController）
 // ============================================================
 static BOOL gIsInjecting = NO;
+static BOOL gExecRunning = NO;   // v1.0.43：序列执行中（防抖覆盖执行窗口，根除狂按打断滑动）
 static BOOL gInFakeTouch = NO;   // v1.0.32：PTFakeMetaTouch 注入触摸期间置 YES（同步调用，包住即可）
                                   // 用于精确区分「注入触摸（放行）」vs「翻页器按键（拦截）」——
                                   // 注入触摸没有 addEvent、sender 残留翻页器，必须靠这个标志识别
@@ -775,6 +790,8 @@ static float gMutedVolume = -1;   // 静音前音量（-1=未静音）
 
 // v1.0.28 方案 B：未命中时把暂存轨迹重放给 App（恢复原行为 = 放行）
 // 中间点均匀抽样最多 10 个，异步分步，gIsInjecting 防递归
+// v1.0.43：重放注入期间补 gInFakeTouch（与 PTFakeTap 一致）——此前没置，0.4s 窗口内
+// 重放合成触摸会被 PTHandlePagerEvent 当成翻页器会话再次吞掉 → 重放被掐死/反复重放
 static void PTReplayTrailAsync(void) {
     if (!gSessTrail || gSessTrail.count < 2) { gSessTrail = nil; return; }
     NSArray *pts = [gSessTrail copy];
@@ -790,17 +807,23 @@ static void PTReplayTrailAsync(void) {
         [mids addObject:pts[idx]];
     }
     gIsInjecting = YES;
+    gInFakeTouch = YES;
     NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
+    gInFakeTouch = NO;
     __block NSUInteger i = 0;
     __block void (^step)(void);
     step = ^(void) {
         if (i >= mids.count) {
+            gInFakeTouch = YES;
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
+            gInFakeTouch = NO;
             gIsInjecting = NO;
             PTLog(@"[重放] 未命中：原始轨迹已重放给 App（%lu 中间点）", (unsigned long)mids.count);
             return;
         }
+        gInFakeTouch = YES;
         [PTFakeMetaTouch fakeTouchId:pid AtPoint:[mids[i] CGPointValue] withTouchPhase:UITouchPhaseMoved];
+        gInFakeTouch = NO;
         i++;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.012 * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
     };
@@ -957,7 +980,8 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
         CGPoint from = CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]);
         CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
         // v1.0.28：speed = 真实速度 pt/s；时长 = 距离/速度
-        double speed = [a[@"speed"] doubleValue] ?: 200;
+        // v1.0.43：默认 1000pt/s（设置页新动作默认 1000；旧动作缺 speed 字段兜底 1000）
+        double speed = [a[@"speed"] doubleValue] ?: 1000;
         int holdMs = [a[@"holdMs"] intValue] ?: 20;
         // v1.0.37：弹起停留（默认 0）
         // v1.0.41：防惯性开关（默认开）——开=静止衰减无惯性；关=干净利落；回滑参数已删除
@@ -985,11 +1009,16 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
     }
 }
 
-// 执行方案动作序列（顺序全执行；防抖；中断旧序列）
+// 执行方案动作序列（顺序全执行；防抖；执行中不再被新键中断）
 static void PTExecutePlan(NSString *name) {
     double now = PTNow();
-    if (now - gLastExec < gDebounceMs / 1000.0) {
-        PTLog(@"[执行] 防抖：忽略 %@（%.0fms 内已执行）", name, gDebounceMs);
+    // v1.0.43：防抖 = 「序列执行中」或「距上次执行开始 < 防抖间隔」都忽略。
+    // 旧版只在执行开始时记 gLastExec：长滑动（执行时长 > 防抖间隔）期间按新键会越过
+    // 防抖去中断旧序列 → 滑动残缺/掐死（狂按 bug 的根源）。现在执行窗口也被防抖覆盖，
+    // 序列跑完前不可能被新键掐断；v1.0.39 弃置中断 / v1.0.40 静止衰减 / v1.0.41
+    // Began 延迟 40ms 等修复保留作纵深防御，正常路径不再触发。
+    if (gExecRunning || (now - gLastExec < gDebounceMs / 1000.0)) {
+        PTLog(@"[执行] 防抖：忽略 %@（执行中=%d，%.0fms 内已执行）", name, gExecRunning, gDebounceMs);
         return;
     }
     gLastExec = now;
@@ -999,14 +1028,16 @@ static void PTExecutePlan(NSString *name) {
     gExecToken++;
     int token = gExecToken;
     gIsInjecting = YES;
+    gExecRunning = YES;
     PTLog(@"[执行] 命中 %@，开始动作序列（%lu 条）", name, (unsigned long)actions.count);
     __block int idx = 0;
     __block void (^runNext)(void);
     runNext = ^(void) {
         // v1.0.39：被新序列替代（token 换代）时直接退出，不再动 gIsInjecting——
         // 新序列已同步置 YES，旧 runNext 若清 NO 会误清新序列的执行态
+        // v1.0.43：gExecRunning 防抖下序列不会被替代，token 换代仅作纵深防御
         if (token != gExecToken) return;
-        if (idx >= (int)actions.count) { gIsInjecting = NO; PTLog(@"[执行] %@ 序列完成", name); return; }
+        if (idx >= (int)actions.count) { gIsInjecting = NO; gExecRunning = NO; PTLog(@"[执行] %@ 序列完成", name); return; }
         NSDictionary *a = actions[idx++];
         PTRunAction(a, token, runNext);
     };
@@ -1043,20 +1074,24 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
 static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
-    // 调试可视化（v1.0.23）：所有触摸——翻页器（gCurSender≠0）、手指、映射执行
-    if (gMasterEnabled && gDebugDots && event) {   // v1.0.26：可视化纳入总开关
-        for (UITouch *t in event.allTouches) {
-            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
-            PTDebugUpdate((__bridge void *)t, p, t.phase, (gCurSender != 0));
-        }
-    }
     // v1.0.32：窗口/会话判断始终优先（含映射执行中）——
     // 翻页器按键（已学 sender）无论是否执行中，一律拦截整段吞：执行中按键会命中→
     // 防抖内忽略 / 防抖外中断旧序列重启新序列，绝不放行原始滑动（根除双动作）；
     // 注入触摸靠 gInFakeTouch 精确放行（注入触摸没有 addEvent、sender 残留翻页器，
     // 若走 PTHandlePagerEvent 会把映射触摸的 Began 吞掉 → 映射失效）
+    // v1.0.43：拦截判定移到可视化之前——被整段吞掉（命中执行/未命中重放）的触摸
+    // 直接 return，不再画绿点轨迹；只有 App 实际收到的触摸才画
     if (event && !gInFakeTouch && (PTNow() < gPagerWindowUntil || gSession.active)) {
         if (PTHandlePagerEvent(event)) return;
+    }
+    // v1.0.43：调试可视化只画「App 实际收到的触摸」——注入动作 / 未命中重放的合成
+    // 轨迹 / 手指触摸 / 未学 sender 都走到这里正常画点；被拦截吞掉的翻页器原始轨迹
+    // 不再可见（此前在拦截判定前画点，命中时原始轨迹+注入轨迹同时显示，误以为没吞干净）
+    if (gMasterEnabled && gDebugDots && event) {
+        for (UITouch *t in event.allTouches) {
+            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+            PTDebugUpdate((__bridge void *)t, p, t.phase, NO);
+        }
     }
     if (gIsInjecting) {
         ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
@@ -1135,7 +1170,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.42 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.43 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
