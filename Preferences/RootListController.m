@@ -1,5 +1,5 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.45）
+// RootListController.m —— PageTurner 设置页（v1.0.46）
 //
 // v1.0.43（9 项改进，与运行端同步）：
 //   1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）
@@ -142,6 +142,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <Preferences/PSViewController.h>
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
@@ -522,20 +523,69 @@ static void PTTestTap(CGPoint p, BOOL doubleTap) {
     }
 }
 
+// v1.0.46：测试区音量与运行端同步修复——
+//   读：AVAudioSession.outputVolume 优先（真实当前音量），失败 AVSystemController 候选 get
+//   写：候选 category 依次 set + 回读确认（v1.0.44 起运行端即此逻辑）；全失败 MPVolumeView slider 兜底
+//   （设置 App 进程 AVSystemController set 静默失败 → 之前测试区完全无法触发音量±）
+static NSArray *PTTestVolumeCategories(void) {
+    return @[@"Audio/global", @"Audio/ambient", @"AVAudioSessionCategoryAmbient"];
+}
+
 static float PTTestGetVolume(void) {
     @try {
+        float v = [AVAudioSession sharedInstance].outputVolume;
+        if (v >= 0 && v <= 1.0001f) return v;
+    } @catch (NSException *e) {}
+    @try {
         id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
-        id v = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:@"AVAudioSessionCategoryAmbient"];
-        return v ? [v floatValue] : 0.5f;
+        for (NSString *cat in PTTestVolumeCategories()) {
+            id v = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
+            if (v && [v floatValue] >= 0 && [v floatValue] <= 1.0001f) return [v floatValue];
+        }
+        return 0.5f;
     } @catch (NSException *e) { return 0.5f; }
+}
+
+// MPVolumeView slider 兜底（与运行端 PTVolumeViaSlider 同款：keyWindow 隐藏位 + 遍历拿 UISlider）
+static void PTTestVolumeViaSlider(float v) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIView *vv = [[NSClassFromString(@"MPVolumeView") alloc] init];
+            UIWindow *w = [UIApplication sharedApplication].keyWindow;
+            if (!vv || !w) return;
+            vv.frame = CGRectMake(-100, -100, 10, 10);
+            [w addSubview:vv];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                @try {
+                    for (UIView *sv in [vv subviews]) {
+                        if ([sv isKindOfClass:[UISlider class]]) {
+                            [(UISlider *)sv setValue:v animated:NO];
+                            [(UISlider *)sv sendActionsForControlEvents:UIControlEventValueChanged];
+                            [vv removeFromSuperview];
+                            return;
+                        }
+                    }
+                } @catch (NSException *e) {}
+                [vv removeFromSuperview];
+            });
+        } @catch (NSException *e) {}
+    });
 }
 
 static void PTTestSetVolume(float v) {
     @try {
         id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
-        [c performSelector:NSSelectorFromString(@"setVolumeTo:forCategory:") withObject:@(v) withObject:@"AVAudioSessionCategoryAmbient"];
-        [c performSelector:NSSelectorFromString(@"setVolumeTo:") withObject:@(v)];
-    } @catch (NSException *e) {}
+        for (NSString *cat in PTTestVolumeCategories()) {
+            NSNumber *r = [c performSelector:NSSelectorFromString(@"setVolumeTo:forCategory:") withObject:@(v) withObject:cat];
+            if ([r boolValue]) {
+                id nv = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
+                if (nv && fabs([nv floatValue] - v) < 0.01f) return;
+            }
+        }
+        PTTestVolumeViaSlider(v);
+    } @catch (NSException *e) {
+        PTTestVolumeViaSlider(v);
+    }
 }
 
 // 执行单条动作 → 完成后 next()（复制 Tweak.xm PTRunAction 逻辑）
@@ -941,7 +991,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
         // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
         [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.45"
+        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.46"
             target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
         [specs addObject:ver];
 
