@@ -1,5 +1,13 @@
 // ============================================================
-// PageTurner v1.0.44 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.45 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.45（音量± 只能首次触发的修复）：volumeUp/Down 目标值不再依赖 get 回读——
+//   AVSystemController 的 getVolumeForCategory: 在第三方 App 进程不可靠（读不到时
+//   旧 PTGetVolume 兜底 0.5），导致 volumeUp 每次目标值恒为 0.5625、volumeDown 恒为
+//   0.4375：首次 set 改变音量、二次起 set 相同值音量不动（表现为"只能首次触发"）。
+//   修复 = 新增 gVolumeTarget 状态累加：首次用真实回读初始化（失败才兜底 0.5），
+//   之后每次 ±0.0625 不依赖 get；PTSetVolume 回读确认成功时同步目标状态防漂移；
+//   muteToggle 静音前音量也改用目标状态。
 //
 // v1.0.44（音量修复）：静音/音量± 全部无效 —— AVSystemController 私有 category 字符串用错
 //   （AVAudioSessionCategoryAmbient ≠ AVSystemController 的 "Audio/global"）→ set 静默失败。
@@ -792,6 +800,9 @@ static BOOL gInFakeTouch = NO;   // v1.0.32：PTFakeMetaTouch 注入触摸期间
 static int gExecToken = 0;
 static double gLastExec = 0;
 static float gMutedVolume = -1;   // 静音前音量（-1=未静音）
+static float gVolumeTarget = -1;  // v1.0.45：音量±目标值状态（-1=未初始化）——不依赖 get 回读，
+                                  // 修第三方 App 里 getVolumeForCategory 不可靠（恒 0.5 兜底）导致
+                                  // volumeUp/Down 目标值每次相同 → 二次按键音量不变
 
 // v1.0.28 方案 B：未命中时把暂存轨迹重放给 App（恢复原行为 = 放行）
 // 中间点均匀抽样最多 10 个，异步分步，gIsInjecting 防递归
@@ -856,6 +867,18 @@ static float PTGetVolume(void) {
     } @catch (NSException *e) { return 0.5f; }
 }
 
+// v1.0.45：真实音量回读（失败返回 -1，区别于 0.5 兜底）——用于初始化音量±目标状态
+static float PTGetVolumeReal(void) {
+    @try {
+        id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
+        for (NSString *cat in PTVolumeCategories()) {
+            id v = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
+            if (v) return [v floatValue];
+        }
+        return -1;
+    } @catch (NSException *e) { return -1; }
+}
+
 // MPVolumeView 兜底：主队列异步建视图（加入 keyWindow 隐藏位），下一 runloop 遍历找 UISlider
 static void PTVolumeViaSlider(float v) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -892,6 +915,7 @@ static void PTSetVolume(float v) {
             if ([r boolValue]) {
                 id nv = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
                 if (nv && fabs([nv floatValue] - v) < 0.01f) {
+                    gVolumeTarget = [nv floatValue];   // v1.0.45：回读确认成功 → 同步目标状态（防漂移）
                     PTLog(@"[音量] %.2f ✓ AVSystemController(%@)", v, cat);
                     return;
                 }
@@ -1054,13 +1078,22 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else if ([type isEqualToString:@"volumeUp"]) {
-        PTSetVolume(MIN(1.0, PTGetVolume() + 0.0625));
+        // v1.0.45：状态累加——目标值不依赖 get 回读（get 在第三方 App 不可靠恒 0.5，
+        // 旧写法目标值每次相同 → 首次 set 变、二次起音量不动）
+        if (gVolumeTarget < 0) { float real = PTGetVolumeReal(); gVolumeTarget = (real >= 0) ? real : 0.5f; }
+        gVolumeTarget = MIN(1.0f, gVolumeTarget + 0.0625f);
+        PTSetVolume(gVolumeTarget);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else if ([type isEqualToString:@"volumeDown"]) {
-        PTSetVolume(MAX(0.0, PTGetVolume() - 0.0625));
+        if (gVolumeTarget < 0) { float real = PTGetVolumeReal(); gVolumeTarget = (real >= 0) ? real : 0.5f; }
+        gVolumeTarget = MAX(0.0f, gVolumeTarget - 0.0625f);
+        PTSetVolume(gVolumeTarget);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else if ([type isEqualToString:@"muteToggle"]) {
-        if (gMutedVolume < 0) { gMutedVolume = PTGetVolume(); PTSetVolume(0); }
+        if (gMutedVolume < 0) {
+            gMutedVolume = (gVolumeTarget >= 0) ? gVolumeTarget : ((PTGetVolumeReal() >= 0) ? PTGetVolumeReal() : 0.5f);
+            PTSetVolume(0);
+        }
         else { PTSetVolume(gMutedVolume); gMutedVolume = -1; }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else {
@@ -1229,7 +1262,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.43 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.45 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
