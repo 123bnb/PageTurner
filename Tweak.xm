@@ -1,5 +1,5 @@
 // ============================================================
-// PageTurner v1.0.49 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.50 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.49（状态栏修复）：插件可视化窗口（windowLevel 高于状态栏且永驻）会接管 iOS 状态栏
 //   样式，导致时间/信号电池颜色不再跟随 App → 覆盖窗口 VC 改为状态栏样式透传（跟随当前
@@ -708,7 +708,7 @@ static NSMutableDictionary *gDotViews = nil;   // key=UITouch 指针字符串
 static void PTDebugEnsureWindow(void) {
     if (gDotWindow) return;
     UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    w.windowLevel = UIWindowLevelStatusBar + 1;   // 置顶覆盖一切
+    w.windowLevel = UIWindowLevelNormal + 1;   // v1.0.50：降到 Normal+1（盖 App 内容但不盖状态栏，不再接管状态栏）
     w.userInteractionEnabled = NO;                // 纯显示，不拦截触摸
     w.backgroundColor = [UIColor clearColor];
     PTOverlayVC *vc = [[PTOverlayVC alloc] init];
