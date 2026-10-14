@@ -1,5 +1,5 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.52）
+// RootListController.m —— PageTurner 设置页（v1.0.53）
 //
 // v1.0.43（9 项改进，与运行端同步）：
 //   1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）
@@ -186,9 +186,6 @@
 @property (nonatomic, strong) UILabel *addFeatureBtn;   // v1.0.34：增加特征按钮（紧挨记录按钮）
 @property (nonatomic, strong) UITableView *tv;
 @property (nonatomic, strong) NSMutableArray *actions;
-@property (nonatomic, strong) NSString *pendingRecMode;      // v1.0.51：跨进程录制待应用
-@property (nonatomic, assign) NSInteger pendingEditIndex;
-@property (nonatomic, strong) NSDictionary *pendingEditAction;
 - (void)reload;
 @end
 
@@ -967,7 +964,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
         // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
         [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.52"
+        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.53"
             target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
         [specs addObject:ver];
 
@@ -1456,11 +1453,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             [self presentViewController:al animated:YES completion:nil];
             return;
         }
-        // v1.0.51：手动动作（滑动(手动)/点击(手动)/双击(手动)）再次点击 → 跨进程重录（覆盖原位置）
-        if ([type isEqualToString:@"recSwipe"] || [type isEqualToString:@"tapManual"] || [type isEqualToString:@"doubleTapManual"]) {
-            [self startManualRec:type editIndex:ip.row editAction:act];
-            return;
-        }
+        // v1.0.53：旧配置残留的手动动作（滑动(手动)等）再次点击 → 按对应普通动作表单编辑，
+        // 保存后即转为普通动作（手动录制已从 deb 移除）
+        if ([type isEqualToString:@"recSwipe"]) type = @"swipe";
+        else if ([type isEqualToString:@"tapManual"]) type = @"tap";
+        else if ([type isEqualToString:@"doubleTapManual"]) type = @"doubleTap";
         if (![type isEqualToString:@"delay"]) {
             PTActionVC *vc = [PTActionVC new];
             vc.planName = self.planName;
@@ -1543,7 +1540,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         message:@"选择要添加的动作" preferredStyle:UIAlertControllerStyleActionSheet];
     NSArray *items = @[
         @[@"点击", @"tap"], @[@"双击", @"doubleTap"], @[@"滑动", @"swipe"],
-        @[@"滑动(手动)", @"recSwipe"], @[@"点击(手动)", @"tapManual"], @[@"双击(手动)", @"doubleTapManual"],   // v1.0.51
+        @[@"滑动(手动)", @"recSwipe"],   // v1.0.53：仅保留滑动(手动)，点击(手动)/双击(手动)已删；滑动(手动)配置页同普通【滑动】，不再跨进程去番茄小说录制
         @[@"延迟", @"delay"]];   // v1.0.48：音量+/音量-/静音切换动作类型已删除
     for (NSArray *it in items) {
         [al addAction:[UIAlertAction actionWithTitle:it[0] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
@@ -1555,9 +1552,14 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 
 - (void)configAction:(NSString *)type {
-    if ([type isEqualToString:@"recSwipe"] || [type isEqualToString:@"tapManual"] || [type isEqualToString:@"doubleTapManual"]) {
-        // v1.0.51：手动录制（跨进程）——发请求到目标 App 实地录制
-        [self startManualRec:type editIndex:-1 editAction:nil];
+    if ([type isEqualToString:@"recSwipe"]) {
+        // v1.0.53：滑动(手动)配置页与普通【滑动】相同——设置页直接填起点/终点/速度等，
+        // 不再跨进程去番茄小说弹半透明层实地录制（deb 背景是设置页，无实地录制条件）
+        PTActionVC *vc = [PTActionVC new];
+        vc.actionType = @"swipe";
+        vc.planName = self.planName;
+        vc.editIndex = -1;
+        [self.navigationController pushViewController:vc animated:YES];
     } else if ([type isEqualToString:@"delay"]) {
         UIAlertController *al = [UIAlertController alertControllerWithTitle:@"延迟"
             message:@"输入延迟毫秒数（如 500 = 0.5 秒）" preferredStyle:UIAlertControllerStyleAlert];
@@ -1592,66 +1594,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.tv reloadData];
 }
 
-// v1.0.51：跨进程手动录制——写 recRequest 到共享 plist，目标 App（如番茄小说）检测后
-// 弹半透明录制覆盖层（能看到内容、触摸穿透实地操作）；完成后写 recResult，设置页轮询取回。
-- (void)startManualRec:(NSString *)mode editIndex:(NSInteger)editIndex editAction:(NSDictionary *)editAction {
-    self.pendingRecMode = mode;
-    self.pendingEditIndex = editIndex;
-    self.pendingEditAction = editAction;
-    NSMutableDictionary *cfg = PTRead();
-    cfg[@"recRequest"] = @{ @"ts": @((long long)([[NSDate date] timeIntervalSince1970] * 1000)), @"mode": mode ?: @"recSwipe" };
-    [cfg removeObjectForKey:@"recResult"];
-    PTWrite(cfg);
-    NSString *modeName = [mode isEqualToString:@"tapManual"] ? @"点击(手动)"
-                        : ([mode isEqualToString:@"doubleTapManual"] ? @"双击(手动)" : @"滑动(手动)");
-    UIAlertController *al = [UIAlertController alertControllerWithTitle:@"去番茄小说录制"
-        message:[NSString stringWithFormat:@"已发出 %@ 录制请求：\n1. 打开番茄小说 App\n2. 屏幕会叠上半透明录制层（能看到小说内容）\n3. 在顶部按钮行下方实地滑动/点击\n4. 完成后点「完成」", modeName]
-        preferredStyle:UIAlertControllerStyleAlert];
-    [al addAction:[UIAlertAction actionWithTitle:@"我去录" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self pollRecResult];
-    }]];
-    [self presentViewController:al animated:YES completion:nil];
-}
-
-- (void)pollRecResult {
-    __weak typeof(self) ws = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!ws) return;
-        NSDictionary *cfg = PTRead();
-        NSDictionary *res = cfg[@"recResult"];
-        if (res && [res[@"type"] length]) {
-            [ws applyRecResult:res];
-        } else {
-            [ws pollRecResult];
-        }
-    });
-}
-
-- (void)applyRecResult:(NSDictionary *)res {
-    NSString *mode = res[@"type"];
-    NSArray *pts = res[@"pts"];
-    NSMutableDictionary *a = [NSMutableDictionary dictionary];
-    a[@"type"] = mode;
-    a[@"pts"] = pts ?: @[];
-    if (self.pendingEditIndex >= 0 && self.pendingEditAction && self.pendingEditIndex < (NSInteger)self.actions.count) {
-        self.actions[self.pendingEditIndex] = a;   // 覆盖原位置
-    } else {
-        [self.actions addObject:a];
-    }
-    [self saveActions];
-    NSMutableDictionary *cfg = PTRead();
-    [cfg removeObjectForKey:@"recResult"];
-    PTWrite(cfg);
-    self.pendingRecMode = nil;
-    self.pendingEditIndex = -1;
-    self.pendingEditAction = nil;
-    [self.tv reloadData];
-    UIAlertController *al = [UIAlertController alertControllerWithTitle:@"录制完成"
-        message:[NSString stringWithFormat:@"已保存 %@（%lu 点）", PTActionText(a), (unsigned long)pts.count]
-        preferredStyle:UIAlertControllerStyleAlert];
-    [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:al animated:YES completion:nil];
-}
+// v1.0.53：跨进程手动录制（v1.0.51 引入的 startManualRec/pollRecResult/applyRecResult）已整体删除——
+// deb 版背景是设置页，半透明实地录制无意义；滑动(手动)改回普通【滑动】配置页直接填参数。
 @end
 
 // ============================================================
