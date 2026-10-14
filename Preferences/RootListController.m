@@ -1,5 +1,5 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.47）
+// RootListController.m —— PageTurner 设置页（v1.0.48）
 //
 // v1.0.43（9 项改进，与运行端同步）：
 //   1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）
@@ -523,86 +523,8 @@ static void PTTestTap(CGPoint p, BOOL doubleTap) {
     }
 }
 
-// v1.0.47：测试区读真实音量与运行端同步——MPVolumeView slider 优先（系统控件经 MediaRemote
-// 绑定全局音量，不依赖音频会话），失败退 outputVolume → AVSystemController
-// 写：候选 category 依次 set + 回读确认（v1.0.44 起运行端即此逻辑）；全失败 MPVolumeView slider 兜底
-//   （设置 App 进程 AVSystemController set 静默失败 → 之前测试区完全无法触发音量±）
-static NSArray *PTTestVolumeCategories(void) {
-    return @[@"Audio/global", @"Audio/ambient", @"AVAudioSessionCategoryAmbient"];
-}
-
-static float PTTestGetVolume(void) {
-    float sliderV = -1, outV = -1, avsysV = -1;
-    @try {
-        if ([NSThread isMainThread]) {
-            UIView *vv = [[NSClassFromString(@"MPVolumeView") alloc] init];
-            if (vv) {
-                for (UIView *sv in [vv subviews]) {
-                    if ([sv isKindOfClass:[UISlider class]]) {
-                        float v = [(UISlider *)sv value];
-                        if (v >= 0 && v <= 1.0001f) { sliderV = v; break; }
-                    }
-                }
-            }
-        }
-    } @catch (NSException *e) {}
-    @try {
-        float v = [AVAudioSession sharedInstance].outputVolume;
-        if (v >= 0 && v <= 1.0001f) outV = v;
-    } @catch (NSException *e) {}
-    @try {
-        id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
-        for (NSString *cat in PTTestVolumeCategories()) {
-            id v = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
-            if (v && [v floatValue] >= 0 && [v floatValue] <= 1.0001f) { avsysV = [v floatValue]; break; }
-        }
-    } @catch (NSException *e) {}
-    if (sliderV >= 0) return sliderV;
-    if (outV >= 0) return outV;
-    return (avsysV >= 0) ? avsysV : 0.5f;
-}
-
-// MPVolumeView slider 兜底（与运行端 PTVolumeViaSlider 同款：keyWindow 隐藏位 + 遍历拿 UISlider）
-static void PTTestVolumeViaSlider(float v) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            UIView *vv = [[NSClassFromString(@"MPVolumeView") alloc] init];
-            UIWindow *w = [UIApplication sharedApplication].keyWindow;
-            if (!vv || !w) return;
-            vv.frame = CGRectMake(-100, -100, 10, 10);
-            [w addSubview:vv];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                @try {
-                    for (UIView *sv in [vv subviews]) {
-                        if ([sv isKindOfClass:[UISlider class]]) {
-                            [(UISlider *)sv setValue:v animated:NO];
-                            [(UISlider *)sv sendActionsForControlEvents:UIControlEventValueChanged];
-                            [vv removeFromSuperview];
-                            return;
-                        }
-                    }
-                } @catch (NSException *e) {}
-                [vv removeFromSuperview];
-            });
-        } @catch (NSException *e) {}
-    });
-}
-
-static void PTTestSetVolume(float v) {
-    @try {
-        id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
-        for (NSString *cat in PTTestVolumeCategories()) {
-            NSNumber *r = [c performSelector:NSSelectorFromString(@"setVolumeTo:forCategory:") withObject:@(v) withObject:cat];
-            if ([r boolValue]) {
-                id nv = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
-                if (nv && fabs([nv floatValue] - v) < 0.01f) return;
-            }
-        }
-        PTTestVolumeViaSlider(v);
-    } @catch (NSException *e) {
-        PTTestVolumeViaSlider(v);
-    }
-}
+// v1.0.48：音量动作类型已整体删除（第三方 App 进程无激活音频会话，读真实音量全部
+// 接口返回假值，v1.0.44-47 四次实测后止损）——测试区音量函数一并删除。
 
 // 执行单条动作 → 完成后 next()（复制 Tweak.xm PTRunAction 逻辑）
 static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
@@ -688,18 +610,8 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"volumeUp"]) {
-        PTTestSetVolume(MIN(1.0, PTTestGetVolume() + 0.0625));
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"volumeDown"]) {
-        PTTestSetVolume(MAX(0.0, PTTestGetVolume() - 0.0625));
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"muteToggle"]) {
-        static float sTestMuted = -1;
-        if (sTestMuted < 0) { sTestMuted = PTTestGetVolume(); PTTestSetVolume(0); }
-        else { PTTestSetVolume(sTestMuted); sTestMuted = -1; }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else {
+        // v1.0.48：音量+/音量-/静音切换已删除，旧配置里的这些动作在此跳过
         if (next) next();
     }
 }
@@ -866,9 +778,8 @@ static NSString *PTActionText(NSDictionary *a) {
     if ([t isEqualToString:@"doubleTap"]) return [NSString stringWithFormat:@"双击(%d, %d)", (int)[a[@"x"] doubleValue], (int)[a[@"y"] doubleValue]];
     if ([t isEqualToString:@"swipe"]) return [NSString stringWithFormat:@"滑动 (%d,%d)→(%d,%d)", (int)[a[@"x1"] doubleValue], (int)[a[@"y1"] doubleValue], (int)[a[@"x2"] doubleValue], (int)[a[@"y2"] doubleValue]];
     if ([t isEqualToString:@"delay"]) return [NSString stringWithFormat:@"延迟 %.0fms", [a[@"ms"] doubleValue]];
-    if ([t isEqualToString:@"volumeUp"]) return @"音量+";
-    if ([t isEqualToString:@"volumeDown"]) return @"音量-";
-    if ([t isEqualToString:@"muteToggle"]) return @"静音切换";
+    if ([t isEqualToString:@"volumeUp"] || [t isEqualToString:@"volumeDown"] || [t isEqualToString:@"muteToggle"])
+        return [NSString stringWithFormat:@"%@（已移除）", t];   // v1.0.48：音量动作已删除，旧配置显示提示
     return t;
 }
 
@@ -1007,7 +918,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
         // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
         [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.47"
+        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.48"
             target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
         [specs addObject:ver];
 
@@ -1487,8 +1398,16 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         // v1.0.29（问题6）：点击动作行 → 进动作设置页编辑（预填坐标，完成覆盖更新）
         NSDictionary *act = self.actions[ip.row];
         NSString *type = act[@"type"];
-        if (![type isEqualToString:@"delay"] && ![type isEqualToString:@"muteToggle"]
-            && ![type isEqualToString:@"volumeUp"] && ![type isEqualToString:@"volumeDown"]) {
+        // v1.0.48：已删除的音量动作（旧配置残留）→ 提示，不进编辑页
+        if ([type isEqualToString:@"volumeUp"] || [type isEqualToString:@"volumeDown"] || [type isEqualToString:@"muteToggle"]) {
+            UIAlertController *al = [UIAlertController alertControllerWithTitle:@"该动作已移除"
+                message:@"音量+/音量-/静音切换已在 v1.0.48 删除（注入环境音量读取不可靠）。请在编辑中删除这个动作，换成其它动作。" 
+                preferredStyle:UIAlertControllerStyleAlert];
+            [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:al animated:YES completion:nil];
+            return;
+        }
+        if (![type isEqualToString:@"delay"]) {
             PTActionVC *vc = [PTActionVC new];
             vc.planName = self.planName;
             vc.actionType = type;
@@ -1570,7 +1489,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         message:@"选择要添加的动作" preferredStyle:UIAlertControllerStyleActionSheet];
     NSArray *items = @[
         @[@"点击", @"tap"], @[@"双击", @"doubleTap"], @[@"滑动", @"swipe"],
-        @[@"延迟", @"delay"], @[@"静音", @"muteToggle"], @[@"音量+", @"volumeUp"], @[@"音量-", @"volumeDown"]];
+        @[@"延迟", @"delay"]];   // v1.0.48：音量+/音量-/静音切换动作类型已删除
     for (NSArray *it in items) {
         [al addAction:[UIAlertAction actionWithTitle:it[0] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             [self configAction:it[1]];
@@ -1591,9 +1510,6 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             if (ms > 0) { [self.actions addObject:@{@"type": @"delay", @"ms": @(ms)}]; [self saveActions]; }
         }]];
         [self presentViewController:al animated:YES completion:nil];
-    } else if ([type isEqualToString:@"volumeUp"] || [type isEqualToString:@"volumeDown"] || [type isEqualToString:@"muteToggle"]) {
-        [self.actions addObject:@{@"type": type}];
-        [self saveActions];
     } else {
         PTActionVC *vc = [PTActionVC new];
         vc.actionType = type;
@@ -2610,8 +2526,26 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
         style:UIBarButtonItemStyleDone target:self action:@selector(copyLog)];
 
-    // 优先内存日志（100% 可见，不受文件可写限制）
-    if (sLogLines.count) {
+    // v1.0.48：优先读运行端日志文件（App 进程日志远比设置页内存日志丰富——内存只记设置页
+    // 自己进程的测试/操作日志，运行端日志只写文件不上传）；文件读不到再回退内存日志。
+    NSString *fileText = nil;
+    NSMutableArray *cands = [NSMutableArray array];
+    [cands addObject:@"/var/mobile/Documents/PageTurner.log"];
+    NSString *jb = PTJbrootRootC();
+    if (jb.length) [cands addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents/PageTurner.log"]];
+    for (NSString *p in cands) {
+        NSString *s = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+        if (s.length) {
+            NSArray *ls = [s componentsSeparatedByString:@"\n"];
+            NSUInteger n = ls.count;
+            NSUInteger from = n > 200 ? n - 200 : 0;
+            fileText = [[ls subarrayWithRange:NSMakeRange(from, n - from)] componentsJoinedByString:@"\n"];
+            break;
+        }
+    }
+    if (fileText.length) {
+        tv.text = fileText;
+    } else if (sLogLines.count) {
         NSArray *lines = sLogLines;
         NSUInteger n = lines.count;
         NSUInteger from = n > 200 ? n - 200 : 0;

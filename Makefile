@@ -22,7 +22,7 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.47
+PACKAGE_VERSION := 1.0.48
 
 DEBUG = 0
 ARCHS = arm64 arm64e
@@ -35,7 +35,7 @@ PageTurner_FILES = Tweak.xm \
 	ptftouch/PTFakeMetaTouch.m ptftouch/UITouch-KIFAdditions.m \
 	ptftouch/UIEvent+KIFAdditions.m ptftouch/IOHIDEvent+KIF.m
 PageTurner_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-arc-retain-cycles -Iptftouch -include ptftouch/Compat.h
-PageTurner_FRAMEWORKS = Foundation UIKit AVFoundation IOKit
+PageTurner_FRAMEWORKS = Foundation UIKit IOKit
 PageTurner_LIBRARIES = substrate
 # 照抄 volumekeytapper：-Wl,-undefined,dynamic_lookup 允许 IOHIDEvent*/MSHookMessageEx
 # 未定义符号运行时动态解析；它带此 flag 注入成功，证明该 flag 不影响 ellekit 注入判定

@@ -1,33 +1,11 @@
 // ============================================================
-// PageTurner v1.0.47 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.48 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
-// v1.0.47（音量± 读取再次修正）：v1.0.46 实测 AVAudioSession.outputVolume 在目标 App 进程
-//   也恒返回假 0.5（App 无激活音频会话时音量接口全失效）→ 读改走 MPVolumeView 私有
-//   UISlider.value：系统音量控件经 MediaRemote 绑定全局媒体音量，不依赖 App 音频会话
-//   （volumekeytapper 同款；v1.0.45 写兜底已实证同一 slider 能写真实值）。
-//   另加诊断日志：每次读把 slider/outputVolume/AVSystemController 三种读法的值都打出来，
-//   实测后一眼确认哪个是真实值（若 slider 在个别环境异常，下版直接切日志里准的那个）。
-//
-// v1.0.46（音量± 基础值错误的修复）：v1.0.45 的状态累加依赖 AVSystemController
-//   getVolumeForCategory 初始化，但它在第三方 App 进程读不到真实系统音量（恒返回 0.5
-//   默认）→ 首次在 50% 基础上加；且持久目标状态感知不到用户手动调音量。
-//   修复 = 读改走 AVAudioSession.outputVolume（系统公开接口，返回真实当前音量 0~1，
-//   跨进程可靠，手动调整自动感知）：每次 volumeUp/Down 现读真实值再 ±0.0625，
-//   删除 gVolumeTarget 持久状态；测试区（RootListController.m）同步此修复 +
-//   补 MPVolumeView slider 兜底（设置 App 进程 AVSystemController set 静默失败）。
-//
-// v1.0.45（音量± 只能首次触发的修复）：volumeUp/Down 目标值不再依赖 get 回读——
-//   AVSystemController 的 getVolumeForCategory: 在第三方 App 进程不可靠（读不到时
-//   旧 PTGetVolume 兜底 0.5），导致 volumeUp 每次目标值恒为 0.5625、volumeDown 恒为
-//   0.4375：首次 set 改变音量、二次起 set 相同值音量不动（表现为"只能首次触发"）。
-//   修复 = 新增 gVolumeTarget 状态累加：首次用真实回读初始化（失败才兜底 0.5），
-//   之后每次 ±0.0625 不依赖 get；PTSetVolume 回读确认成功时同步目标状态防漂移；
-//   muteToggle 静音前音量也改用目标状态。
-//
-// v1.0.44（音量修复）：静音/音量± 全部无效 —— AVSystemController 私有 category 字符串用错
-//   （AVAudioSessionCategoryAmbient ≠ AVSystemController 的 "Audio/global"）→ set 静默失败。
-//   详见 PTSetVolume/PTGetVolume 处注释；修复 = 候选 category 依次尝试 + 回读确认 +
-//   MPVolumeView 私有 slider 兜底。
+// v1.0.48（删除音量动作类型）：音量+/音量-/静音切换整体删除——第三方 App 进程无激活
+//   音频会话时，系统音量读取接口（AVSystemController get / AVAudioSession.outputVolume /
+//   MPVolumeView slider 同步读）全部返回假值（v1.0.44-47 四次实测），写也只能靠异步
+//   slider 兜底 → 止损删除。旧配置兼容：已保存映射里的音量动作执行时被 PTRunAction
+//   默认分支跳过（不崩溃）；设置页不再提供这三个动作类型。
 //
 // v1.0.43（防抖严谨化 + 可视化只画实际收到的触摸 + 滑动速度默认 1000）：
 //   1. 防抖严谨化（根除狂按打断滑动）：新增 gExecRunning——序列执行中一律忽略新按键，
@@ -171,7 +149,7 @@
 //   sendEvent（UIEvent 层）会话：Began/Moved/Ended 结算 UITouch 位移特征
 //     → 命中方案：吞事件 + 执行动作序列；未命中：放行 + 日志
 //
-// 动作：PTFakeMetaTouch（点击/双击/滑动）+ AVSystemController（静音/音量±）
+// 动作：PTFakeMetaTouch（点击/双击/滑动）＋延迟（v1.0.48 起音量动作已删除）
 // 防递归：gIsInjecting；防抖：gDebounceMs
 // 日志：App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log
 // 注入标记：/var/mobile/Documents/PageTurner-injected-<bid>.txt（Filza 一眼可查）
@@ -179,7 +157,6 @@
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
-#import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <dispatch/dispatch.h>
@@ -806,7 +783,7 @@ static void PTShowProbeAlert(void) {
 }
 
 // ============================================================
-// 动作执行（PTFakeMetaTouch + AVSystemController）
+// 动作执行（PTFakeMetaTouch ＋ 延迟；v1.0.48 音量动作已删除）
 // ============================================================
 static BOOL gIsInjecting = NO;
 static BOOL gExecRunning = NO;   // v1.0.43：序列执行中（防抖覆盖执行窗口，根除狂按打断滑动）
@@ -815,7 +792,6 @@ static BOOL gInFakeTouch = NO;   // v1.0.32：PTFakeMetaTouch 注入触摸期间
                                   // 注入触摸没有 addEvent、sender 残留翻页器，必须靠这个标志识别
 static int gExecToken = 0;
 static double gLastExec = 0;
-static float gMutedVolume = -1;   // 静音前音量（-1=未静音）
 
 // v1.0.28 方案 B：未命中时把暂存轨迹重放给 App（恢复原行为 = 放行）
 // 中间点均匀抽样最多 10 个，异步分步，gIsInjecting 防递归
@@ -859,103 +835,10 @@ static void PTReplayTrailAsync(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.016 * NSEC_PER_SEC)), dispatch_get_main_queue(), step);
 }
 
-// v1.0.44（音量修复）：静音/音量± 全部无效的根因 —— AVSystemController 的私有 category
-//   字符串用错（@"AVAudioSessionCategoryAmbient" 是 AVAudioSession 常量，AVSystemController
-//   识别的是 "Audio/global" 等私有字符串）→ setVolumeTo:forCategory: 静默返回 NO，音量不动。
-//   修复：① 按候选 category 依次 set（Audio/global → Audio/ambient → 旧字符串兜底），
-//   ② 每次 set 后回读确认真正生效才返回；③ 全部失效则走 MPVolumeView 私有 slider 兜底
-//   （2026 实测仍可用：init 后加入 keyWindow 隐藏位置，遍历 subviews 拿 UISlider 直接设 value）。
-static NSArray *PTVolumeCategories(void) {
-    return @[@"Audio/global", @"Audio/ambient", @"AVAudioSessionCategoryAmbient"];
-}
-
-// v1.0.47：读真实系统音量——v1.0.46 实测 AVAudioSession.outputVolume 与 AVSystemController
-// getVolumeForCategory 在第三方 App 进程（无激活音频会话）都恒返回假 0.5 → 改用
-// MPVolumeView 私有 UISlider.value：系统音量控件，内部经 MediaRemote 绑定全局媒体音量，
-// 不依赖 App 音频会话（volumekeytapper 同款；45 版写兜底已实证同一 slider 能写真实值）。
-// 返回优先级：slider → outputVolume → AVSystemController → -1。
-// 附诊断日志：每次读把三种读法的值都打出来，实测后确认哪个是真实值。
-static float PTGetVolumeReal(void) {
-    float sliderV = -1, outV = -1, avsysV = -1;
-    @try {
-        if ([NSThread isMainThread]) {
-            UIView *vv = [[NSClassFromString(@"MPVolumeView") alloc] init];
-            if (vv) {
-                for (UIView *sv in [vv subviews]) {
-                    if ([sv isKindOfClass:[UISlider class]]) {
-                        float v = [(UISlider *)sv value];
-                        if (v >= 0 && v <= 1.0001f) { sliderV = v; break; }
-                    }
-                }
-            }
-        }
-    } @catch (NSException *e) {}
-    @try {
-        float v = [AVAudioSession sharedInstance].outputVolume;
-        if (v >= 0 && v <= 1.0001f) outV = v;
-    } @catch (NSException *e) {}
-    @try {
-        id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
-        for (NSString *cat in PTVolumeCategories()) {
-            id v = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
-            if (v && [v floatValue] >= 0 && [v floatValue] <= 1.0001f) { avsysV = [v floatValue]; break; }
-        }
-    } @catch (NSException *e) {}
-    PTLog(@"[音量] 读 slider=%.2f output=%.2f avsys=%.2f → 采用 %.2f",
-          sliderV, outV, avsysV, (sliderV >= 0) ? sliderV : ((outV >= 0) ? outV : avsysV));
-    if (sliderV >= 0) return sliderV;
-    if (outV >= 0) return outV;
-    return avsysV;
-}
-
-// MPVolumeView 兜底：主队列异步建视图（加入 keyWindow 隐藏位），下一 runloop 遍历找 UISlider
-static void PTVolumeViaSlider(float v) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        @try {
-            UIView *vv = [[NSClassFromString(@"MPVolumeView") alloc] init];
-            UIWindow *w = [UIApplication sharedApplication].keyWindow;
-            if (!vv || !w) return;
-            vv.frame = CGRectMake(-100, -100, 10, 10);
-            [w addSubview:vv];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                @try {
-                    for (UIView *sv in [vv subviews]) {
-                        if ([sv isKindOfClass:[UISlider class]]) {
-                            [(UISlider *)sv setValue:v animated:NO];
-                            [(UISlider *)sv sendActionsForControlEvents:UIControlEventValueChanged];
-                            PTLog(@"[音量] %.2f ✓ MPVolumeView slider 兜底生效", v);
-                            [vv removeFromSuperview];
-                            return;
-                        }
-                    }
-                    PTLog(@"[音量] %.2f ✗ 未找到 volumeSlider（AVSystem 与 MPVolumeView 均失败）", v);
-                } @catch (NSException *e) {}
-                [vv removeFromSuperview];
-            });
-        } @catch (NSException *e) {}
-    });
-}
-
-static void PTSetVolume(float v) {
-    @try {
-        id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
-        for (NSString *cat in PTVolumeCategories()) {
-            NSNumber *r = [c performSelector:NSSelectorFromString(@"setVolumeTo:forCategory:") withObject:@(v) withObject:cat];
-            if ([r boolValue]) {
-                id nv = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
-                if (nv && fabs([nv floatValue] - v) < 0.01f) {
-                    PTLog(@"[音量] %.2f ✓ AVSystemController(%@)", v, cat);
-                    return;
-                }
-            }
-        }
-        PTLog(@"[音量] %.2f ⚠ AVSystemController 未生效，尝试 MPVolumeView 兜底", v);
-        PTVolumeViaSlider(v);
-    } @catch (NSException *e) {
-        PTLog(@"[音量] %.2f ✗ 异常，尝试 MPVolumeView 兜底", v);
-        PTVolumeViaSlider(v);
-    }
-}
+// v1.0.48：音量动作类型（音量+/音量-/静音切换）已整体删除——第三方 App 进程无激活音频
+// 会话时系统音量读取接口（AVSystemController get / AVAudioSession.outputVolume / MPVolumeView
+// slider 同步读）全部返回假值，写也依赖异步 slider 兜底，修 4 版无法稳定 → 止损删除。
+// 旧配置兼容：已保存映射里的音量动作执行时被 PTRunAction 默认分支跳过（不崩溃）。
 
 // 点击（同步短阻塞，DVT 验证过的方案；pressMs = 按下时长）
 static void PTFakeTap(CGPoint p, int pressMs) {
@@ -1105,27 +988,8 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"volumeUp"]) {
-        // v1.0.46：每次现读真实音量再 +step（AVAudioSession.outputVolume 返回真实当前值，
-        // 手动调音量后自动感知；不再保留持久目标状态）
-        float base = PTGetVolumeReal();
-        if (base < 0) base = 0.5f;
-        PTSetVolume(MIN(1.0f, base + 0.0625f));
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"volumeDown"]) {
-        float base = PTGetVolumeReal();
-        if (base < 0) base = 0.5f;
-        PTSetVolume(MAX(0.0f, base - 0.0625f));
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"muteToggle"]) {
-        if (gMutedVolume < 0) {
-            gMutedVolume = PTGetVolumeReal();
-            if (gMutedVolume < 0) gMutedVolume = 0.5f;
-            PTSetVolume(0);
-        }
-        else { PTSetVolume(gMutedVolume); gMutedVolume = -1; }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else {
+        // v1.0.48：音量+/音量-/静音切换已删除，旧配置里的这些动作在此跳过
         if (next) next();
     }
 }
@@ -1291,7 +1155,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.47 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.48 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
