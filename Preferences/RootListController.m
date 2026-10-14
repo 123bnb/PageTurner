@@ -1,5 +1,5 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.51）
+// RootListController.m —— PageTurner 设置页（v1.0.52）
 //
 // v1.0.43（9 项改进，与运行端同步）：
 //   1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）
@@ -526,6 +526,30 @@ static void PTTestTap(CGPoint p, BOOL doubleTap) {
     }
 }
 
+// v1.0.52：滑动(手动)测试区回放——按录制轨迹逐点注入（保持时间间隔，最短 8ms 防风暴）
+static void PTTestRecSwipeAsync(NSArray *pts, void (^done)(void)) {
+    if (!pts.count) { if (done) done(); return; }
+    __block NSInteger pid = -1;
+    __block int idx = 0;
+    __block void (^step)(void);
+    step = ^(void) {
+        if (idx >= (int)pts.count) { if (done) done(); return; }
+        NSDictionary *pt = pts[idx];
+        CGPoint p = CGPointMake([pt[@"x"] doubleValue], [pt[@"y"] doubleValue]);
+        UITouchPhase ph = (idx == 0) ? UITouchPhaseBegan
+                        : ((idx == (int)pts.count - 1) ? UITouchPhaseEnded : UITouchPhaseMoved);
+        if (idx == 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:ph];
+        else [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:ph];
+        idx++;
+        if (idx >= (int)pts.count) { if (done) done(); return; }
+        double waitMs = [pts[idx][@"t"] doubleValue] - [pt[@"t"] doubleValue];
+        if (waitMs < 8) waitMs = 8;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(waitMs * NSEC_PER_SEC / 1000)),
+                       dispatch_get_main_queue(), step);
+    };
+    step();
+}
+
 // v1.0.48：音量动作类型已整体删除（第三方 App 进程无激活音频会话，读真实音量全部
 // 接口返回假值，v1.0.44-47 四次实测后止损）——测试区音量函数一并删除。
 
@@ -609,6 +633,25 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
                 t0 = CFAbsoluteTimeGetCurrent();
                 step();
             });
+        });
+    } else if ([type isEqualToString:@"recSwipe"]) {
+        // v1.0.52：测试区支持滑动(手动)回放——此前缺分支被 else 跳过，注入轨迹看不到
+        PTTestRecSwipeAsync(a[@"pts"], next);
+    } else if ([type isEqualToString:@"tapManual"]) {
+        NSArray *pts = a[@"pts"];
+        CGPoint p = pts.count ? CGPointMake([pts[0][@"x"] doubleValue], [pts[0][@"y"] doubleValue]) : CGPointMake(200, 400);
+        PTTestTap(p, NO);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
+    } else if ([type isEqualToString:@"doubleTapManual"]) {
+        NSArray *pts = a[@"pts"];
+        CGPoint p0 = pts.count >= 1 ? CGPointMake([pts[0][@"x"] doubleValue], [pts[0][@"y"] doubleValue]) : CGPointMake(200, 400);
+        CGPoint p1 = pts.count >= 2 ? CGPointMake([pts[1][@"x"] doubleValue], [pts[1][@"y"] doubleValue]) : p0;
+        double gapMs = (pts.count >= 2) ? ([pts[1][@"t"] doubleValue] - [pts[0][@"t"] doubleValue]) : 120.0;
+        if (gapMs < 40) gapMs = 40;
+        PTTestTap(p0, NO);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gapMs / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            PTTestTap(p1, NO);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
         });
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
@@ -924,7 +967,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
         // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
         [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.51"
+        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.52"
             target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
         [specs addObject:ver];
 
