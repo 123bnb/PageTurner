@@ -1,5 +1,9 @@
 // ============================================================
-// PageTurner v1.0.48 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.49 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.49（状态栏修复）：插件可视化窗口（windowLevel 高于状态栏且永驻）会接管 iOS 状态栏
+//   样式，导致时间/信号电池颜色不再跟随 App → 覆盖窗口 VC 改为状态栏样式透传（跟随当前
+//   keyWindow），可视化开关关掉时销毁窗口。
 //
 // v1.0.48（删除音量动作类型）：音量+/音量-/静音切换整体删除——第三方 App 进程无激活
 //   音频会话时，系统音量读取接口（AVSystemController get / AVAudioSession.outputVolume /
@@ -272,6 +276,7 @@ static double gDebounceMs = 300;
 static BOOL gDebugDots = NO;                // v1.0.23：调试可视化（TrollCM 触摸轨迹）
 static BOOL gProbeEnabled = NO;             // v1.0.29：探针独立开关（探针弹窗+提醒条）
 static BOOL gCrashTest = NO;                // v1.0.24：注入测试（探针字段，照抄 VKT）
+static void PTDebugDestroyWindow(void);     // v1.0.49：可视化窗口销毁（前向声明）
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
 static NSString *gCfgPath = nil;            // 实际读到的 plist 路径（诊断）
@@ -358,6 +363,9 @@ static void PTLoadConfig(BOOL force) {
     double db = [gConfig[@"debounceMs"] doubleValue];
     gDebounceMs = (db > 0) ? db : 300;
     gDebugDots = [gConfig[@"debugDots"] boolValue];
+    // v1.0.49：可视化开关关掉 → 销毁绿点窗口（此前永驻，windowLevel 高于状态栏会接管
+    // 状态栏样式导致时间/信号电池颜色不再跟随 App）
+    if (!gDebugDots) PTDebugDestroyWindow();
     gProbeEnabled = (gConfig[@"probeEnabled"] == nil) ? NO : [gConfig[@"probeEnabled"] boolValue];
     gDebugLogEnabled = (gConfig[@"debugLogEnabled"] == nil) ? YES : [gConfig[@"debugLogEnabled"] boolValue];   // v1.0.42：缺省开
     gCrashTest = (gConfig[@"crashTest"] == nil) ? NO : [gConfig[@"crashTest"] boolValue];
@@ -674,18 +682,50 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {    if (![event respondsToSelect
 static UIWindow *gDotWindow = nil;
 static NSMutableDictionary *gDotViews = nil;   // key=UITouch 指针字符串
 
+// v1.0.49：插件覆盖窗口的状态栏样式透传——iOS 状态栏样式由最顶层窗口的 rootViewController
+// 决定，空白 VC 会接管状态栏导致颜色不再跟随 App（时间/信号电池变白）。透传当前 keyWindow 样式。
+@interface PTOverlayVC : UIViewController
+@end
+@implementation PTOverlayVC
+- (UIStatusBarStyle)preferredStatusBarStyle {
+    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+    UIViewController *r = kw.rootViewController;
+    if (r && r != self) {
+        @try { return [r preferredStatusBarStyle]; } @catch (NSException *e) {}
+    }
+    return UIStatusBarStyleDefault;
+}
+- (BOOL)prefersStatusBarHidden {
+    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+    UIViewController *r = kw.rootViewController;
+    if (r && r != self) {
+        @try { return [r prefersStatusBarHidden]; } @catch (NSException *e) {}
+    }
+    return NO;
+}
+@end
+
 static void PTDebugEnsureWindow(void) {
     if (gDotWindow) return;
     UIWindow *w = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     w.windowLevel = UIWindowLevelStatusBar + 1;   // 置顶覆盖一切
     w.userInteractionEnabled = NO;                // 纯显示，不拦截触摸
     w.backgroundColor = [UIColor clearColor];
-    UIViewController *vc = [[UIViewController alloc] init];
+    PTOverlayVC *vc = [[PTOverlayVC alloc] init];
     vc.view.backgroundColor = [UIColor clearColor];
     w.rootViewController = vc;
     w.hidden = NO;                                // 非 key 窗口直接显示
     gDotWindow = w;
     gDotViews = [NSMutableDictionary dictionary];
+}
+
+// v1.0.49：可视化开关关掉时销毁窗口（不再永驻影响状态栏）
+static void PTDebugDestroyWindow(void) {
+    if (!gDotWindow) return;
+    gDotWindow.hidden = YES;
+    [gDotWindow removeFromSuperview];
+    gDotWindow = nil;
+    gDotViews = nil;
 }
 
 static void PTDebugUpdate(void *touchPtr, CGPoint p, UITouchPhase phase, BOOL pager) {
