@@ -1,5 +1,5 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.46）
+// RootListController.m —— PageTurner 设置页（v1.0.47）
 //
 // v1.0.43（9 项改进，与运行端同步）：
 //   1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）
@@ -523,27 +523,43 @@ static void PTTestTap(CGPoint p, BOOL doubleTap) {
     }
 }
 
-// v1.0.46：测试区音量与运行端同步修复——
-//   读：AVAudioSession.outputVolume 优先（真实当前音量），失败 AVSystemController 候选 get
-//   写：候选 category 依次 set + 回读确认（v1.0.44 起运行端即此逻辑）；全失败 MPVolumeView slider 兜底
+// v1.0.47：测试区读真实音量与运行端同步——MPVolumeView slider 优先（系统控件经 MediaRemote
+// 绑定全局音量，不依赖音频会话），失败退 outputVolume → AVSystemController
+// 写：候选 category 依次 set + 回读确认（v1.0.44 起运行端即此逻辑）；全失败 MPVolumeView slider 兜底
 //   （设置 App 进程 AVSystemController set 静默失败 → 之前测试区完全无法触发音量±）
 static NSArray *PTTestVolumeCategories(void) {
     return @[@"Audio/global", @"Audio/ambient", @"AVAudioSessionCategoryAmbient"];
 }
 
 static float PTTestGetVolume(void) {
+    float sliderV = -1, outV = -1, avsysV = -1;
+    @try {
+        if ([NSThread isMainThread]) {
+            UIView *vv = [[NSClassFromString(@"MPVolumeView") alloc] init];
+            if (vv) {
+                for (UIView *sv in [vv subviews]) {
+                    if ([sv isKindOfClass:[UISlider class]]) {
+                        float v = [(UISlider *)sv value];
+                        if (v >= 0 && v <= 1.0001f) { sliderV = v; break; }
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) {}
     @try {
         float v = [AVAudioSession sharedInstance].outputVolume;
-        if (v >= 0 && v <= 1.0001f) return v;
+        if (v >= 0 && v <= 1.0001f) outV = v;
     } @catch (NSException *e) {}
     @try {
         id c = [NSClassFromString(@"AVSystemController") performSelector:NSSelectorFromString(@"sharedAVSystemController")];
         for (NSString *cat in PTTestVolumeCategories()) {
             id v = [c performSelector:NSSelectorFromString(@"getVolumeForCategory:") withObject:cat];
-            if (v && [v floatValue] >= 0 && [v floatValue] <= 1.0001f) return [v floatValue];
+            if (v && [v floatValue] >= 0 && [v floatValue] <= 1.0001f) { avsysV = [v floatValue]; break; }
         }
-        return 0.5f;
-    } @catch (NSException *e) { return 0.5f; }
+    } @catch (NSException *e) {}
+    if (sliderV >= 0) return sliderV;
+    if (outV >= 0) return outV;
+    return (avsysV >= 0) ? avsysV : 0.5f;
 }
 
 // MPVolumeView slider 兜底（与运行端 PTVolumeViaSlider 同款：keyWindow 隐藏位 + 遍历拿 UISlider）
@@ -991,7 +1007,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
         // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
         [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.46"
+        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.47"
             target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
         [specs addObject:ver];
 
