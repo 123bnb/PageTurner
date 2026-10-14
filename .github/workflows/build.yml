@@ -3,6 +3,7 @@ name: Build PageTurner
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 permissions:
@@ -40,17 +41,19 @@ jobs:
           echo "deb=$DEB"
           dpkg-deb -f "$DEB" | grep -E '^(Package|Version|Architecture):'
 
-      - name: Publish Release
+      - name: Publish Release (tag only, version from tag)
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
           RAW=$(ls packages/*.deb | head -1)
-          DEB=PageTurner-1.0.43-roothide.deb
+          DEB="PageTurner-${VERSION}-roothide.deb"
           cp "$RAW" "$DEB"
-          TAG=v1.0.43
-          NOTES=$'PageTurner v1.0.43（roothide 直装）—— 9 项改进：防抖严谨化 + 可视化修正 + 速度默认 1000\n\n【v1.0.43 改了什么】\n1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）\n2. 调试可视化：被拦截吞掉的翻页器原始轨迹不再显示（测试区 + 目标 App 都只显示实际收到的触摸）\n3. 动作参数页「防惯性」开关：文字不再被开关遮挡（标签在左、开关在右）\n4. 方案列表页：已录制方案不再误显示「未录制」（兼容多特征新格式 features[]）\n5. 滑动速度默认 1000pt/s（上下限不变 100~2000）+ 参数页滑块新增预设值一键点击 + 行距缩短\n6. 动作设置页绿点：解除 22pt 最小坐标钳制，可拖到屏幕任意位置/边缘\n7. 映射区新增排序：右上角「排序」→ 按住行最右侧 ≡ 手柄拖动调整执行顺序\n8. 设置页最底部居中显示版本号\n9. 防抖间隔严谨化：序列执行中一律忽略新按键（gExecRunning），从根上杜绝「狂按打断滑动」\n   ——旧版只在执行开始记时，长滑动期间按新键会越过防抖去中断旧序列（滑动残缺根因）；\n   同时给未命中重放路径补 gInFakeTouch（0.4s 窗口内合成触摸不会再被二次拦截/反复重放）\n\n【怎么测】\n1. 设置→记录与映射：已录方案列表正确显示特征条数，不再全部显示「未录制」\n2. 方案页：右上角「排序」进入编辑态，按住最右侧手柄拖动调整动作顺序\n3. 新增滑动动作：默认速度显示 1000pt/s；参数页每个滑块下方有预设值，点一下直达\n4. 开启调试可视化按翻页器：命中时只看到注入点触，翻页器原始轨迹不再出现\n5. 狂按同一键：滑动序列执行完前新键被防抖忽略，不再出现滑动残缺/被掐断\n6. 设置页底部居中显示 PageTurner v1.0.43'
+          NOTES=$'PageTurner v'"${VERSION}"$'（roothide 直装）\n\n本次改了什么见 Tweak.xm 头部版本记录 / commit message。'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" --clobber
           else
-            gh release create "$TAG" "$DEB" --title "PageTurner v1.0.43" --notes "$NOTES"
+            gh release create "$TAG" "$DEB" --title "PageTurner v${VERSION}" --notes "$NOTES"
           fi
