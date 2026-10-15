@@ -1,5 +1,5 @@
 // ============================================================
-// PageTurner v1.0.53 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.54 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.49（状态栏修复）：插件可视化窗口（windowLevel 高于状态栏且永驻）会接管 iOS 状态栏
 //   样式，导致时间/信号电池颜色不再跟随 App → 覆盖窗口 VC 改为状态栏样式透传（跟随当前
@@ -356,7 +356,12 @@ static void PTWriteFileRaw(NSDictionary *cfg) {
 }
 
 static void PTLoadConfig(BOOL force) {
-    NSString *p = PTGlobalPlistPath();
+    // v1.0.54：配置路径缓存优先——gCfgPath 已确定且文件仍在,直接复用,
+    // 跳过 PTGlobalPlistPath 的 5 路径 fileExists 探测。AddEvent/SendEvent 每事件各调一次
+    // PTLoadConfig,原每次探测 5 次系统调用 + 5 个字符串分配(每事件约 10 次),现降为仅
+    // 1 次 fileExists;文件路径失效(如 JB 环境切换)时自动回退全探测重新定位。
+    NSString *p = (gCfgPath && [NSFileManager.defaultManager fileExistsAtPath:gCfgPath])
+        ? gCfgPath : PTGlobalPlistPath();
     if (!gCfgPath || ![gCfgPath isEqualToString:p]) {
         gCfgPath = p;
         PTLog(@"[配置] 实际读取路径=%@", p);
@@ -1480,7 +1485,9 @@ static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     }
     // v1.0.27 诊断：所有触摸会话 Began 打一行 sender（手指/翻页器都记），
     // 用于实测证明手指 sender ≠ 翻页器 sender（方案 A 安全前置验证）
-    if (event) {
+    // v1.0.54：守卫到 gDebugLogEnabled——默认日志开时仍记录(诊断用),关闭则连
+    // allTouches 都不 materialize,避免把同步文件 IO 无条件挂到每次手指落下的热路径上
+    if (gDebugLogEnabled && event) {
         for (UITouch *t in event.allTouches) {
             if (t.phase == UITouchPhaseBegan) {
                 CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
@@ -1551,7 +1558,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.53 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.54 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
