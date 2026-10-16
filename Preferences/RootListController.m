@@ -1,5 +1,13 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.53）
+// RootListController.m —— PageTurner 设置页（v1.0.55）
+//
+// v1.0.55（本次变更，与运行端同步）：
+//   1. 【滑动(手动)】录制器照搬 DirectVolumeTap 的滑动模式：UIPanGestureRecognizer 抓真实轨迹 +
+//      CADisplayLink 回放，更顺滑跟手；录制在设置页进程内完成（灰色不透明背景、无穿透），
+//      删除旧「跨进程手动录制」（recRequest/recResult 覆盖层那一套）。
+//   2. 统一全部轨迹：以调试可视化（PTDebugDot）轨迹为唯一基准——测试页/执行回放/调试可视化三处
+//      画法完全一致（绿折线 + 44px 绿点 + P 标记，lineWidth 4）。
+//   3. 调试日志：关闭「调试日志」开关时，隐藏「查看日志」入口且清空内存+文件日志（打开才有、关闭就清空）。
 //
 // v1.0.43（9 项改进，与运行端同步）：
 //   1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）
@@ -179,6 +187,14 @@
 - (void)reload;
 @end
 
+// v1.0.55：滑动(手动)录制器——照搬 DirectVolumeTap 的滑动模式（UIPanGestureRecognizer 抓轨迹），
+// 灰色不透明背景（系统设置页，无穿透）；落盘 @{x,y,t} 字典，与 Tweak.xm 的 PTFakeRecSwipeAsync 回放一致
+@interface PTRecSwipeVC : UIViewController
+@property (nonatomic, strong) NSArray *editPts;   // 重录时预载已有轨迹（字典数组）
+@property (nonatomic, copy) void (^onDone)(NSArray *pts);
+@property (nonatomic, copy) void (^onCancel)(void);
+@end
+
 @interface PTPlanVC : PSViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) NSString *planName;
 @property (nonatomic, strong) UILabel *nameLabel;
@@ -249,7 +265,8 @@
 @property (nonatomic, strong) UIView *trailDot;
 @property (nonatomic, strong) UILabel *trailLabel;
 - (void)appendLog:(NSString *)s;
-- (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase;
+// v1.0.55：以调试可视化同款画法绘制真实轨迹（绿折线 + 绿点 + P 标记），pts 为 @{x,y} 字典数组
+- (void)drawRealTrail:(NSArray *)pts;
 @end
 
 // ---------- 工具 ----------
@@ -369,6 +386,12 @@ static void SLogTrimFile(NSString *path) {
         }
     } @catch (NSException *e) {}
 }
+// v1.0.55：关闭调试日志时清空内存日志 + 文件日志（不残留；打开才有、关闭就清空）
+static void SLogClear(void) {
+    [sLogLines removeAllObjects];
+    NSString *p = sLogPath ?: SLogProbePath();
+    if (p) { @try { [[NSData data] writeToFile:p atomically:YES]; } @catch (NSException *e) {} }
+}
 static void SLog(NSString *fmt, ...) {
     SLogRefreshCfg();
     if (!sLogEnabled) return;   // v1.0.42：日志开关关=内存/文件都不记
@@ -439,6 +462,7 @@ static BOOL gTestInjecting = NO;      // 注入保护（防执行触摸再被本
 static UIView *sTestDot = nil;        // 测试页绿点视图
 static double sLastTestExec = 0;      // 测试防抖
 static __weak PTTestVC *sTestLogSink = nil;   // v1.0.28：测试页实时记录区（页面销毁即失效）
+static NSMutableArray *sSessPath = nil;       // v1.0.55：未命中/放行时记录的真实触摸路径（@{x,y} 字典）
 
 // v1.0.34：方案特征集合（新格式 features[] 数组；兼容旧格式单条 feature）
 static NSArray *PTFeaturesOfPlan(NSDictionary *p) {
@@ -556,14 +580,17 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
     if ([type isEqualToString:@"tap"]) {
         CGPoint p = CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]);
         PTTestTap(p, NO);
+        [sTestLogSink drawRealTrail:@[@{@"x": @(p.x), @"y": @(p.y)}]];   // v1.0.55：真实轨迹（单点=P 标记）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else if ([type isEqualToString:@"doubleTap"]) {
         CGPoint p = CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]);
         PTTestTap(p, YES);
+        [sTestLogSink drawRealTrail:@[@{@"x": @(p.x), @"y": @(p.y)}]];   // v1.0.55：真实轨迹（单点=P 标记）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else if ([type isEqualToString:@"swipe"]) {
         CGPoint from = CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]);
         CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
+        [sTestLogSink drawRealTrail:@[@{@"x": @(from.x), @"y": @(from.y)}, @{@"x": @(to.x), @"y": @(to.y)}]];   // v1.0.55：真实轨迹（与调试可视化同款）
         // v1.0.33：修测试区速度 bug——旧代码把 speed 当毫秒时长（固定 1 秒，与距离无关，
         // 短距离比运行端慢数倍）；现在与运行端统一：时长 = 距离/速度
         // v1.0.43：默认 1000pt/s 与运行端一致（旧动作缺 speed 字段兜底 1000）
@@ -633,6 +660,7 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         });
     } else if ([type isEqualToString:@"recSwipe"]) {
         // v1.0.52：测试区支持滑动(手动)回放——此前缺分支被 else 跳过，注入轨迹看不到
+        [sTestLogSink drawRealTrail:a[@"pts"]];   // v1.0.55：真实轨迹（与调试可视化同款）
         PTTestRecSwipeAsync(a[@"pts"], next);
     } else if ([type isEqualToString:@"tapManual"]) {
         NSArray *pts = a[@"pts"];
@@ -698,8 +726,8 @@ static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender, i
         SLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d（特征需先录制）", sender, phase, dir, dist, tapDx);
         [sTestLogSink appendLog:[NSString stringWithFormat:@"✗ 未命中（放行）：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d",
             sender, phase, dir, dist, tapDx]];
-        // v1.0.43：未命中/放行 → 画翻页器原始轨迹（App 实际会收到它，属于该显示的轨迹）
-        [sTestLogSink drawTrailWithDirection:dir dist:dist phase:phase];
+        // v1.0.55：未命中/放行 → 画真实触摸轨迹（与调试可视化同款），不再画固定锚点示意线
+        [sTestLogSink drawRealTrail:sSessPath];
     }
 }
 
@@ -742,6 +770,7 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                         sSessActive = YES; sSessDist = 0; sSessHasMove = NO; sSessFirstDir = 0;
                         sSessLast = p;
                         sSessStart = p;   // v1.0.36：记录会话起点
+                        sSessPath = [NSMutableArray arrayWithObject:@{@"x": @(p.x), @"y": @(p.y)}];  // v1.0.55：真实路径起点
                         break;
                     }
                     case UITouchPhaseMoved: {
@@ -754,8 +783,8 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                                     sSessHasMove = YES;
                                     sSessFirstDir = atan2(dy, dx) * 180.0 / M_PI;
                                 }
+                                if (seg >= 3.0f) { [sSessPath addObject:@{@"x": @(p.x), @"y": @(p.y)}]; sSessLast = p; }  // v1.0.55：3px 阈值降采样
                             }
-                            sSessLast = p;
                         }
                         break;
                     }
@@ -770,6 +799,7 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                                 double dxv = p.x - sSessStart.x;
                                 tapDx = (dxv > kTapDxThresh) ? 1 : (dxv < -kTapDxThresh ? -1 : 0);
                             }
+                            [sSessPath addObject:@{@"x": @(p.x), @"y": @(p.y)}];  // v1.0.55：真实路径终点
                             SLog(@"end: dist=%.1f dir=%.1f hasMove=%d → phase=%d tapDx=%d", sSessDist, sSessFirstDir, sSessHasMove, phase, tapDx);
                             if (sTestArmed) PTTestOnEnded(phase, dir, sSessDist, sCurSender, tapDx);
                             else SAppendSample(phase, dir, sSessDist, tapDx);
@@ -956,15 +986,18 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [logSw setProperty:@"总日志开关：开启后记录注入/命中/执行全过程——内存保留最近 200 条，文件（/var/mobile/Documents/PageTurner.log）循环保留 1000 条；关闭则完全无日志。设置页即时生效，目标 App 重启后生效。" forKey:@"staticText"];
         [specs addObject:logSw];
 
-        PSSpecifier *log = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
-            target:self set:nil get:nil detail:NSClassFromString(@"PTDebugLogVC")
-            cell:PSLinkCell edit:nil];
-        [log setProperty:@"查看并复制最近日志（内存日志，最近 200 条，100% 可见），发给开发者定位" forKey:@"staticText"];
-        [specs addObject:log];
+        // v1.0.55：调试日志查看入口仅在「调试日志」开关打开时显示；关闭则不显示该选项（且关闭时已在 setPreferenceValue 中清空日志）
+        if ([[PTRead() objectForKey:@"debugLogEnabled"] boolValue]) {
+            PSSpecifier *log = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
+                target:self set:nil get:nil detail:NSClassFromString(@"PTDebugLogVC")
+                cell:PSLinkCell edit:nil];
+            [log setProperty:@"查看并复制最近日志（内存日志，最近 200 条，100% 可见），发给开发者定位" forKey:@"staticText"];
+            [specs addObject:log];
+        }
 
         // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
         [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.53"
+        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.55"
             target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
         [specs addObject:ver];
 
@@ -998,6 +1031,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSMutableDictionary *cfg = PTRead();
     cfg[[spec propertyForKey:@"key"]] = value;
     PTWrite(cfg);
+    // v1.0.55：关闭调试日志开关 → 清空内存+文件日志（打开才有、关闭就清空）；查看入口由 specifiers 条件隐藏
+    if ([[spec propertyForKey:@"key"] isEqualToString:@"debugLogEnabled"] && ![value boolValue]) {
+        SLogClear();
+    }
     [self reloadSpecifiers];
 }
 
@@ -1453,10 +1490,22 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             [self presentViewController:al animated:YES completion:nil];
             return;
         }
-        // v1.0.53：旧配置残留的手动动作（滑动(手动)等）再次点击 → 按对应普通动作表单编辑，
+        // v1.0.53：旧配置残留的手动动作（点击(手动)/双击(手动)等）再次点击 → 按对应普通动作表单编辑，
         // 保存后即转为普通动作（手动录制已从 deb 移除）
-        if ([type isEqualToString:@"recSwipe"]) type = @"swipe";
-        else if ([type isEqualToString:@"tapManual"]) type = @"tap";
+        // v1.0.55：滑动(手动)再次点击 → 弹 PTRecSwipeVC 重录（预载已有轨迹），不再退化成普通【滑动】
+        if ([type isEqualToString:@"recSwipe"]) {
+            PTRecSwipeVC *rvc = [PTRecSwipeVC new];
+            rvc.modalPresentationStyle = UIModalPresentationFullScreen;
+            rvc.editPts = act[@"pts"];
+            __weak typeof(self) wself = self;
+            NSInteger ridx = ip.row;
+            rvc.onDone = ^(NSArray *pts) {
+                wself.actions[ridx] = @{@"type": @"recSwipe", @"pts": pts};
+                [wself saveActions];
+            };
+            [self presentViewController:rvc animated:YES completion:nil];
+            return;
+        } else if ([type isEqualToString:@"tapManual"]) type = @"tap";
         else if ([type isEqualToString:@"doubleTapManual"]) type = @"doubleTap";
         if (![type isEqualToString:@"delay"]) {
             PTActionVC *vc = [PTActionVC new];
@@ -1540,7 +1589,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         message:@"选择要添加的动作" preferredStyle:UIAlertControllerStyleActionSheet];
     NSArray *items = @[
         @[@"点击", @"tap"], @[@"双击", @"doubleTap"], @[@"滑动", @"swipe"],
-        @[@"滑动(手动)", @"recSwipe"],   // v1.0.53：仅保留滑动(手动)，点击(手动)/双击(手动)已删；滑动(手动)配置页同普通【滑动】，不再跨进程去番茄小说录制
+        @[@"滑动(手动)", @"recSwipe"],   // v1.0.55：滑动(手动)改为灰色 PTRecSwipeVC 录制（照搬 DVT pan 手势，无穿透）；点击(手动)/双击(手动)已删
         @[@"延迟", @"delay"]];   // v1.0.48：音量+/音量-/静音切换动作类型已删除
     for (NSArray *it in items) {
         [al addAction:[UIAlertAction actionWithTitle:it[0] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
@@ -1553,13 +1602,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 - (void)configAction:(NSString *)type {
     if ([type isEqualToString:@"recSwipe"]) {
-        // v1.0.53：滑动(手动)配置页与普通【滑动】相同——设置页直接填起点/终点/速度等，
-        // 不再跨进程去番茄小说弹半透明层实地录制（deb 背景是设置页，无实地录制条件）
-        PTActionVC *vc = [PTActionVC new];
-        vc.actionType = @"swipe";
-        vc.planName = self.planName;
-        vc.editIndex = -1;
-        [self.navigationController pushViewController:vc animated:YES];
+        // v1.0.55：滑动(手动)——照搬 DirectVolumeTap 的 pan 手势录制（灰色 PTRecSwipeVC，无穿透）
+        PTRecSwipeVC *rvc = [PTRecSwipeVC new];
+        rvc.modalPresentationStyle = UIModalPresentationFullScreen;
+        __weak typeof(self) wself = self;
+        rvc.onDone = ^(NSArray *pts) {
+            [wself.actions addObject:@{@"type": @"recSwipe", @"pts": pts}];
+            [wself saveActions];
+        };
+        [self presentViewController:rvc animated:YES completion:nil];
     } else if ([type isEqualToString:@"delay"]) {
         UIAlertController *al = [UIAlertController alertControllerWithTitle:@"延迟"
             message:@"输入延迟毫秒数（如 500 = 0.5 秒）" preferredStyle:UIAlertControllerStyleAlert];
@@ -2697,21 +2748,43 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     [self.logView scrollRangeToVisible:r];
 }
 
-// v1.0.29：调试可视化同款轨迹——起点绿点 + 方向线 + 终点 P 标记（点击只有 P 标记）
-- (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase {
+// v1.0.55：以调试可视化同款画法绘制真实轨迹（绿折线 lineWidth4 + 44px 绿点 + P 标记）
+// pts 为 @{x,y} 字典数组（真实触摸/注入路径），与 Tweak.xm 的 PTDebugDot 视觉一致
+- (void)drawRealTrail:(NSArray *)pts {
     [self.trailLayer removeFromSuperlayer];
     [self.trailDot removeFromSuperview];
     [self.trailLabel removeFromSuperview];
-    CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-    CGPoint start = CGPointMake(w * 0.5, h * 0.38);   // 避开上方提示/下方记录区
-    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
-    dot.layer.cornerRadius = 18;
-    dot.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.3];
-    dot.layer.borderWidth = 2;
+    if (!pts.count) return;
+    // 绿折线（与 PTDebugDot 同款：lineWidth 4、圆角）
+    if (pts.count >= 2) {
+        UIBezierPath *bpath = [UIBezierPath new];
+        for (NSUInteger i = 0; i < pts.count; i++) {
+            NSDictionary *p = pts[i];
+            CGPoint pt = CGPointMake([p[@"x"] doubleValue], [p[@"y"] doubleValue]);
+            if (i == 0) [bpath moveToPoint:pt]; else [bpath addLineToPoint:pt];
+        }
+        CAShapeLayer *l = [CAShapeLayer layer];
+        l.path = bpath.CGPath;
+        l.strokeColor = [UIColor systemGreenColor].CGColor;
+        l.fillColor = [UIColor clearColor].CGColor;
+        l.lineWidth = 4;
+        l.lineCap = kCALineCapRound;
+        l.lineJoin = kCALineJoinRound;
+        [self.view.layer addSublayer:l];
+        self.trailLayer = l;
+    }
+    NSDictionary *last = pts.lastObject;
+    CGPoint lp = CGPointMake([last[@"x"] doubleValue], [last[@"y"] doubleValue]);
+    // 44px 绿点（与 PTDebugDot 同款）
+    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
+    dot.layer.cornerRadius = 22;
+    dot.backgroundColor = [[UIColor systemGreenColor] colorWithAlphaComponent:0.35];
+    dot.layer.borderWidth = 3;
     dot.layer.borderColor = [UIColor systemGreenColor].CGColor;
-    dot.center = start;
+    dot.center = lp;
     [self.view addSubview:dot];
     self.trailDot = dot;
+    // P 标记（终点）
     UILabel *lb = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
     lb.text = @"P";
     lb.textAlignment = NSTextAlignmentCenter;
@@ -2720,25 +2793,121 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     lb.backgroundColor = [UIColor systemGreenColor];
     lb.layer.cornerRadius = 18;
     lb.clipsToBounds = YES;
-    if (phase == 1) {
-        double rad = dir * M_PI / 180.0;
-        CGPoint end = CGPointMake(start.x + cos(rad) * dist, start.y + sin(rad) * dist);
-        CAShapeLayer *l = [CAShapeLayer layer];
-        CGMutablePathRef path = CGPathCreateMutable();
-        CGPathMoveToPoint(path, NULL, start.x, start.y);
-        CGPathAddLineToPoint(path, NULL, end.x, end.y);
-        l.path = path;
-        CGPathRelease(path);
-        l.strokeColor = [UIColor systemGreenColor].CGColor;
-        l.fillColor = [UIColor clearColor].CGColor;
-        l.lineWidth = 3;
-        [self.view.layer addSublayer:l];
-        self.trailLayer = l;
-        lb.center = end;
-    } else {
-        lb.center = start;
-    }
+    lb.center = lp;
     [self.view addSubview:lb];
     self.trailLabel = lb;
+}
+@end
+
+// ============================================================
+// v1.0.55：滑动(手动)录制器（照搬 DirectVolumeTap 滑动模式）
+// UIPanGestureRecognizer 抓轨迹（3px 阈值降采样）→ 灰色不透明背景（系统设置页，无穿透）→
+// 落盘 @{x,y,t} 字典（与 Tweak.xm PTFakeRecSwipeAsync 回放一致）。
+// ============================================================
+@implementation PTRecSwipeVC {
+    NSMutableArray *_pts;            // 当前正在录的 @{x,y,t}（对照 DVT 的 currentRecording）
+    CFAbsoluteTime _t0;
+    CAShapeLayer *_trail;
+    NSMutableArray<CAShapeLayer *> *_layers;
+}
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];  // 灰色不透明（无穿透）
+    _layers = [NSMutableArray array];
+    _pts = [NSMutableArray array];
+
+    CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
+    // 提示
+    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(20, 90, w - 40, 80)];
+    tip.text = @"滑动(手动)：在灰色区域用手指滑一道，松手即录完。\n完成 = 保存到本方案，取消 = 丢弃。";
+    tip.textColor = [UIColor labelColor];
+    tip.textAlignment = NSTextAlignmentCenter;
+    tip.numberOfLines = 0;
+    tip.font = [UIFont boldSystemFontOfSize:15];
+    [self.view addSubview:tip];
+
+    // 取消 / 完成
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+    cancel.frame = CGRectMake(20, h - 90, 120, 48);
+    [cancel setTitle:@"取消" forState:UIControlStateNormal];
+    [cancel setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    cancel.backgroundColor = [UIColor systemOrangeColor];
+    cancel.layer.cornerRadius = 10;
+    [cancel addTarget:self action:@selector(onCancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:cancel];
+
+    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
+    done.frame = CGRectMake(w - 150, h - 90, 130, 48);
+    [done setTitle:@"完成" forState:UIControlStateNormal];
+    [done setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    done.backgroundColor = [UIColor systemGreenColor];
+    done.layer.cornerRadius = 10;
+    [done addTarget:self action:@selector(onDoneTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:done];
+
+    // 轨迹层（蓝线，与 DVT 录制中同色系）
+    _trail = [CAShapeLayer layer];
+    _trail.strokeColor = [UIColor systemBlueColor].CGColor;
+    _trail.fillColor = [UIColor clearColor].CGColor;
+    _trail.lineWidth = 6;
+    _trail.lineCap = kCALineCapRound;
+    _trail.lineJoin = kCALineJoinRound;
+    [self.view.layer addSublayer:_trail];
+
+    // 重录：预载已有轨迹
+    if (self.editPts.count) { _pts = [NSMutableArray arrayWithArray:self.editPts]; [self drawTrail]; }
+
+    // pan 手势录制
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
+    [self.view addGestureRecognizer:pan];
+}
+
+- (void)onPan:(UIPanGestureRecognizer *)pan {
+    CGPoint loc = [pan locationInView:self.view];   // 全屏模态，视图坐标 = 窗口坐标（回放命中目标 App 同点）
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        _pts = [NSMutableArray array];
+        _t0 = CFAbsoluteTimeGetCurrent();
+        [_pts addObject:@{@"x": @(loc.x), @"y": @(loc.y), @"t": @0}];
+    } else if (pan.state == UIGestureRecognizerStateChanged) {
+        NSDictionary *last = _pts.lastObject;
+        CGPoint lp = CGPointMake([last[@"x"] doubleValue], [last[@"y"] doubleValue]);
+        if (hypot(loc.x - lp.x, loc.y - lp.y) >= 3.0f) {   // 3px 阈值降采样（照搬 DVT）
+            double tms = (CFAbsoluteTimeGetCurrent() - _t0) * 1000.0;
+            [_pts addObject:@{@"x": @(loc.x), @"y": @(loc.y), @"t": @(tms)}];
+            [self drawTrail];
+        }
+    } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
+        if (_pts.count >= 2) [self drawTrail];
+    }
+}
+
+- (void)drawTrail {
+    for (CALayer *l in _layers) [l removeFromSuperlayer];
+    [_layers removeAllObjects];
+    if (_pts.count < 2) return;
+    UIBezierPath *path = [UIBezierPath new];
+    for (NSUInteger i = 0; i < _pts.count; i++) {
+        NSDictionary *p = _pts[i];
+        CGPoint pt = CGPointMake([p[@"x"] doubleValue], [p[@"y"] doubleValue]);
+        if (i == 0) [path moveToPoint:pt]; else [path addLineToPoint:pt];
+    }
+    _trail.path = path.CGPath;
+}
+
+- (void)onDoneTapped {
+    if (_pts.count < 2) {
+        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"还没录到"
+            message:@"请在灰色区域用手指滑一道" preferredStyle:UIAlertControllerStyleAlert];
+        [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:al animated:YES completion:nil];
+        return;
+    }
+    if (self.onDone) self.onDone([_pts copy]);
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)onCancelTapped {
+    if (self.onCancel) self.onCancel();
+    [self dismissViewControllerAnimated:YES completion:nil];
 }
 @end

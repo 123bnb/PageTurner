@@ -1,5 +1,12 @@
 // ============================================================
-// PageTurner v1.0.54 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.55 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.55（本次变更）：
+//   1. 【滑动(手动)】回放照搬 DirectVolumeTap 的 DVTFakeSwipe：CADisplayLink + 二分时间插值，
+//      顺滑跟手、对齐 VSync；删除旧跨进程手动录制链路（recRequest/recResult 覆盖层那一套），
+//      录制改由设置页进程内灰色背景录制器完成。
+//   2. 统一全部轨迹：以调试可视化轨迹为唯一基准（lineWidth 4 绿折线 + 绿点 + P 标记）。
+//   3. 调试日志关闭时清空（由设置页 setPreferenceValue 处理）。
 //
 // v1.0.49（状态栏修复）：插件可视化窗口（windowLevel 高于状态栏且永驻）会接管 iOS 状态栏
 //   样式，导致时间/信号电池颜色不再跟随 App → 覆盖窗口 VC 改为状态栏样式透传（跟随当前
@@ -277,16 +284,6 @@ static BOOL gDebugDots = NO;                // v1.0.23：调试可视化（Troll
 static BOOL gProbeEnabled = NO;             // v1.0.29：探针独立开关（探针弹窗+提醒条）
 static BOOL gCrashTest = NO;                // v1.0.24：注入测试（探针字段，照抄 VKT）
 static void PTDebugDestroyOverlay(void);    // v1.0.51：可视化覆盖层销毁（前向声明）
-// v1.0.51：手动录制（前向声明，实现动作执行段）
-static void PTRecStart(NSString *mode, double topY, void (^done)(NSArray *pts));
-static void PTRecStop(void);
-static NSArray *PTRecCurrentPoints(void);
-static void PTRecHandleRequest(void);
-static void PTRecShowOverlay(NSString *mode);
-static void PTRecMigrateOverlay(void);
-static void PTRecDone(void);
-static void PTRecCancel(void);
-static void PTRecTick(void);
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
 static NSString *gCfgPath = nil;            // 实际读到的 plist 路径（诊断）
@@ -986,277 +983,81 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
 }
 
 // ============================================================
-// v1.0.51：手动录制（滑动(手动)/点击(手动)/双击(手动)）
-// 跨进程：设置页写 recRequest{ts,mode} → 注入 App sendEvent 检测到 → 弹覆盖层
-// （keyWindow 上半透明，触摸穿透实地操作）→ 完成写 recResult{type,pts} → 设置页轮询
+// v1.0.55：滑动(手动)回放（CADisplayLink 驱动，照搬 DirectVolumeTap 的 DVTFakeSwipe）
+// 每帧对齐 VSync，按真实经过时间插值出坐标注入一次 Moved，1:1 还原真实手指流畅感。
+// 录制在设置页进程（灰色 PTRecView）完成，pts 为 @{x,y,t} 字典（与设置页/测试一致）。
 // ============================================================
-static BOOL gRecArmed = NO;
-static NSString *gRecMode = nil;          // recSwipe / tapManual / doubleTapManual
-static double gRecTopY = 0;
-static NSMutableArray *gRecPts = nil;
-static double gRecT0 = 0;
-static BOOL gRecActive = NO;
-static int gRecTaps = 0;
-static void (^gRecDone)(NSArray *) = nil;
+@interface PTRecSwipeTickProxy : NSObject
+@property (nonatomic, copy) void (^tick)(void);
+- (void)onTick:(CADisplayLink *)link;
+@end
+@implementation PTRecSwipeTickProxy
+- (void)onTick:(CADisplayLink *)link { if (_tick) _tick(); }
+@end
 
-static void PTRecStart(NSString *mode, double topY, void (^done)(NSArray *pts)) {
-    gRecMode = mode ?: @"recSwipe";
-    gRecTopY = topY;
-    gRecDone = done;
-    gRecPts = nil;
-    gRecActive = NO;
-    gRecTaps = 0;
-    gRecArmed = YES;
-}
-static void PTRecStop(void) {
-    gRecArmed = NO;
-    gRecActive = NO;
-    gRecTaps = 0;
-    gRecPts = nil;
-    gRecDone = nil;
-    gRecMode = nil;
-}
-static NSArray *PTRecCurrentPoints(void) {
-    if (!gRecArmed || !gRecPts) return nil;
-    return [NSArray arrayWithArray:gRecPts];
-}
-static void PTRecFinishIfDone(void) {
-    if (!gRecArmed || !gRecActive || !gRecPts) return;
-    int need = [gRecMode isEqualToString:@"doubleTapManual"] ? 2 : 1;
-    if (gRecTaps >= need) {
-        gRecActive = NO;
-        NSArray *pts = gRecPts;
-        gRecPts = nil;
-        if (gRecDone) { gRecDone(pts); }
+// 按时间线性插值取坐标（二分定位区间）
+static CGPoint PTRecSwipeInterp(NSArray *xs, NSArray *ys, NSArray *ts, double targetT) {
+    NSUInteger m = [ts count];
+    if (m == 0) return CGPointZero;
+    double t0 = [ts[0] doubleValue], tEnd = [ts[m-1] doubleValue];
+    if (targetT <= t0)   return CGPointMake([xs[0] doubleValue], [ys[0] doubleValue]);
+    if (targetT >= tEnd) return CGPointMake([xs[m-1] doubleValue], [ys[m-1] doubleValue]);
+    NSUInteger lo = 0, hi = m - 1;
+    while (hi - lo > 1) {
+        NSUInteger mid = (lo + hi) / 2;
+        if ([ts[mid] doubleValue] <= targetT) lo = mid; else hi = mid;
     }
+    double ta = [ts[lo] doubleValue], tb = [ts[hi] doubleValue];
+    double fa = [xs[lo] doubleValue], fb = [xs[hi] doubleValue];
+    double ga = [ys[lo] doubleValue], gb = [ys[hi] doubleValue];
+    double f = (tb - ta) > 1e-6 ? (targetT - ta) / (tb - ta) : 0.0;
+    return CGPointMake(fa + (fb - fa) * f, ga + (gb - ga) * f);
 }
 
-// v1.0.51：滑动(手动)回放——按录制轨迹逐点注入（保持录制时间间隔，最短 8ms 防风暴）
 static void PTFakeRecSwipeAsync(NSArray *pts, int token, void (^done)(void)) {
     if (!pts.count) { if (done) done(); return; }
+    // 预解析 @{x,y,t} → 分离数组（避免每帧反复解包）
+    NSMutableArray *xs = [NSMutableArray array], *ys = [NSMutableArray array], *ts = [NSMutableArray array];
+    for (NSDictionary *p in pts) {
+        [xs addObject:@([p[@"x"] doubleValue])];
+        [ys addObject:@([p[@"y"] doubleValue])];
+        [ts addObject:@([p[@"t"] doubleValue])];
+    }
+    NSUInteger m = ts.count;
+    if (m < 2) { if (done) done(); return; }
+    double t0 = [ts[0] doubleValue];
+    double totalMs = [ts[m-1] doubleValue] - t0;
+    if (totalMs <= 0) totalMs = 1.0;
+
     __block NSInteger pid = -1;
-    __block int idx = 0;
-    __block void (^step)(void);
-    step = ^(void) {
-        if (token != gExecToken) { if (done) done(); return; }
-        if (idx >= (int)pts.count) { if (done) done(); return; }
-        NSDictionary *pt = pts[idx];
-        CGPoint p = CGPointMake([pt[@"x"] doubleValue], [pt[@"y"] doubleValue]);
-        UITouchPhase ph = (idx == 0) ? UITouchPhaseBegan
-                        : ((idx == (int)pts.count - 1) ? UITouchPhaseEnded : UITouchPhaseMoved);
+    __block BOOL ended = NO;
+    __block CFAbsoluteTime startT = CFAbsoluteTimeGetCurrent();
+    PTRecSwipeTickProxy *proxy = [PTRecSwipeTickProxy new];
+    CADisplayLink *link = [CADisplayLink displayLinkWithTarget:proxy selector:@selector(onTick:)];
+    [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    proxy.tick = ^{
+        if (token != gExecToken) { [link invalidate]; if (done) done(); return; }
+        double elapsedMs = (CFAbsoluteTimeGetCurrent() - startT) * 1000.0;
+        CGPoint cur = PTRecSwipeInterp(xs, ys, ts, t0 + elapsedMs);   // 1:1 还原（无速率调节）
         gInFakeTouch = YES;
-        if (idx == 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:ph];
-        else [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:ph];
+        if (pid < 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:cur withTouchPhase:UITouchPhaseBegan];
+        else         [PTFakeMetaTouch fakeTouchId:pid AtPoint:cur withTouchPhase:UITouchPhaseMoved];
         gInFakeTouch = NO;
-        idx++;
-        if (idx >= (int)pts.count) { if (done) done(); return; }
-        double waitMs = [pts[idx][@"t"] doubleValue] - [pt[@"t"] doubleValue];
-        if (waitMs < 8) waitMs = 8;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(waitMs * NSEC_PER_SEC / 1000)),
-                       dispatch_get_main_queue(), step);
+        if (elapsedMs >= totalMs && !ended) {
+            CGPoint end = CGPointMake([xs[m-1] doubleValue], [ys[m-1] doubleValue]);
+            gInFakeTouch = YES;
+            [PTFakeMetaTouch fakeTouchId:pid AtPoint:end withTouchPhase:UITouchPhaseEnded];
+            gInFakeTouch = NO;
+            ended = YES;
+            [link invalidate];
+            if (done) done();
+        }
     };
-    step();
 }
 
-// ---------- 跨进程录制覆盖层 ----------
-static UIView *gRecOverlay = nil;
-static UIButton *gRecDoneBtn = nil;
-static UIButton *gRecCancelBtn = nil;
-static UILabel *gRecTip = nil;
-static CAShapeLayer *gRecTrailLayer = nil;
-static NSTimer *gRecTimer = nil;
-static int gRecDrawnCount = -1;
-static NSString *gRecReqTs = nil;      // 已处理过的 recRequest ts
-static NSArray *gRecLastPts = nil;
-static BOOL gRecPendingReq = NO;       // 本次会话已接请求（取消=清请求）
-
-@interface PTRecBtnT : NSObject
-@end
-@implementation PTRecBtnT
-- (void)doneTapped { PTRecDone(); }
-- (void)cancelTapped { PTRecCancel(); }
-- (void)overlayTick { PTRecTick(); }
-@end
-static PTRecBtnT *gRecBtnT = nil;
-
-static NSDictionary *PTRecReq(void) {
-    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:kPrefPath];
-    return cfg[@"recRequest"];
-}
-static void PTRecReqClear(void) {
-    NSMutableDictionary *cfg = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefPath] ?: [NSMutableDictionary dictionary];
-    [cfg removeObjectForKey:@"recRequest"];
-    PTWriteFileRaw(cfg);
-}
-static void PTRecResultWrite(NSString *mode, NSArray *pts) {
-    NSMutableDictionary *cfg = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefPath] ?: [NSMutableDictionary dictionary];
-    cfg[@"recResult"] = @{ @"type": mode ?: @"recSwipe", @"pts": pts ?: @[] };
-    [cfg removeObjectForKey:@"recRequest"];
-    PTWriteFileRaw(cfg);
-}
-static void PTRecResultClear(void) {
-    NSMutableDictionary *cfg = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefPath] ?: [NSMutableDictionary dictionary];
-    [cfg removeObjectForKey:@"recResult"];
-    PTWriteFileRaw(cfg);
-}
-
-static void PTRecTick(void) {
-    NSArray *pts = PTRecCurrentPoints();
-    if (!pts) return;
-    if ((int)pts.count == gRecDrawnCount) return;
-    gRecDrawnCount = (int)pts.count;
-    CGMutablePathRef path = CGPathCreateMutable();
-    for (int i = 0; i < (int)pts.count; i++) {
-        NSDictionary *pt = pts[i];
-        CGPoint p = CGPointMake([pt[@"x"] doubleValue], [pt[@"y"] doubleValue]);
-        if (i == 0) CGPathMoveToPoint(path, NULL, p.x, p.y);
-        else CGPathAddLineToPoint(path, NULL, p.x, p.y);
-    }
-    gRecTrailLayer.path = path;
-    CGPathRelease(path);
-}
-
-static void PTRecHideOverlay(void) {
-    [gRecTimer invalidate]; gRecTimer = nil;
-    PTRecStop();
-    [gRecOverlay removeFromSuperview];
-    gRecOverlay = nil;
-    gRecDoneBtn = nil; gRecCancelBtn = nil; gRecTip = nil;
-    gRecTrailLayer = nil;
-    gRecLastPts = nil;
-    gRecDrawnCount = -1;
-    gRecPendingReq = NO;
-}
-
-static void PTRecDone(void) {
-    if (!gRecLastPts.count) {
-        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"还没录到"
-            message:@"请在按钮行下方的区域实地操作一次（滑动/点击）" preferredStyle:UIAlertControllerStyleAlert];
-        [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        UIViewController *top = [UIApplication sharedApplication].keyWindow.rootViewController;
-        if (top) [top presentViewController:al animated:YES completion:nil];
-        return;
-    }
-    PTRecResultWrite(gRecMode, gRecLastPts);
-    PTLog(@"[录制] 完成：%@ %lu 点 → recResult", gRecMode, (unsigned long)gRecLastPts.count);
-    PTRecHideOverlay();
-}
-static void PTRecCancel(void) {
-    PTRecReqClear();
-    PTLog(@"[录制] 取消");
-    PTRecHideOverlay();
-}
-
-// 打开录制覆盖层（keyWindow 上，半透明，触摸穿透实地操作）
-static void PTRecShowOverlay(NSString *mode) {
-    if (gRecOverlay) PTRecHideOverlay();
-    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
-    if (!kw) return;
-    if (!gRecBtnT) gRecBtnT = [PTRecBtnT new];
-    gRecMode = mode ?: @"recSwipe";
-    gRecLastPts = nil;
-
-    UIView *ov = [[UIView alloc] initWithFrame:kw.bounds];
-    ov.userInteractionEnabled = NO;   // 关键：整体不拦截触摸 → 穿透到 App 实地操作
-    ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.18];
-    [kw addSubview:ov];
-    gRecOverlay = ov;
-
-    CGFloat w = kw.bounds.size.width;
-    CGFloat h = kw.bounds.size.height;
-    UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 56)];
-    bar.userInteractionEnabled = YES;
-    bar.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.78];
-    [ov addSubview:bar];
-
-    gRecCancelBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    gRecCancelBtn.frame = CGRectMake(8, 10, 60, 36);
-    [gRecCancelBtn setTitle:@"取消" forState:UIControlStateNormal];
-    [gRecCancelBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [gRecCancelBtn addTarget:gRecBtnT action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:gRecCancelBtn];
-
-    gRecDoneBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    gRecDoneBtn.frame = CGRectMake(w - 68, 10, 60, 36);
-    [gRecDoneBtn setTitle:@"完成" forState:UIControlStateNormal];
-    [gRecDoneBtn.titleLabel setFont:[UIFont boldSystemFontOfSize:16]];
-    [gRecDoneBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [gRecDoneBtn addTarget:gRecBtnT action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:gRecDoneBtn];
-
-    UILabel *barTip = [[UILabel alloc] initWithFrame:CGRectMake(76, 12, w - 152, 32)];
-    barTip.text = @"按钮行以下为录制区，实地滑动/点击即录制";
-    barTip.font = [UIFont systemFontOfSize:12];
-    barTip.textColor = [UIColor whiteColor];
-    barTip.textAlignment = NSTextAlignmentCenter;
-    [bar addSubview:barTip];
-
-    CGFloat tw = w - 56, th = 150;
-    gRecTip = [[UILabel alloc] initWithFrame:CGRectMake((w - tw) / 2.0, (h - th) / 2.0, tw, th)];
-    gRecTip.numberOfLines = 0;
-    gRecTip.textAlignment = NSTextAlignmentCenter;
-    gRecTip.font = [UIFont systemFontOfSize:16];
-    gRecTip.textColor = [UIColor whiteColor];
-    gRecTip.userInteractionEnabled = NO;
-    gRecTip.layer.cornerRadius = 12;
-    gRecTip.layer.masksToBounds = YES;
-    gRecTip.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
-    NSString *modeName = [gRecMode isEqualToString:@"tapManual"] ? @"点击(手动)"
-                        : ([gRecMode isEqualToString:@"doubleTapManual"] ? @"双击(手动)" : @"滑动(手动)");
-    gRecTip.text = [NSString stringWithFormat:@"%@\n在按钮行下方实地操作：\n滑动 = 录滑动轨迹\n点击/双击 = 录点击位置", modeName];
-    [ov addSubview:gRecTip];
-
-    gRecTrailLayer = [CAShapeLayer layer];
-    gRecTrailLayer.strokeColor = [UIColor systemBlueColor].CGColor;
-    gRecTrailLayer.fillColor = [UIColor clearColor].CGColor;
-    gRecTrailLayer.lineWidth = 3;
-    gRecTrailLayer.lineJoin = kCALineJoinRound;
-    [ov.layer addSublayer:gRecTrailLayer];
-
-    gRecDrawnCount = -1;
-    __weak __block UIView *wov = ov;
-    PTRecStart(gRecMode, 56.0, ^(NSArray *pts) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (!wov || !gRecOverlay) return;
-            gRecLastPts = pts;
-            gRecTip.text = [NSString stringWithFormat:@"%@\n已录 %lu 点 ✓\n可重录，完成后点「完成」",
-                modeName, (unsigned long)pts.count];
-        });
-    });
-    gRecTimer = [NSTimer scheduledTimerWithTimeInterval:0.05 target:gRecBtnT
-        selector:@selector(overlayTick) userInfo:nil repeats:YES];
-    [[NSRunLoop mainRunLoop] addTimer:gRecTimer forMode:UITrackingRunLoopMode];
-    gRecPendingReq = YES;
-    PTLog(@"[录制] 覆盖层已开（%@），实地滑动/点击即录制", gRecMode);
-}
-
-// 迁移覆盖层到当前 keyWindow（App 切窗口）
-static void PTRecMigrateOverlay(void) {
-    if (!gRecOverlay) return;
-    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
-    if (!kw) return;
-    if (gRecOverlay.superview == kw) return;
-    gRecOverlay.frame = kw.bounds;
-    [kw addSubview:gRecOverlay];
-}
-
-// sendEvent 里调用：检测设置页的 recRequest → 弹覆盖层（0.5s 节流，避免每事件读 plist）
-static double gRecReqLastCheck = 0;
-static void PTRecHandleRequest(void) {
-    double now = PTNow();
-    if (now - gRecReqLastCheck < 0.5) {
-        if (gRecOverlay) PTRecMigrateOverlay();
-        return;
-    }
-    gRecReqLastCheck = now;
-    if (gRecOverlay) { PTRecMigrateOverlay(); return; }
-    NSDictionary *req = PTRecReq();
-    if (!req) return;
-    NSString *ts = [NSString stringWithFormat:@"%@", req[@"ts"] ?: @""];
-    if ([ts isEqualToString:gRecReqTs]) return;
-    gRecReqTs = ts;
-    PTRecShowOverlay(req[@"mode"] ?: @"recSwipe");
-}
+// v1.0.55：已删除「跨进程手动录制」（设置页写 recRequest → 注入 App 弹覆盖层那一套）。
+// 录制改在设置页进程内用灰色 PTRecView 完成（见 Preferences/RootListController.m），
+// 运行时真实轨迹回放见上方 PTFakeRecSwipeAsync。
 
 // 执行单条动作 → 完成后 next()
 static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
@@ -1386,80 +1187,8 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
 static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
-    // v1.0.53：跨进程手动录制已整体停用（deb 背景是设置页，无实地录制条件）——
-    // 不再检测 recRequest，不再弹半透明覆盖层；gRecArmed 采集块随之休眠（无触发源）
-    // v1.0.51：手动录制采集（覆盖层打开时，手指在录制区（按钮行往下）的真实触摸）
-    if (gRecArmed && event && !gInFakeTouch) {
-        NSSet *touches = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
-        UITouch *t = [touches anyObject];
-        if (t) {
-            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
-            BOOL isTapMode = [gRecMode isEqualToString:@"tapManual"] || [gRecMode isEqualToString:@"doubleTapManual"];
-            switch (t.phase) {
-                case UITouchPhaseBegan: {
-                    if (gRecActive) break;
-                    if (p.y >= gRecTopY) {
-                        if (!gRecPts) { gRecPts = [NSMutableArray array]; gRecT0 = CACurrentMediaTime(); }
-                        gRecActive = YES;
-                        if (isTapMode) {
-                            double tms = (CACurrentMediaTime() - gRecT0) * 1000.0;
-                            [gRecPts addObject:@{@"x": @(p.x), @"y": @(p.y), @"t": @(tms)}];
-                            gRecTaps++;
-                            NSMutableArray *curPts = gRecPts;
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                                           dispatch_get_main_queue(), ^{
-                                if (gRecArmed && gRecActive && gRecPts == curPts) {
-                                    gRecActive = NO;
-                                    NSArray *pts = gRecPts;
-                                    gRecPts = nil;
-                                    gRecTaps = 0;
-                                    if (gRecDone) { gRecDone(pts); }
-                                }
-                            });
-                        } else {
-                            [gRecPts addObject:@{@"x": @(p.x), @"y": @(p.y), @"t": @(0)}];
-                            NSMutableArray *curPts = gRecPts;
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                                           dispatch_get_main_queue(), ^{
-                                if (gRecActive && gRecPts == curPts) {
-                                    gRecActive = NO;
-                                    NSArray *pts = gRecPts;
-                                    gRecPts = nil;
-                                    if (gRecDone) { gRecDone(pts); }
-                                }
-                            });
-                        }
-                    } else {
-                        gRecActive = NO;
-                    }
-                    break;
-                }
-                case UITouchPhaseMoved: {
-                    if (gRecActive && gRecPts && !isTapMode) {
-                        double tms = (CACurrentMediaTime() - gRecT0) * 1000.0;
-                        [gRecPts addObject:@{@"x": @(p.x), @"y": @(p.y), @"t": @(tms)}];
-                    }
-                    break;
-                }
-                case UITouchPhaseEnded:
-                case UITouchPhaseCancelled: {
-                    if (gRecActive && gRecPts) {
-                        if (isTapMode) {
-                            gRecActive = NO;
-                            PTRecFinishIfDone();
-                        } else {
-                            gRecActive = NO;
-                            NSArray *pts = gRecPts;
-                            gRecPts = nil;
-                            if (gRecDone) { gRecDone(pts); }
-                        }
-                    }
-                    break;
-                }
-                default: break;
-            }
-        }
-    }
+    // v1.0.55：跨进程手动录制采集块已删除（录制改在设置页进程内 PTRecView 完成，
+    // 不再在 sendEvent 抓真实触摸；运行时回放见 PTFakeRecSwipeAsync）。
     // v1.0.32：窗口/会话判断始终优先（含映射执行中）——
     // 翻页器按键（已学 sender）无论是否执行中，一律拦截整段吞：执行中按键会命中→
     // 防抖内忽略 / 防抖外中断旧序列重启新序列，绝不放行原始滑动（根除双动作）；
@@ -1558,7 +1287,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.54 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.55 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
