@@ -167,20 +167,17 @@ static const double kConverge = 60.0;
 - (void)closeTapped { PTDylibCloseMenu(); }
 
 #pragma mark UITableView
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 3; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tv { return 2; }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
     if (s == 0) return @"设置";
     if (s == 1) return @"调试";
-    return @"配置来源";
+    return nil;
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
-    if (s == 2) {
-        return [NSString stringWithFormat:@"PageTurnerDylib v1.0.20\n独立版 · 注入即生效（无总开关）：把 PageTurnerDylib.dylib 用巨魔注入器注入任意 App，双指长按弹出本菜单。\n当前配置：%@",
-            PTDylibUsingDebConfig()
-                ? @"复用 deb 版配置（com.yourname.pageturner.plist），与 deb 插件数据互通"
-                : @"独立配置（未检测到 deb 配置，自建 com.yourname.pageturnerdylib.plist）"];
+    if (s == 1) {
+        return @"PageTurnerDylib v1.0.60\n独立版 · 注入即生效（无总开关）：把 PageTurnerDylib.dylib 用巨魔注入器注入任意 App，双指长按弹出本菜单。";
     }
     return nil;
 }
@@ -191,7 +188,7 @@ static const double kConverge = 60.0;
         BOOL logOn = [PTRead()[@"debugLogEnabled"] boolValue];
         return logOn ? 3 : 2;   // 日志开关行 + (日志入口行，仅开关开时显示)
     }
-    return 1;
+    return 0;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
@@ -225,7 +222,7 @@ static const double kConverge = 60.0;
             c.accessoryView = sw;
         } else if (ip.row == 1) {
             c.textLabel.text = @"调试日志";
-            c.detailTextLabel.text = @"总日志开关：记录注入/命中/执行全过程（内存200条+文件1000行）";
+            c.detailTextLabel.text = @"总日志开关：记录注入/命中/执行全过程（每个日志文件循环 500 条）";
             UISwitch *sw = [[UISwitch alloc] init];
             id v = PTRead()[@"debugLogEnabled"];
             sw.on = (v == nil) ? YES : [v boolValue];
@@ -237,12 +234,6 @@ static const double kConverge = 60.0;
             c.detailTextLabel.text = @"查看并复制最近日志（内存日志，100% 可见）";
             c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
-    } else {
-        c.textLabel.text = PTDylibUsingDebConfig() ? @"复用 deb 版配置" : @"独立配置";
-        c.detailTextLabel.text = PTDylibUsingDebConfig()
-            ? @"检测到 deb 配置，设置与 deb 插件互通（共用一个 plist）"
-            : @"未检测到 deb 配置，使用本 dylib 独立 plist（不影响 deb 版）";
-        c.textLabel.textColor = PTDylibUsingDebConfig() ? [UIColor systemBlueColor] : [UIColor systemOrangeColor];
     }
     return c;
 }

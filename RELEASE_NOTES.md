@@ -1,46 +1,40 @@
-# PageTurner v1.0.59
+# PageTurner v1.0.60
 
-> 日志统一到「共享 jbroot 的 Documents」、调试日志改版；删除注入标记与全部诊断代码
-
-依据 v1.0.58 诊断结论：**第三方沙盒 App 写不了普通 `/var/mobile/Documents`，但能写共享 jbroot 的 `var/mobile/Documents`，且设置页能读到**——故日志统一走 jbroot。
-
-## 🗑 删除
-
-- **注入标记功能**（`PTWriteInjectMarker`）：不再产生任何 `PageTurner-injected-*.txt`（含 `/var/mobile/Documents`、`/tmp`、jbroot 变体）。注入早已稳定，不再需要人工肉眼确认
-- **v1.0.58 的全部诊断代码**：诊断 plist（`PageTurner-diag-*.plist`）、多路径探测函数、设置页诊断视图
-- **`/var/mobile/Documents`（真实路径）不再存放任何日志文件**，日志只存在于 jbroot 的 Documents
-
-## ✨ 新增
-
-- **日志统一写入共享 jbroot 的 Documents**：
-  - `PageTurner.log` —— 设置页进程日志
-  - `PageTurner-<bundleID>.log` —— 各生效 App 的运行日志
-- **「调试日志（详情）」改版为「选日志」列表**：第一项是设置页日志，其后是各生效 App 的运行日志；显示文件大小，点击进内容页查看并一键复制
-- **长文件名一行显示不下可横向滑动**查看完整路径
-- **【调试日志】开关联动**：关闭时隐藏下方详情入口，并**立即清空全部日志**（内存 + 所有 `PageTurner*.log` 文件）
-- **巨魔 dylib 也写同一个 jbroot 目录**（此前写在自己容器，设置页读不到）
-- **jbroot 探测提到引擎共用**（`PTJbrootRoot`），并加「扫描 App 安装目录找 `.jbroot-*`」兜底，供**纯 dylib 注入的 App**（如用 TrollFools 注入的番茄小说）也能定位 jbroot
-
-## 🔄 改动
-
-- **日志循环统一 500 条**（内存与文件一致；此前内存 200 条 / 文件 1000 行）
-- 设置页自身日志路径改到 jbroot（与 App 侧同目录，才能读到各 App 日志）
-- 兜底日志文件名 `PageTurnerDylib.log` → `PageTurner.log`
+> 修复日志列表文字重叠、测试「滑动(手动)」无轨迹、版本号样式；删除 dylib 的配置来源展示
 
 ## 🔧 修复
 
-- **版本号日志硬编码**：此前始终打印 "v1.0.57"（升版本时漏改字符串），现已修正为实际版本，并在日志里附带当前日志文件路径
-- 修正「设置页读不到目标 App 运行日志」的老问题（根因：App 日志写在自己容器）
+1. **日志详情文字重叠**：此前 cell 用系统 `Subtitle` 样式（`textLabel` + `detailTextLabel`），
+   又在其上叠了自定义标题层，两套文字压在同一区域。改为自定义两层布局：
+   上层标题（一行显示不下可**横向滑动**）、下层副标题（大小 / 点击查看），行高 56
+2. **测试本方案里「滑动(手动)」看不到轨迹**：`PTTestRecSwipeAsync` 只注入触摸、
+   **从不调用画轨迹函数**（v1.0.52 只修了「不执行」，没修「不画」）。
+   现在补上：画整条轨迹（首→尾）+ 每个轨迹点
+3. **首页版本号字体时大时小 + 灰框**：
+   - 灰框来自包住版本号的**空分组** → 删除
+   - 字体时大时小是因为只在 `viewWillAppear` 对「当前可见 cell」设样式，
+     滚动后出现的 cell 没被设置 → 改为 `tableFooterView`
+   - 顺带修：版本号此前**硬编码 v1.0.56**（升版本漏改），改为动态读 bundle 版本
+
+## 🔄 改动
+
+- 版本号改为**页面底部水平居中**、13pt 灰色、**无灰框**
+- dylib 菜单 footer 版本号 `v1.0.20` → `v1.0.60`（同样是硬编码，已同步）
+- dylib「调试日志」文案同步为「每个日志文件循环 500 条」
+
+## 🗑 删除
+
+- dylib 菜单的**「配置来源」整节**（那行「独立配置」展示 + 分节头部 + footer 里的配置说明）——
+  它只是状态展示、不可点，删除不影响任何功能
 
 ## 📦 下载与安装
 
 | 形态 | 文件 | 用法 |
 |------|------|------|
-| 越狱（Dopamine / roothide） | `PageTurner-1.0.59-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
-| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.59.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |
+| 越狱（Dopamine / roothide） | `PageTurner-1.0.60-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
+| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.60.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |
 
 ## 🔍 排查
 
-- 日志目录：`<jbroot>/var/mobile/Documents/`（如 `/private/var/containers/Bundle/Application/.jbroot-XXXX/var/mobile/Documents/`）
-- 设置页「调试日志」里直接选日志查看 / 复制，也可直接用 Filza 打开上述目录
-- 注意：巨魔 dylib 注入的 App，需在设置页「指定 App 生效」里勾选，其日志才会出现在列表中
+- 日志目录：`<jbroot>/var/mobile/Documents/`（`PageTurner.log` + `PageTurner-<bundleID>.log`）
+- 设置页「调试日志」里选日志查看 / 复制

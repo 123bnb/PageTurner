@@ -572,6 +572,11 @@ static void PTTestTap(CGPoint p, BOOL doubleTap) {
 // v1.0.52：滑动(手动)测试区回放——按录制轨迹逐点注入（保持时间间隔，最短 8ms 防风暴）
 static void PTTestRecSwipeAsync(NSArray *pts, void (^done)(void)) {
     if (!pts.count) { if (done) done(); return; }
+    // v1.0.60：画出整条轨迹（此前 recSwipe 只注入触摸、从不画轨迹，测试区看不到）
+    CGPoint p0 = CGPointMake([pts[0][@"x"] doubleValue], [pts[0][@"y"] doubleValue]);
+    CGPoint pN = CGPointMake([pts[pts.count - 1][@"x"] doubleValue], [pts[pts.count - 1][@"y"] doubleValue]);
+    double t0 = [pts[0][@"t"] doubleValue], t1 = [pts[pts.count - 1][@"t"] doubleValue];
+    PTTestShowDot(p0, pN, YES, MAX((t1 - t0) / 1000.0, 0.05));
     __block NSInteger pid = -1;
     __block int idx = 0;
     __block void (^step)(void);
@@ -583,6 +588,7 @@ static void PTTestRecSwipeAsync(NSArray *pts, void (^done)(void)) {
                         : ((idx == (int)pts.count - 1) ? UITouchPhaseEnded : UITouchPhaseMoved);
         if (idx == 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:ph];
         else [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:ph];
+        PTTestShowDot(p, p, NO, 0);   // v1.0.60：逐点画轨迹点
         idx++;
         if (idx >= (int)pts.count) { if (done) done(); return; }
         double waitMs = [pts[idx][@"t"] doubleValue] - [pt[@"t"] doubleValue];
@@ -989,29 +995,31 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             [specs addObject:log];
         }
 
-        // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
-        [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.56"
-            target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
-        [specs addObject:ver];
-
         _specifiers = [specs copy];
     }
     return _specifiers;
 }
 
-// v1.0.43：版本号行居中 + 弱化颜色（置于页面最底部）
+// v1.0.60：版本号改为页面底部居中的 tableFooterView——没有灰框、字体固定（不再时大时小），
+// 版本号动态读取 bundle 的 CFBundleShortVersionString（升版本只需改 Info.plist，代码不用动）
+- (void)setupVersionFooter {
+    if (self.table.tableFooterView) return;
+    NSString *ver = [[NSBundle bundleForClass:self.class] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    if (!ver.length) ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    if (!ver.length) ver = @"?";
+    CGFloat w = self.view.bounds.size.width ?: 320;
+    UILabel *foot = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, w, 44)];
+    foot.text = [NSString stringWithFormat:@"PageTurner v%@", ver];
+    foot.textAlignment = NSTextAlignmentCenter;
+    foot.font = [UIFont systemFontOfSize:13];
+    foot.textColor = [UIColor secondaryLabelColor];
+    foot.backgroundColor = [UIColor clearColor];
+    self.table.tableFooterView = foot;
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    dispatch_async(dispatch_get_main_queue(), ^{
-        for (UITableViewCell *c in self.table.visibleCells) {
-            if ([c.textLabel.text hasPrefix:@"PageTurner v"]) {
-                c.textLabel.textAlignment = NSTextAlignmentCenter;
-                c.textLabel.textColor = [UIColor secondaryLabelColor];
-                c.textLabel.font = [UIFont systemFontOfSize:13];
-            }
-        }
-    });
+    [self setupVersionFooter];
 }
 
 - (id)readPreferenceValue:(PSSpecifier *)spec {
@@ -2695,14 +2703,18 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     static NSString *ID = @"PTLogCell";
     UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:ID];
     if (!c) {
-        c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:ID];
-        // v1.0.59：文件名一行显示不下 → 可横向滑动查看完整路径
+        // v1.0.60：不用系统 textLabel/detailTextLabel（会与自定义布局重叠），改为自己放两层
+        c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:ID];
+        c.textLabel.text = nil;
         UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectZero];
         sv.tag = 900; sv.showsHorizontalScrollIndicator = NO;
         UILabel *lb = [[UILabel alloc] init];
         lb.tag = 901; lb.font = [UIFont systemFontOfSize:15]; lb.textColor = [UIColor labelColor];
         [sv addSubview:lb];
         [c.contentView addSubview:sv];
+        UILabel *sub = [[UILabel alloc] initWithFrame:CGRectZero];
+        sub.tag = 902; sub.font = [UIFont systemFontOfSize:12]; sub.textColor = [UIColor secondaryLabelColor];
+        [c.contentView addSubview:sub];
     }
     NSDictionary *it = self.items[ip.row];
     unsigned long long sz = [it[@"size"] unsignedLongLongValue];
@@ -2710,16 +2722,21 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
                                  : [NSString stringWithFormat:@"%llu B", sz];
     c.detailTextLabel.text = sz > 0 ? [NSString stringWithFormat:@"%@ · 点击查看", szTxt]
                                     : @"暂无内容（还没产生日志）";
-    CGFloat w = self.view.bounds.size.width - 40;
+    CGFloat w = self.view.bounds.size.width - 56;
     UIScrollView *sv = [c.contentView viewWithTag:900];
     UILabel *lb = [sv viewWithTag:901];
     lb.text = it[@"name"];
     [lb sizeToFit];
-    sv.frame = CGRectMake(16, 10, w, lb.bounds.size.height);
+    sv.frame = CGRectMake(16, 9, w, lb.bounds.size.height);
     sv.contentSize = CGSizeMake(MAX(lb.bounds.size.width, w), lb.bounds.size.height);
+    UILabel *sub = [c.contentView viewWithTag:902];
+    sub.text = sz > 0 ? [NSString stringWithFormat:@"%@ · 点击查看", szTxt] : @"暂无内容（还没产生日志）";
+    sub.frame = CGRectMake(16, 31, w, 15);
     c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return c;
 }
+
+- (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip { return 56; }
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
