@@ -1,12 +1,5 @@
 // ============================================================
-// PageTurner v1.0.55 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
-//
-// v1.0.55（本次变更）：
-//   1. 【滑动(手动)】回放照搬 DirectVolumeTap 的 DVTFakeSwipe：CADisplayLink + 二分时间插值，
-//      顺滑跟手、对齐 VSync；删除旧跨进程手动录制链路（recRequest/recResult 覆盖层那一套），
-//      录制改由设置页进程内灰色背景录制器完成。
-//   2. 统一全部轨迹：以调试可视化轨迹为唯一基准（lineWidth 4 绿折线 + 绿点 + P 标记）。
-//   3. 调试日志关闭时清空（由设置页 setPreferenceValue 处理）。
+// PageTurner v1.0.54 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
 //
 // v1.0.49（状态栏修复）：插件可视化窗口（windowLevel 高于状态栏且永驻）会接管 iOS 状态栏
 //   样式，导致时间/信号电池颜色不再跟随 App → 覆盖窗口 VC 改为状态栏样式透传（跟随当前
@@ -128,7 +121,7 @@
 //     「PageTurner 注入成功 · 翻页键映射生效中」，打勾的 App 打开就有，
 //     有提醒条 = 注入成功
 //   - 注入探针（照抄 VKT ShowProbeAlert）：第三方 App 启动 2.5s 弹窗显示
-//     本App / 注入✅ / 全局配置(文件可读?) / 总开关 / crashTest / 勾选App数 /
+//     本App / 注入✅ / 全局配置(文件可读?) / 总开关 / 勾选App数 /
 //     本App被勾选 —— 打开番茄小说一眼看出注入和勾选状态
 // v1.0.23（上一版核心修复，三路实证锁定终极根因）：
 //   根因一【终极】：Filter 空 {} → ellekit 不注入任何进程。
@@ -282,7 +275,6 @@ static NSMutableSet *gEnabledApps = nil;
 static double gDebounceMs = 300;
 static BOOL gDebugDots = NO;                // v1.0.23：调试可视化（TrollCM 触摸轨迹）
 static BOOL gProbeEnabled = NO;             // v1.0.29：探针独立开关（探针弹窗+提醒条）
-static BOOL gCrashTest = NO;                // v1.0.24：注入测试（探针字段，照抄 VKT）
 static void PTDebugDestroyOverlay(void);    // v1.0.51：可视化覆盖层销毁（前向声明）
 static NSMutableDictionary *gPlans = nil;   // name -> dict
 static BOOL gLearnActive = NO;              // plist learning.active（Preferences 进程学习开关）
@@ -380,7 +372,6 @@ static void PTLoadConfig(BOOL force) {
     if (!gDebugDots) PTDebugDestroyOverlay();
     gProbeEnabled = (gConfig[@"probeEnabled"] == nil) ? NO : [gConfig[@"probeEnabled"] boolValue];
     gDebugLogEnabled = (gConfig[@"debugLogEnabled"] == nil) ? YES : [gConfig[@"debugLogEnabled"] boolValue];   // v1.0.42：缺省开
-    gCrashTest = (gConfig[@"crashTest"] == nil) ? NO : [gConfig[@"crashTest"] boolValue];
     gPlans = [NSMutableDictionary dictionary];
     gLearnedSenderCount = 0;
     for (NSDictionary *p in gConfig[@"plans"] ?: @[]) {
@@ -399,21 +390,6 @@ static void PTLoadConfig(BOOL force) {
         }
     }
     gLearnActive = [gConfig[@"learning"][@"active"] boolValue];
-}
-
-// 供设置页读取当前配置快照（Preferences 进程内）
-NSDictionary *PTGetConfig(void) { PTLoadConfig(NO); return gConfig; }
-
-// 供设置页写回完整配置
-void PTSaveConfig(NSDictionary *cfg) { PTWriteFileRaw(cfg); }
-
-// 学习模式开关（设置页学习页进入/退出时写 learning.active）
-void PTSetLearning(BOOL on) {
-    NSMutableDictionary *cfg = PTReadFileRaw();
-    cfg[@"learning"] = @{ @"active": @(on) };
-    if (on) cfg[@"learningSamples"] = @[];
-    PTWriteFileRaw(cfg);
-    PTLoadConfig(YES);
 }
 
 // ============================================================
@@ -790,11 +766,10 @@ static void PTShowProbeAlert(void) {
         BOOL selected = [gEnabledApps containsObject:bid];
         BOOL cfgReadable = [NSFileManager.defaultManager fileExistsAtPath:gCfgPath ?: @""];
         NSString *msg = [NSString stringWithFormat:
-            @"本App: %@\n注入: ✅ 成功\n全局配置: %@\n总开关enabled: %@\n注入测试crashTest: %@\n勾选App数: %lu  本App被勾选: %@",
+            @"本App: %@\n注入: ✅ 成功\n全局配置: %@\n总开关enabled: %@\n勾选App数: %lu  本App被勾选: %@",
             bid,
             cfgReadable ? [NSString stringWithFormat:@"文件可读 %@", gCfgPath] : [NSString stringWithFormat:@"文件不可读 %@", gCfgPath],
             gMasterEnabled ? @"开" : @"关",
-            gCrashTest ? @"开" : @"关",
             (unsigned long)gEnabledApps.count,
             selected ? @"是✅" : @"否❌"];
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -985,7 +960,7 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
 // ============================================================
 // v1.0.55：滑动(手动)回放（CADisplayLink 驱动，照搬 DirectVolumeTap 的 DVTFakeSwipe）
 // 每帧对齐 VSync，按真实经过时间插值出坐标注入一次 Moved，1:1 还原真实手指流畅感。
-// 录制在设置页进程（灰色 PTRecView）完成，pts 为 @{x,y,t} 字典（与设置页/测试一致）。
+// 录制在设置页进程（灰色 PTRecSwipeVC）完成，pts 为 @{x,y,t} 字典（与设置页/测试一致）。
 // ============================================================
 @interface PTRecSwipeTickProxy : NSObject
 @property (nonatomic, copy) void (^tick)(void);
@@ -1056,7 +1031,7 @@ static void PTFakeRecSwipeAsync(NSArray *pts, int token, void (^done)(void)) {
 }
 
 // v1.0.55：已删除「跨进程手动录制」（设置页写 recRequest → 注入 App 弹覆盖层那一套）。
-// 录制改在设置页进程内用灰色 PTRecView 完成（见 Preferences/RootListController.m），
+// 录制改在设置页进程内用灰色 PTRecSwipeVC 完成（见 Preferences/RootListController.m），
 // 运行时真实轨迹回放见上方 PTFakeRecSwipeAsync。
 
 // 执行单条动作 → 完成后 next()
@@ -1094,30 +1069,12 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
     } else if ([type isEqualToString:@"recSwipe"]) {
         // v1.0.51：滑动(手动)——按录制轨迹回放
         PTFakeRecSwipeAsync(a[@"pts"], token, next);
-    } else if ([type isEqualToString:@"tapManual"]) {
-        // v1.0.51：点击(手动)——按录制的真实点击点注入
-        NSArray *pts = a[@"pts"];
-        CGPoint p = pts.count ? CGPointMake([pts[0][@"x"] doubleValue], [pts[0][@"y"] doubleValue]) : CGPointMake(200, 400);
-        PTFakeTap(p, 30);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"doubleTapManual"]) {
-        // v1.0.51：双击(手动)——两次点击，间隔按录制时间戳
-        NSArray *pts = a[@"pts"];
-        CGPoint p0 = pts.count >= 1 ? CGPointMake([pts[0][@"x"] doubleValue], [pts[0][@"y"] doubleValue]) : CGPointMake(200, 400);
-        CGPoint p1 = pts.count >= 2 ? CGPointMake([pts[1][@"x"] doubleValue], [pts[1][@"y"] doubleValue]) : p0;
-        double gapMs = (pts.count >= 2) ? ([pts[1][@"t"] doubleValue] - [pts[0][@"t"] doubleValue]) : 120.0;
-        if (gapMs < 40) gapMs = 40;
-        PTFakeTap(p0, 30);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gapMs / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (token != gExecToken) { if (next) next(); return; }
-            PTFakeTap(p1, 30);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-        });
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
     } else {
-        // v1.0.48：音量+/音量-/静音切换已删除，旧配置里的这些动作在此跳过
+        // 已删除的动作类型（音量+/音量-/静音切换、点击(手动)/双击(手动)废案）：
+        // 旧配置里的残留动作在此跳过，不卡后续动作
         if (next) next();
     }
 }
@@ -1187,8 +1144,6 @@ static void PTImpAddEvent(id self, SEL _cmd, void *event) {
 static IMP gOrigSendEvent = NULL;
 static void PTImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     PTLoadConfig(NO);   // 每次事件刷新配置（设置页改动即时生效）
-    // v1.0.55：跨进程手动录制采集块已删除（录制改在设置页进程内 PTRecView 完成，
-    // 不再在 sendEvent 抓真实触摸；运行时回放见 PTFakeRecSwipeAsync）。
     // v1.0.32：窗口/会话判断始终优先（含映射执行中）——
     // 翻页器按键（已学 sender）无论是否执行中，一律拦截整段吞：执行中按键会命中→
     // 防抖内忽略 / 防抖外中断旧序列重启新序列，绝不放行原始滑动（根除双动作）；
@@ -1287,7 +1242,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.55 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.54 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
@@ -1309,7 +1264,7 @@ static void PTInit() {
                   bundleID, (unsigned long)gEnabledApps.count, gMasterEnabled);
         }
         // v1.0.24 注入探针（照抄 VKT ShowProbeAlert）：第三方 App 启动 2.5s 弹，
-        // 显示 本App/注入✅/全局配置/总开关/crashTest/勾选App数/本App被勾选 ——
+        // 显示 本App/注入✅/全局配置/总开关/勾选App数/本App被勾选 ——
         // 打开番茄小说一眼看出注入成功没、有没有勾选
         // v1.0.29：探针独立开关（不跟总开关），调试可视化归 debugDots
         if (!gIsPreferences && gProbeEnabled && ![bundleID hasPrefix:@"com.apple."]) {
