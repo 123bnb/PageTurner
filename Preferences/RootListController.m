@@ -92,6 +92,7 @@
 //   3. 学习页/测试页轨迹可视化换成调试可视化同款：起点绿点 + 方向线 + P 标记
 //   4. 首页「调试」组新增【注入探针】独立开关（key=probeEnabled）：
 //      探针弹窗+提醒条归它管，与调试可视化互相独立、不跟总开关
+//      （v1.0.57 已删除该开关：注入探针是旧版无法注入时的兜底弹窗，早已失效）
 //   5. 动作设置页支持编辑：点击方案页动作行 → 进动作设置页（预填原坐标），
 //      完成=覆盖更新该条（保留已调好的时序参数）；长按仍调参数
 //
@@ -928,15 +929,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [specs addObject:plans];
 
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"调试"]];
-        // v1.0.29：探针独立开关（探针弹窗+提醒条），与调试可视化互相独立，不跟总开关
-        PSSpecifier *probe = [PSSpecifier preferenceSpecifierNamed:@"注入探针"
-            target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
-            detail:nil cell:PSSwitchCell edit:nil];
-        [probe setProperty:@"probeEnabled" forKey:@"key"];
-        [probe setProperty:@NO forKey:@"default"];
-        [probe setProperty:@"开启后目标 App 启动时显示探针弹窗 + 提醒条（黑底黄框），一眼确认注入成功。与调试可视化互相独立。" forKey:@"staticText"];
-        [specs addObject:probe];
-
+        // v1.0.57：注入探针开关已删除（旧版无法注入时的兜底弹窗，早已失效，见 commit）
         PSSpecifier *dots = [PSSpecifier preferenceSpecifierNamed:@"调试可视化"
             target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
             detail:nil cell:PSSwitchCell edit:nil];

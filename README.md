@@ -12,7 +12,6 @@ iOS 越狱插件（Dopamine roothide）：把 **BLE 翻页器**（看小说用�
 - **一键多动作**：一个按键特征可以挂任意多条动作，按一次键按顺序全部执行；映射区支持**拖动排序**（v1.0.43+）
 - **动作类型**：点击、双击、滑动（速度可调，默认 1000pt/s）、延迟、静音切换、音量 + / 音量 -
 - **指定 App 生效**：勾选目标 App（如 com.dragon.read），只有它里面拦截替换；未勾选 App 完全不受影响
-- **注入探针**：独立开关，弹窗 + 提醒条直观确认"已注入 + 配置已读 + 本 App 被勾选"
 - **调试可视化**：独立开关，显示绿点轨迹——只画 App **实际收到**的触摸（被拦截吞掉的翻页器原始轨迹不显示，命中执行/未命中重放一目了然）
 - **测试区**：方案页内置大白屏测试页，在设置里就能验证"录特征 → 匹配 → 执行映射"整条链路
 - **深色模式适配**（v1.0.31+）
@@ -26,10 +25,16 @@ iOS 越狱插件（Dopamine roothide）：把 **BLE 翻页器**（看小说用�
 - 下载最新 `.deb`（Release 页），用 Sileo / Zebra / dpkg 安装，**装完注销**
 
 ```bash
-dpkg -i PageTurner-1.0.43-roothide.deb
+dpkg -i PageTurner-1.0.57-roothide.deb
 ```
 
 装完在 **系统设置 App** 里会出现 `PageTurner` 分组（所有 UI 都在系统设置里，目标 App 内没有页面、没有三指手势）。
+
+> **两种形态，同一份代码**：本仓库一次构建同时产出
+> · `PageTurner-<ver>-roothide.deb` —— 越狱(roothide) 直装，设置页总开关 + 指定 App 生效；
+> · `PageTurnerDylib_<ver>.dylib` —— 巨魔(TrollStore / TrollFools) 注入任意 App，App 内**三指长按**弹出设置菜单。
+> 两者的运行端引擎（`common/PTEngine.m`）完全相同，仅「配置路径 / 总开关门控 / hook 安装方式」因注入环境不同由各自 target 注入。
+> 注：v1.0.57 已删除失效的「注入探针」开关（旧版无法注入时的兜底弹窗）。
 
 ---
 
@@ -52,7 +57,6 @@ dpkg -i PageTurner-1.0.43-roothide.deb
 | 指定 App 生效 | 勾选列表：哪些 App 里拦截替换翻页器按键 |
 | 防抖 | 两次按键最小间隔（默认 300ms，100~1000 可调） |
 | 记录与映射 | 方案管理入口 |
-| 注入探针 | 独立开关：注入成功后弹提示条 + 探针弹窗 |
 | 调试可视化 | 独立开关：所有触摸显示绿点轨迹 |
 | 调试日志 | 内存日志尾部 + 一键复制 |
 
@@ -94,9 +98,8 @@ dpkg -i PageTurner-1.0.43-roothide.deb
 
 ## 调试
 
-1. **注入探针**（开关独立于总开关，默认关）：打开后，被注入的 App 前台会弹出提醒条（黑底白字 + 黄边框，约 2 秒）+ 探针弹窗，显示：注入状态、配置文件路径与可读性、总开关、勾选 App 数、本 App 是否被勾选。
-2. **调试可视化**：显示绿点轨迹——只画 App **实际收到**的触摸（被拦截吞掉的翻页器原始轨迹不显示；命中执行、未命中重放、手指触摸都可见）。
-3. **调试日志**：设置页内直接看最近 200 行，一键复制。
+1. **调试可视化**：显示绿点轨迹——只画 App **实际收到**的触摸（被拦截吞掉的翻页器原始轨迹不显示；命中执行、未命中重放、手指触摸都可见）。
+2. **调试日志**：设置页内直接看最近 200 行，一键复制。
 
 ### 日志文件（排障必备）
 
@@ -134,13 +137,15 @@ UIApplication -sendEvent:               ← hook：
 
 ```
 PageTurner/
-├── Tweak.xm                          # 注入端核心：识别 / 拦截 / 匹配 / 执行 / 探针 / 可视化
+├── common/PTEngine.{h,m}             # 统一运行端引擎（roothide / dylib 共用）：配置/日志/匹配/执行/可视化/hook 处理器
+├── Tweak.m                           # roothide deb 薄壳：配置路径注入 + 总开关+指定App门控 + MSHookMessageEx 装 hook
+├── targets/dylib/                    # 巨魔 dylib 薄壳：PTDylibMain（入口/菜单窗口）+ PTDylibUI（浮窗菜单/录制覆盖层）
 ├── Preferences/
 │   ├── RootListController.m          # 设置页全部 UI（方案 / 学习 / 映射 / 测试 / 调试）
 │   └── Resources/Info.plist
 ├── ptftouch/                         # PTFakeMetaTouch（KIF FakeTouch 触摸注入库）
 ├── Makefile / control                # Theos roothide 打包
-└── .github/workflows/build.yml       # push 自动编译 roothide deb 并发布 Release
+└── .github/workflows/build.yml       # push 自动编译 roothide deb + 巨魔 dylib 并发布 Release
 ```
 
 ## 版本里程碑

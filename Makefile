@@ -1,6 +1,8 @@
-# PageTurner v1.0.56 —— 翻页器按键拦截正式版（学习模式 + 映射 + 动作执行）
-# 架构：Filter = Bundles com.apple.UIKit（照抄 volumekeytapper）→ 所有 UIKit App 注入
-#       → Preferences（设置 App）进程收集学习样本（bundle 自 hook）→ 生效 App 拦截执行
+# PageTurner v1.0.57 —— 统一代码（roothide / deb + 巨魔 dylib 双形态，功能不变，删除注入探针）
+# 架构：单一运行端引擎 common/PTEngine.m 被两个 target 共用：
+#       · roothide deb（Tweak.m 薄壳，MSHookMessageEx 装 hook，设置页总开关+指定App生效）
+#       · 巨魔 dylib（targets/dylib/，method_setImplementation 自 hook，应用内三指长按菜单）
+# 事件/动作/匹配 全部共用，差异仅「配置路径 / 总开关门控 / hook 安装方式」，通过 PTSet* 注入。
 # 事件：hook UIApplication -sendEvent:（UIEvent 层，UITouch 真实坐标）
 #       + _UIUpdateHIDDigitizerInput -addEvent:（IOHIDEvent 层，sender 判来源/学习）
 # 动作：PTFakeMetaTouch（点击/双击/滑动）+ AVSystemController（静音/音量±）
@@ -22,7 +24,7 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.56
+PACKAGE_VERSION := 1.0.57
 
 DEBUG = 0
 ARCHS = arm64 arm64e
@@ -31,10 +33,11 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = PageTurner
 
-PageTurner_FILES = Tweak.xm \
+PageTurner_FILES = Tweak.m \
+	common/PTEngine.m \
 	ptftouch/PTFakeMetaTouch.m ptftouch/UITouch-KIFAdditions.m \
 	ptftouch/UIEvent+KIFAdditions.m ptftouch/IOHIDEvent+KIF.m
-PageTurner_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-arc-retain-cycles -Iptftouch -include ptftouch/Compat.h
+PageTurner_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-arc-retain-cycles -Icommon -Iptftouch -include ptftouch/Compat.h
 PageTurner_FRAMEWORKS = Foundation UIKit IOKit
 PageTurner_LIBRARIES = substrate
 # 照抄 volumekeytapper：-Wl,-undefined,dynamic_lookup 允许 IOHIDEvent*/MSHookMessageEx
