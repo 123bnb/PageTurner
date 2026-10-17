@@ -1,5 +1,11 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.53）
+// RootListController.m —— PageTurner 设置页（v1.0.56）
+//
+// v1.0.56（废代码清理 + 滑动(手动)录制合并，与运行端同步）：
+//   1. 删除 tapManual/doubleTapManual 废案全链路（测试分支/列表显示/类型转换）——实测仅
+//      滑动(手动)有效；旧配置残留动作点击与长按均弹「该动作已删除」提醒，不进编辑页。
+//   2. 滑动(手动)：新增 PTRecSwipeVC 灰色 pan 手势录制器（无穿透），新增入口与旧配置
+//      重录都走它；落盘 @{x,y,t}，与运行端 PTFakeRecSwipeAsync（CADisplayLink 回放）一致。
 //
 // v1.0.43（9 项改进，与运行端同步）：
 //   1. 增加特征：重复特征时右上角「保存」置灰禁止 + 已记录清空（防止把旧记录当新特征保存）
@@ -956,7 +962,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
         // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
         [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
-        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.53"
+        PSSpecifier *ver = [PSSpecifier preferenceSpecifierNamed:@"PageTurner v1.0.56"
             target:nil set:nil get:nil detail:nil cell:PSStaticTextCell edit:nil];
         [specs addObject:ver];
 

@@ -1,5 +1,14 @@
 // ============================================================
-// PageTurner v1.0.54 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+// PageTurner v1.0.56 —— 翻页器按键拦截（学习模式 + 映射 + 动作执行）
+//
+// v1.0.56（废代码清理 + 滑动(手动)录制合并）：
+//   1. 删除 tapManual/doubleTapManual 废案全链路（运行端回放/设置页测试/列表显示/类型
+//      转换）——实测仅滑动(手动)有效；旧配置残留动作在设置页点击/长按均弹「已删除」提醒，
+//      执行端默认分支跳过不卡后续动作。
+//   2. 删除 crashTest 孤儿开关（v1.0.24 注入探针，全仓无读方）。
+//   3. 删除 PTGetConfig/PTSaveConfig/PTSetLearning 三个零调用孤儿函数。
+//   4. 滑动(手动)：录制合并 v1.0.55 方案——设置页 PTRecSwipeVC 灰色 pan 手势录制器
+//      （无穿透），回放 PTFakeRecSwipeAsync 改 CADisplayLink + 二分时间插值（对齐 VSync）。
 //
 // v1.0.49（状态栏修复）：插件可视化窗口（windowLevel 高于状态栏且永驻）会接管 iOS 状态栏
 //   样式，导致时间/信号电池颜色不再跟随 App → 覆盖窗口 VC 改为状态栏样式透传（跟随当前
@@ -1242,7 +1251,7 @@ static void PTInit() {
             pGetFloat = (IOHIDEventGetFloatValue_t)dlsym(iokit, "IOHIDEventGetFloatValue");
         }
         PTLog(@"==================================================");
-        PTLog(@"PageTurner v1.0.54 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTLog(@"PageTurner v1.0.56 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
         PTLog(@"配置路径=%@ 总开关=%d 探针=%d 可视化=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu 已学sender=%d",
               gCfgPath, gMasterEnabled, gProbeEnabled, gDebugDots,
               (unsigned long)gEnabledApps.count, gDebounceMs,
