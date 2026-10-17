@@ -103,6 +103,20 @@ static void PTHook(NSString *clsName, NSString *selName, IMP newImp, IMP *origSl
     MSHookMessageEx(cls, sel, newImp, origSlot);
 }
 
+// v1.0.58 诊断：探测某个日志路径是否真的可写（建目录 + 建文件 + 可写判定）
+static BOOL PTProbeWritable(NSString *path) {
+    @try {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *dir = [path stringByDeletingLastPathComponent];
+        if (dir.length && ![fm fileExistsAtPath:dir])
+            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        if (![fm fileExistsAtPath:path]) {
+            if (![fm createFileAtPath:path contents:nil attributes:nil]) return NO;
+        }
+        return [fm isWritableFileAtPath:path];
+    } @catch (NSException *e) { return NO; }
+}
+
 __attribute__((constructor))
 static void PTInit() {
     @autoreleasepool {
@@ -111,13 +125,62 @@ static void PTInit() {
         gBundleID = bundleID;
         gIsPreferences = [bundleID isEqualToString:kPrefsBundleID];
 
-        // 配置路径交给引擎（roothide 多候选 / jbroot）；日志路径指向 App 容器 Documents
+        // 配置路径交给引擎（roothide 多候选 / jbroot）
         PTSetCfgPath(PTGlobalPlistPath());
         NSString *home = NSHomeDirectory();
-        PTSetLogPath([[home stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"PageTurner.log"]);
+
+        // ===== v1.0.58 诊断：探测所有候选日志路径 → 同时写入 → 结果落独立诊断 plist =====
+        NSString *logName = [NSString stringWithFormat:@"PageTurner-%@.log", bundleID];
+        NSMutableArray *cands = [NSMutableArray array];
+        [cands addObject:[@"/var/mobile/Documents" stringByAppendingPathComponent:logName]];
+        NSString *jb2 = PTJbrootRoot();
+        if (jb2.length) {
+            [cands addObject:[jb2 stringByAppendingPathComponent:
+                [@"var/mobile/Documents" stringByAppendingPathComponent:logName]]];
+        }
+        [cands addObject:[@"/tmp" stringByAppendingPathComponent:logName]];
+        [cands addObject:[[home stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"PageTurner.log"]];
+        NSMutableArray *okPaths = [NSMutableArray array];
+        NSMutableArray *badPaths = [NSMutableArray array];
+        for (NSString *p in cands) {
+            if (PTProbeWritable(p)) [okPaths addObject:p]; else [badPaths addObject:p];
+        }
+        PTSetLogPaths(okPaths);   // 日志同时写进所有可写候选
 
         PTDylibInitIOKit();
         PTDylibLoadConfig(YES);
+
+        // 诊断 plist 写到独立文件（不碰主配置，避免污染用户的方案/勾选数据）
+        @try {
+            NSDictionary *diag = @{
+                @"bundleID": bundleID, @"pid": @(getpid()),
+                @"jbroot": jb2 ?: @"(无)", @"container": home ?: @"",
+                @"writable": okPaths, @"failed": badPaths,
+                @"time": @([[NSDate date] timeIntervalSince1970]),
+            };
+            NSData *dd = [NSPropertyListSerialization dataWithPropertyList:diag
+                format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+            if (dd) {
+                NSString *dn = [NSString stringWithFormat:@"PageTurner-diag-%@.plist", bundleID];
+                NSMutableArray *dp = [NSMutableArray array];
+                [dp addObject:[@"/var/mobile/Documents" stringByAppendingPathComponent:dn]];
+                if (jb2.length) {
+                    [dp addObject:[jb2 stringByAppendingPathComponent:
+                        [@"var/mobile/Documents" stringByAppendingPathComponent:dn]]];
+                }
+                [dp addObject:[@"/tmp" stringByAppendingPathComponent:dn]];
+                for (NSString *p in dp) {
+                    NSString *dir = [p stringByDeletingLastPathComponent];
+                    if (dir.length && ![NSFileManager.defaultManager fileExistsAtPath:dir])
+                        [NSFileManager.defaultManager createDirectoryAtPath:dir
+                                            withIntermediateDirectories:YES attributes:nil error:nil];
+                    [dd writeToFile:p atomically:YES];
+                }
+            }
+        } @catch (NSException *e) {}
+
+        PTDylibLog(@"[诊断] bundleID=%@ jbroot=%@ 可写=%@ 不可写=%@",
+              bundleID, jb2 ?: @"(无)", okPaths, badPaths);
 
         NSDictionary *cfg = PTConfigDict();
         BOOL masterEnabled = [cfg[@"masterEnabled"] boolValue];

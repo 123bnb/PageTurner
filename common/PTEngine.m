@@ -77,9 +77,20 @@ void PTSetGestureMenuEnabled(BOOL b) { gGestureMenuEnabled = b; }
 // ============================================================
 static NSMutableArray *sLogLines = nil;
 static NSString *sLogFile = nil;
+static NSArray *sLogFiles = nil;   // v1.0.58 诊断：多候选日志路径（同时写，探测哪条能通）
 // v1.0.57：日志文件路径由 target 注入（roothide 多候选路径 / dylib 沙盒容器）；未注入则用默认沙盒路径
 void PTSetLogPath(NSString *p) {
     if (p.length) sLogFile = [p copy];
+}
+// v1.0.58 诊断：注入多个候选路径，日志会同时写入所有路径（探测 App 侧与设置页到底哪条路能互通）
+void PTSetLogPaths(NSArray *paths) {
+    if (paths.count) sLogFiles = [paths copy];
+}
+NSArray *PTLogActivePaths(void) {
+    NSMutableArray *a = [NSMutableArray array];
+    if (sLogFile.length) [a addObject:sLogFile];
+    for (NSString *p in (sLogFiles ?: @[])) if (p.length && ![a containsObject:p]) [a addObject:p];
+    return [a copy];
 }
 static double sLogCfgMtime = -1;
 static BOOL sLogEnabled = YES;
@@ -143,21 +154,27 @@ void PTDylibLog(NSString *fmt, ...) {
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@", tbuf, (int)(tv.tv_usec / 1000), msg];
     if (sLogLines.count >= 200) [sLogLines removeObjectsInRange:NSMakeRange(0, 100)];
     [sLogLines addObject:line];
-    if (!sLogFile) sLogFile = PTDylibLogFilePath();
-    if (sLogFile) {
-        static int sFileLines = 0;
-        PTDylibEnsureLogFile(sLogFile);
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogFile];
-        if (fh) {
-            @try {
-                [fh seekToEndOfFile];
-                [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
-                [fh closeFile];
-                sFileLines++;
-            } @catch (NSException *e) {}
-        }
-        if (sFileLines > 1000) { PTDylibTrimLogFile(sLogFile); sFileLines = 1000; }
+    if (!sLogFile && !sLogFiles.count) sLogFile = PTDylibLogFilePath();
+    // v1.0.58 诊断：把这一行同时写进所有候选路径，哪条真能落盘、哪条能被测到，一目了然
+    NSMutableArray *targets = [NSMutableArray array];
+    if (sLogFile.length) [targets addObject:sLogFile];
+    for (NSString *p in (sLogFiles ?: @[])) {
+        if (p.length && ![targets containsObject:p]) [targets addObject:p];
     }
+    static int sFileLines = 0;
+    for (NSString *p in targets) {
+        PTDylibEnsureLogFile(p);
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
+        if (!fh) continue;
+        @try {
+            [fh seekToEndOfFile];
+            [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+            sFileLines++;
+        } @catch (NSException *e) {}
+        if (sFileLines > 1000) { PTDylibTrimLogFile(p); }
+    }
+    if (sFileLines > 1000) sFileLines = 1000;
 }
 
 NSArray *PTDylibLogLines(void) {

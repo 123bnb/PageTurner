@@ -2610,33 +2610,107 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
         style:UIBarButtonItemStyleDone target:self action:@selector(copyLog)];
 
-    // v1.0.48：优先读运行端日志文件（App 进程日志远比设置页内存日志丰富——内存只记设置页
-    // 自己进程的测试/操作日志，运行端日志只写文件不上传）；文件读不到再回退内存日志。
-    NSString *fileText = nil;
-    NSMutableArray *cands = [NSMutableArray array];
-    [cands addObject:@"/var/mobile/Documents/PageTurner.log"];
+    // ===== v1.0.58 诊断版：只做「App 与插件如何共通日志」的通路探测展示 =====
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableString *d = [NSMutableString string];
     NSString *jb = PTJbrootRootC();
-    if (jb.length) [cands addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents/PageTurner.log"]];
-    for (NSString *p in cands) {
-        NSString *s = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
-        if (s.length) {
-            NSArray *ls = [s componentsSeparatedByString:@"\n"];
-            NSUInteger n = ls.count;
-            NSUInteger from = n > 200 ? n - 200 : 0;
-            fileText = [[ls subarrayWithRange:NSMakeRange(from, n - from)] componentsJoinedByString:@"\n"];
-            break;
+
+    [d appendString:@"===== 日志通路诊断（v1.0.58 诊断版）=====\n"];
+    [d appendString:@"目的：确认 App 侧(被注入进程)与设置页(Preferences 进程)到底哪条路径能互通\n\n"];
+
+    // ---- 1. 设置页能列出哪些目录、里面有哪些 PageTurner 文件 ----
+    [d appendString:@"【1】设置页(Preferences 进程)能访问的目录\n"];
+    NSMutableArray *dirs = [NSMutableArray array];
+    [dirs addObject:@"/var/mobile/Documents"];
+    if (jb.length) [dirs addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents"]];
+    [dirs addObject:NSTemporaryDirectory()];
+    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    if (docDir.length) [dirs addObject:docDir];
+    for (NSString *dir in dirs) {
+        if (!dir.length) continue;
+        NSError *err = nil;
+        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:&err];
+        if (!items) {
+            [d appendFormat:@"  ❌ %@ —— 列目录失败（无权限或不存在）\n", dir];
+            continue;
+        }
+        [d appendFormat:@"  ✅ %@ —— 可列目录（%lu 项）\n", dir, (unsigned long)items.count];
+        for (NSString *it in items) {
+            if (![it hasPrefix:@"PageTurner"]) continue;
+            NSString *fp = [dir stringByAppendingPathComponent:it];
+            NSDictionary *at = [fm attributesOfItemAtPath:fp error:nil];
+            unsigned long long sz = at ? [at fileSize] : 0;
+            NSString *szTxt = (sz >= 1024) ? [NSString stringWithFormat:@"%.1fKB", sz/1024.0]
+                                           : [NSString stringWithFormat:@"%lluB", sz];
+            [d appendFormat:@"       • %@  [%@, 可读=%@]\n", it, szTxt,
+                [fm isReadableFileAtPath:fp] ? @"YES" : @"NO"];
         }
     }
-    if (fileText.length) {
-        tv.text = fileText;
-    } else if (sLogLines.count) {
-        NSArray *lines = sLogLines;
-        NSUInteger n = lines.count;
-        NSUInteger from = n > 200 ? n - 200 : 0;
-        tv.text = [[lines subarrayWithRange:NSMakeRange(from, n - from)] componentsJoinedByString:@"\n"];
-    } else {
-        tv.text = @"日志为空。\n\n进「记录与映射」→ 新增方案 → 进方案页 → 新增记录（大白屏）后按翻页器同一键，再回到这里复制。";
+
+    // ---- 2. App 侧上报的诊断 plist（App 进程探测的可写/不可写路径）----
+    [d appendString:@"\n【2】App 侧上报（PageTurner-diag-*.plist，App 进程自己探测的结果）\n"];
+    BOOL foundDiag = NO;
+    for (NSString *dir in dirs) {
+        if (!dir.length) continue;
+        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+        for (NSString *it in items ?: @[]) {
+            if (![it hasPrefix:@"PageTurner-diag-"] || ![it hasSuffix:@".plist"]) continue;
+            NSString *fp = [dir stringByAppendingPathComponent:it];
+            NSDictionary *dg = [NSDictionary dictionaryWithContentsOfFile:fp];
+            if (!dg) continue;
+            foundDiag = YES;
+            [d appendFormat:@"  📄 %@（在 %@）\n", it, dir];
+            [d appendFormat:@"     bundleID=%@ pid=%@\n", dg[@"bundleID"], dg[@"pid"]];
+            [d appendFormat:@"     jbroot=%@\n", dg[@"jbroot"]];
+            [d appendFormat:@"     容器=%@\n", dg[@"container"]];
+            [d appendString:@"     可写路径：\n"];
+            for (NSString *p in dg[@"writable"] ?: @[]) [d appendFormat:@"       ✅ %@\n", p];
+            [d appendString:@"     不可写路径：\n"];
+            for (NSString *p in dg[@"failed"] ?: @[]) [d appendFormat:@"       ❌ %@\n", p];
+        }
     }
+    if (!foundDiag) {
+        [d appendString:@"  未读到任何诊断 plist → 说明「App 侧写文件」在设置页这边一条都看不到\n"];
+        [d appendString:@"  （请确认已打开过目标 App，让它产生一次注入）\n"];
+    }
+
+    // ---- 3. 设置页能读到哪个日志文件的内容（取尾部）----
+    [d appendString:@"\n【3】设置页能读到的日志内容（各候选，取尾部 30 行）\n"];
+    NSMutableArray *logCands = [NSMutableArray array];
+    [logCands addObject:@"/var/mobile/Documents/PageTurner.log"];
+    if (jb.length) [logCands addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents/PageTurner.log"]];
+    for (NSString *dir in dirs) {
+        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+        for (NSString *it in items ?: @[]) {
+            if ([it hasPrefix:@"PageTurner-"] && [it hasSuffix:@".log"]) {
+                NSString *fp = [dir stringByAppendingPathComponent:it];
+                if (![logCands containsObject:fp]) [logCands addObject:fp];
+            }
+        }
+    }
+    BOOL anyLog = NO;
+    for (NSString *p in logCands) {
+        NSString *s = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+        if (!s.length) continue;
+        anyLog = YES;
+        NSArray *ls = [s componentsSeparatedByString:@"\n"];
+        NSUInteger n = ls.count;
+        NSUInteger from = n > 30 ? n - 30 : 0;
+        NSString *tail = [[ls subarrayWithRange:NSMakeRange(from, n - from)] componentsJoinedByString:@"\n"];
+        [d appendFormat:@"\n  ---- %@ ----\n%@\n", p, tail];
+    }
+    if (!anyLog) {
+        [d appendString:@"  一个都读不到（全部候选路径为空或不可读）\n"];
+        if (sLogLines.count) {
+            NSArray *lines = sLogLines;
+            NSUInteger n = lines.count;
+            NSUInteger from2 = n > 30 ? n - 30 : 0;
+            [d appendFormat:@"\n  ---- 内存日志（设置页自身进程） ----\n%@\n",
+                [[lines subarrayWithRange:NSMakeRange(from2, n - from2)] componentsJoinedByString:@"\n"]];
+        }
+    }
+
+    tv.text = d;
 }
 
 - (void)copyLog {
