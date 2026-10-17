@@ -28,11 +28,11 @@ iOS 越狱插件（Dopamine roothide）：把 **BLE 翻页器**（看小说用�
 dpkg -i PageTurner-1.0.57-roothide.deb
 ```
 
-装完在 **系统设置 App** 里会出现 `PageTurner` 分组（所有 UI 都在系统设置里，目标 App 内没有页面、没有三指手势）。
+装完在 **系统设置 App** 里会出现 `PageTurner` 分组（所有 UI 都在系统设置里，目标 App 内没有页面、没有双指手势）。
 
 > **两种形态，同一份代码**：本仓库一次构建同时产出
 > · `PageTurner-<ver>-roothide.deb` —— 越狱(roothide) 直装，设置页总开关 + 指定 App 生效；
-> · `PageTurnerDylib_<ver>.dylib` —— 巨魔(TrollStore / TrollFools) 注入任意 App，App 内**三指长按**弹出设置菜单。
+> · `PageTurnerDylib_<ver>.dylib` —— 巨魔(TrollStore / TrollFools) 注入任意 App，App 内**双指长按**（两指同时按住 0.5 秒）弹出设置菜单。
 > 两者的运行端引擎（`common/PTEngine.m`）完全相同，仅「配置路径 / 总开关门控 / hook 安装方式」因注入环境不同由各自 target 注入。
 > 注：v1.0.57 已删除失效的「注入探针」开关（旧版无法注入时的兜底弹窗）。
 

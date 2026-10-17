@@ -1,7 +1,7 @@
 # PageTurner v1.0.57 —— 统一代码（roothide / deb + 巨魔 dylib 双形态，功能不变，删除注入探针）
 # 架构：单一运行端引擎 common/PTEngine.m 被两个 target 共用：
 #       · roothide deb（Tweak.m 薄壳，MSHookMessageEx 装 hook，设置页总开关+指定App生效）
-#       · 巨魔 dylib（targets/dylib/，method_setImplementation 自 hook，应用内三指长按菜单）
+#       · 巨魔 dylib（targets/dylib/，method_setImplementation 自 hook，应用内双指长按菜单）
 # 事件/动作/匹配 全部共用，差异仅「配置路径 / 总开关门控 / hook 安装方式」，通过 PTSet* 注入。
 # 事件：hook UIApplication -sendEvent:（UIEvent 层，UITouch 真实坐标）
 #       + _UIUpdateHIDDigitizerInput -addEvent:（IOHIDEvent 层，sender 判来源/学习）
@@ -9,10 +9,11 @@
 # UI：全部在系统设置 → PageTurner 设置页（Preferences bundle），App 内零 UI
 # 日志：App 容器 Documents/PageTurner.log + /var/mobile/Documents/PageTurner.log
 #
-# v1.0.24 新增（照抄 volumekeytapper 注入可视化）：
+# v1.0.24 新增、v1.0.57 已删除（旧版无法注入时的兜底，早已失效）：
 #   · 注入探针 ShowProbeAlert：第三方 App 启动 2.5s 弹窗（本App/注入✅/全局配置/总开关/
-#     crashTest/勾选App数/本App被勾选）→ 打开 App 一眼看出注入成功没
-#   · 提醒条 ShowToast（勾选生效 App）：黑底白字+黄边框、中上方、2 秒 = 注入成功标识
+#     crashTest/勾选App数/本App被勾选）
+#   · 提醒条 ShowToast（勾选生效 App）：黑底白字+黄边框、中上方、2 秒
+#   → 删除后 App 内无任何弹窗/提醒条；确认是否注入成功改看「调试可视化」绿点轨迹
 # v1.0.23 关键修复（三路实证锁定终极根因 = Filter，不是符号）：
 #   · TrollCM deb 拆包：Filter={ Bundles=[com.apple.springboard] } + _MSHookMessageEx×4 → 注入 SB 成功
 #   · volumekeytapper Makefile：Filter={ Bundles=[com.apple.UIKit] } + -Wl,-undefined,dynamic_lookup

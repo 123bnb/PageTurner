@@ -98,7 +98,7 @@ jobs:
           DYLIB_RAW="${{ env.DYLIB_OUT }}"
           DYLIB="PageTurnerDylib_${TAG}.dylib"
           cp "$DYLIB_RAW" "$DYLIB"
-          NOTES=$'PageTurner v'"${VERSION}"$'（统一代码：roothide 直装 .deb + 巨魔注入 .dylib）\n\n功能与 v1.0.56 完全一致（学习模式 + 映射 + 动作执行 + 设置页），仅代码统一为单仓库单构建；删除已失效的注入探针开关。\n\n安装方式：\n· 越狱(roothide)：装 PageTurner-'"${VERSION}"$'-roothide.deb，系统设置→PageTurner 里开总开关并勾选生效 App\n· 巨魔(TrollStore / TrollFools)：用注入器把 PageTurnerDylib_'"${TAG}"$'.dylib 注入目标 App，App 内三指长按弹菜单'
+          NOTES=$'PageTurner v'"${VERSION}"$'（统一代码：roothide 直装 .deb + 巨魔注入 .dylib）\n\n功能与 v1.0.56 完全一致（学习模式 + 映射 + 动作执行 + 设置页），仅代码统一为单仓库单构建；删除已失效的注入探针开关。\n\n安装方式：\n· 越狱(roothide)：装 PageTurner-'"${VERSION}"$'-roothide.deb，系统设置→PageTurner 里开总开关并勾选生效 App\n· 巨魔(TrollStore / TrollFools)：用注入器把 PageTurnerDylib_'"${TAG}"$'.dylib 注入目标 App，App 内双指长按（两指同时按住 0.5 秒）弹菜单'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" "$DYLIB" --clobber
           else
