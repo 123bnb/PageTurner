@@ -10,7 +10,8 @@ iOS 越狱插件（Dopamine roothide）：把 **BLE 翻页器**（看小说用�
 
 - **按键特征学习录制**：大白屏里反复按同一个键，插件自动归纳特征（来源设备 + 方向 + 位移区间），支持同一翻页器多个键分别录制
 - **一键多动作**：一个按键特征可以挂任意多条动作，按一次键按顺序全部执行；映射区支持**拖动排序**（v1.0.43+）
-- **动作类型**：点击、双击、滑动（速度可调，默认 1000pt/s）、延迟、静音切换、音量 + / 音量 -
+- **动作类型**：点击、双击、滑动（速度可调，默认 1000pt/s）、滑动(手动)（直接填参数）、延迟
+  - v1.0.48 起已**移除**音量 +/音量 -/静音切换（跨进程音量控制在第三方 App 不可靠）；旧配置里残留的会显示「（已移除）」
 - **指定 App 生效**：勾选目标 App（如 com.dragon.read），只有它里面拦截替换；未勾选 App 完全不受影响
 - **调试可视化**：独立开关，显示绿点轨迹——只画 App **实际收到**的触摸（被拦截吞掉的翻页器原始轨迹不显示，命中执行/未命中重放一目了然）
 - **测试区**：方案页内置大白屏测试页，在设置里就能验证"录特征 → 匹配 → 执行映射"整条链路
@@ -148,29 +149,90 @@ PageTurner/
 └── .github/workflows/build.yml       # push 自动编译 roothide deb + 巨魔 dylib 并发布 Release
 ```
 
-## 版本里程碑
+## 版本里程碑（关键节点）
 
-| 版本 | 说明 |
+| 版本 | 意义 |
 | --- | --- |
-| v1.0.4 | 采集基线：唯一能正常录多个键且带位移数据的版本 |
-| v1.0.17 | 整包回滚到 v1.0.4 采集逻辑 + 日志系统 |
-| v1.0.23 | 注入修复（Filter / extern "C" / MSHookMessageEx）——首次真正注入成功 |
-| v1.0.25 | 跨沙盒配置读取修复（探针全绿：注入✅ / 配置可读✅ / 勾选✅） |
-| v1.0.28 | 拦截方案 B（整段吞 + 未命中重放）+ 设置页全面改造 + 时序参数可调 |
-| v1.0.29 | 学习页稳定后不弹框（右上角保存）+ 探针独立开关 + 日志落盘修复 |
-| v1.0.30 | 拦截窗口 0.05s → 0.4s（双动作根因①）+ sender 校验防误吞手指 |
-| v1.0.31 | 深色模式适配 |
-| v1.0.32 | 执行中按键也拦截（gInFakeTouch 精确区分注入触摸）——双动作根除 |
-| v1.0.37 | 滑动时序参数扩展（弹起停留 / 滑动分段可调） |
-| v1.0.39 | 滑动参数上限 + 弃置式中断修复（连按滑动不再变短） |
-| v1.0.40 | 时间插值 + 静止衰减（弹起无惯性） |
-| v1.0.41 | 狂按修复（Began 延迟 40ms）+ 固定 60fps + 防惯性开关 |
-| v1.0.42 | 调试日志总开关 + 日志上限（内存 200 条 / 文件 1000 行） |
-| v1.0.43 | 9 项改进：防抖严谨化（执行中忽略新键，根除狂按打断）+ 可视化只画实际收到触摸 + 速度默认 1000pt/s + 参数页预设值 + 映射排序 + 重复特征禁保存清空 + 方案列表未录制修复 + 绿点解除 22pt 钳制 + 防惯性开关不遮挡 + 底部版本号 |
-| v1.0.50 | 可视化窗口 windowLevel 降到 Normal+1（盖 App 内容但不盖状态栏，不再接管状态栏） |
-| v1.0.53 | deb 版手动动作回归：删新增映射里的【点击(手动)/双击(手动)】，仅留【滑动(手动)】且配置页与普通【滑动】相同（设置页直接填起点/终点/速度等参数）；停用跨进程录制（不再跑去番茄小说弹半透明层实地录制——deb 背景是设置页，无实地条件）。旧配置残留的手动动作点击编辑后自动转为普通动作 |
-| v1.0.52 | 修复「测试本方案」看不到滑动(手动)轨迹——测试区执行函数缺手动动作分支（命中方案后手动动作被跳过），补上 recSwipe/tapManual/doubleTapManual 回放，测试区按翻页键真实回放录制轨迹、绿点可见（需开调试可视化） |
-| v1.0.51 | 与 dylib v1.0.12 同步四件套：①可视化改 keyWindow 覆盖层（零窗口，打开调试可视化时间/信号电量也不再变白）；②新增手动录制——滑动(手动)/点击(手动)/双击(手动)：设置页发起 → 打开番茄小说实地录制（半透明覆盖层叠在 App 内容上、触摸穿透）→ 点完成保存，回放按录制轨迹逐点注入（滑动不再卡顿）；③手动动作已录再点=重录覆盖；④录制轨迹线可见 |
+| [v1.0.0](https://github.com/123bnb/PageTurner/releases/tag/v1.0.0) | 首个正式版：拦截翻页器 + 学习录特征 + 映射动作 |
+| [v1.0.4](https://github.com/123bnb/PageTurner/releases/tag/v1.0.4) | 采集基线：唯一能正常录多个键且带位移数据的版本（后续多次回滚到它） |
+| [v1.0.5](https://github.com/123bnb/PageTurner/releases/tag/v1.0.5) | 映射动作不生效的核心修复：特征提取搬到 IOHIDEvent 层 |
+| [v1.0.8](https://github.com/123bnb/PageTurner/releases/tag/v1.0.8) | 拦截架构定调：回滚到 sendEvent 层读真实 UITouch 坐标 |
+| [v1.0.17](https://github.com/123bnb/PageTurner/releases/tag/v1.0.17) | 整包回滚到真实 v1.0.4 采集逻辑 + 日志系统 |
+| [v1.0.23](https://github.com/123bnb/PageTurner/releases/tag/v1.0.23) | 【最重要】注入终极根因修复：Filter 空 {} → com.apple.UIKit，此前 22 版全部从未被注入 |
+| [v1.0.25](https://github.com/123bnb/PageTurner/releases/tag/v1.0.25) | 跨沙盒配置读写双通（设置页写 jbroot 路径，App 侧读得到） |
+| [v1.0.28](https://github.com/123bnb/PageTurner/releases/tag/v1.0.28) | 拦截方案 B 定稿：整段吞 + 未命中重放；动作时序参数全可调 |
+| [v1.0.32](https://github.com/123bnb/PageTurner/releases/tag/v1.0.32) | 双动作根除：gInFakeTouch 精确区分注入触摸，执行中按键也拦截 |
+| [v1.0.41](https://github.com/123bnb/PageTurner/releases/tag/v1.0.41) | 狂按根因修复（Began 延迟 40ms）+ 固定 60fps + 防惯性开关 |
+| [v1.0.43](https://github.com/123bnb/PageTurner/releases/tag/v1.0.43) | 9 项改进：防抖严谨化、映射排序、速度默认 1000、底部版本号 |
+| [v1.0.48](https://github.com/123bnb/PageTurner/releases/tag/v1.0.48) | 删除音量/静音动作类型（跨进程音量控制不可靠） |
+| [v1.0.50](https://github.com/123bnb/PageTurner/releases/tag/v1.0.50) | 可视化窗口不再接管状态栏（windowLevel 降 Normal+1） |
+| [v1.0.53](https://github.com/123bnb/PageTurner/releases/tag/v1.0.53) | 手动动作回归：仅留滑动(手动)，改为设置页直接填参数 |
+| [v1.0.57](https://github.com/123bnb/PageTurner/releases/tag/v1.0.57) | 统一代码：单仓库双 target，一次构建同时产出越狱 .deb 与巨魔 .dylib；删除失效的注入探针 |
+
+## 版本历史（全部 58 个版本）
+
+> 每个版本点版本号可看该版完整的「新增 / 修复 / 删除 / 改动」说明。
+
+| 版本 | 这一版做了什么 |
+| --- | --- |
+| [v1.0.57](https://github.com/123bnb/PageTurner/releases/tag/v1.0.57) | 统一代码：单仓库双 target，一次构建同时产出越狱 .deb 与巨魔 .dylib；删除失效的注入探针 |
+| [v1.0.56](https://github.com/123bnb/PageTurner/releases/tag/v1.0.56) | 废代码清理 + 滑动(手动)合并为 1.0.55 的 DVT 式录制 |
+| [v1.0.55](https://github.com/123bnb/PageTurner/releases/tag/v1.0.55) | 滑动(手动)改 DVT 式（灰底无穿透）+ 统一轨迹基准 + 调试日志开关关即清空 |
+| [v1.0.54](https://github.com/123bnb/PageTurner/releases/tag/v1.0.54) | 优化事件热路径：配置路径缓存 + 诊断日志收敛 |
+| [v1.0.53](https://github.com/123bnb/PageTurner/releases/tag/v1.0.53) | 手动动作回归：删除点击(手动)/双击(手动)，滑动(手动)改为填参数 |
+| [v1.0.52](https://github.com/123bnb/PageTurner/releases/tag/v1.0.52) | 修复测试本方案看不到滑动(手动)轨迹（回放分支此前被 else 跳过） |
+| [v1.0.51](https://github.com/123bnb/PageTurner/releases/tag/v1.0.51) | 同步 dylib v1.0.12 四件套：keyWindow 覆盖层 + 手动录制 + 轨迹可见 + 重录覆盖 |
+| [v1.0.50](https://github.com/123bnb/PageTurner/releases/tag/v1.0.50) | 可视化绿点窗口 windowLevel 降为 Normal+1（彻底不碰状态栏） |
+| [v1.0.49](https://github.com/123bnb/PageTurner/releases/tag/v1.0.49) | 状态栏修复：可视化窗口不再接管状态栏，开关关掉时销毁窗口 |
+| [v1.0.48](https://github.com/123bnb/PageTurner/releases/tag/v1.0.48) | 删除音量动作类型（音量+/音量-/静音切换）+ 日志页改读运行端日志文件 |
+| [v1.0.47](https://github.com/123bnb/PageTurner/releases/tag/v1.0.47) | 音量读取改 MPVolumeView slider（绕开「无音频会话进程恒假 0.5」） |
+| [v1.0.46](https://github.com/123bnb/PageTurner/releases/tag/v1.0.46) | 音量±基础值修复：改走 AVAudioSession.outputVolume 现读现算 |
+| [v1.0.45](https://github.com/123bnb/PageTurner/releases/tag/v1.0.45) | 修复音量±只能首次触发（目标值不再依赖 get 回读） |
+| [v1.0.44](https://github.com/123bnb/PageTurner/releases/tag/v1.0.44) | 修复音量动作全部无效（AVSystemController category 字符串用错）+ CI 版本号修复 |
+| [v1.0.43](https://github.com/123bnb/PageTurner/releases/tag/v1.0.43) | 9 项改进：防抖严谨化 + 可视化修正 + 速度默认 1000 + 映射排序 |
+| [v1.0.42](https://github.com/123bnb/PageTurner/releases/tag/v1.0.42) | 调试日志总开关 + 日志上限（内存 200 条 / 文件 1000 行） |
+| [v1.0.41](https://github.com/123bnb/PageTurner/releases/tag/v1.0.41) | 狂按根因修复（Began 延迟 40ms）+ 固定 60fps + 防惯性显式开关 |
+| [v1.0.40](https://github.com/123bnb/PageTurner/releases/tag/v1.0.40) | 惯性修复：时间插值 + 静止衰减（模拟真实手指停住） |
+| [v1.0.39](https://github.com/123bnb/PageTurner/releases/tag/v1.0.39) | 滑动 6 参数 + 回滑防惯性 + 修复连按滑动越滑越短 |
+| [v1.0.38](https://github.com/123bnb/PageTurner/releases/tag/v1.0.38) | 修复严重 bug：新增映射会覆盖已有第 1 条映射 |
+| [v1.0.37](https://github.com/123bnb/PageTurner/releases/tag/v1.0.37) | 滑动时序参数扩展：新增弹起停留 liftMs + 滑动分段可调 |
+| [v1.0.36](https://github.com/123bnb/PageTurner/releases/tag/v1.0.36) | 点击特征启用位移矢量匹配（区分同 sender 的双点击键） |
+| [v1.0.35](https://github.com/123bnb/PageTurner/releases/tag/v1.0.35) | 设置页风格统一：灰分组背景 + 方案名白卡片 |
+| [v1.0.34](https://github.com/123bnb/PageTurner/releases/tag/v1.0.34) | 多特征方案：一个方案可有多条特征（解决「启动后首次按键位移特殊」录不进） |
+| [v1.0.33](https://github.com/123bnb/PageTurner/releases/tag/v1.0.33) | 测试区滑动速度修复（与运行端统一为 时长=距离/速度）+ 命中日志加特征 |
+| [v1.0.32](https://github.com/123bnb/PageTurner/releases/tag/v1.0.32) | 双动作彻底根除：gInFakeTouch 精确识别注入触摸，翻页器按键执行中一律拦截 |
+| [v1.0.31](https://github.com/123bnb/PageTurner/releases/tag/v1.0.31) | 深色模式适配（学习页大白屏改系统自适应背景） |
+| [v1.0.30](https://github.com/123bnb/PageTurner/releases/tag/v1.0.30) | 双动作根因修复：拦截窗口 50ms→400ms + sender 校验防误吞手指 |
+| [v1.0.29](https://github.com/123bnb/PageTurner/releases/tag/v1.0.29) | 8 项：学习页保存改手动 + 注入探针独立开关 + 拦截与日志落盘修复 |
+| [v1.0.28](https://github.com/123bnb/PageTurner/releases/tag/v1.0.28) | 定稿版：拦截方案 B（整段吞 + 未命中重放）+ 动作时序参数全可调 |
+| [v1.0.27](https://github.com/123bnb/PageTurner/releases/tag/v1.0.27) | 新增触摸 sender 诊断日志（实测证明手指 ≠ 翻页器） |
+| [v1.0.26](https://github.com/123bnb/PageTurner/releases/tag/v1.0.26) | 总开关 = 总闸：探针 / 提醒条 / 调试可视化全部纳入 |
+| [v1.0.25](https://github.com/123bnb/PageTurner/releases/tag/v1.0.25) | 跨沙盒配置读写双通：设置页同时写 jbroot 路径，App 侧读得到 |
+| [v1.0.24](https://github.com/123bnb/PageTurner/releases/tag/v1.0.24) | 注入可视化：打开 App 一眼看出注入成功没（探针弹窗 + 提醒条） |
+| [v1.0.23](https://github.com/123bnb/PageTurner/releases/tag/v1.0.23) | 【终极根因】Filter 空 {} → ellekit 从不注入任何进程；改为 com.apple.UIKit |
+| [v1.0.22](https://github.com/123bnb/PageTurner/releases/tag/v1.0.22) | 修复 ellekit 拒载：删除 dynamic_lookup，让 _MSHookMessageEx 正常 import |
+| [v1.0.21](https://github.com/123bnb/PageTurner/releases/tag/v1.0.21) | 修复目标 App 不生效的三个根因（对照 volumekeytapper） |
+| [v1.0.20](https://github.com/123bnb/PageTurner/releases/tag/v1.0.20) | 运行端改测试区同款会话链路：命中才吞、未命中放行 |
+| [v1.0.19](https://github.com/123bnb/PageTurner/releases/tag/v1.0.19) | 方案页新增「▶ 测试本方案」：大白屏测试页 + 绿点点触可视化 |
+| [v1.0.18](https://github.com/123bnb/PageTurner/releases/tag/v1.0.18) | 运行端双通道：方向键走 HID 位移、点击键走 UITouch 会话 |
+| [v1.0.17](https://github.com/123bnb/PageTurner/releases/tag/v1.0.17) | 以真实 v1.0.4（commit 0cd50018）为基底 + 日志系统 |
+| [v1.0.16](https://github.com/123bnb/PageTurner/releases/tag/v1.0.16) | 整包回滚 v1.0.4（用户实测唯一能正常录多键的版本）+ 只新增日志系统 |
+| [v1.0.15](https://github.com/123bnb/PageTurner/releases/tag/v1.0.15) | 录制采集修复：方向键=hover 事件（此前被过滤）+ Tweak 全 App 学习采集 |
+| [v1.0.14](https://github.com/123bnb/PageTurner/releases/tag/v1.0.14) | 录制端双通道采集，根治「位移丢失 + 心跳污染」 |
+| [v1.0.13](https://github.com/123bnb/PageTurner/releases/tag/v1.0.13) | 日志改内存+文件双写（日志页 100% 可见）+ 冲突提示自动换行 |
+| [v1.0.12](https://github.com/123bnb/PageTurner/releases/tag/v1.0.12) | 录制日志路径修复（改写到 Preferences 沙盒容器，日志这次真的能写出来） |
+| [v1.0.11](https://github.com/123bnb/PageTurner/releases/tag/v1.0.11) | 录制端全链路日志 + 会话彻底复位 + 判重提示显示特征对比 |
+| [v1.0.10](https://github.com/123bnb/PageTurner/releases/tag/v1.0.10) | 录制端真正回滚 v1.0.4 原版（整段还原采集代码） |
+| [v1.0.9](https://github.com/123bnb/PageTurner/releases/tag/v1.0.9) | 录制回滚 v1.0.4 行为（去掉锚定锁定）+ 学习轨迹可视化 + 日志目录修复 |
+| [v1.0.8](https://github.com/123bnb/PageTurner/releases/tag/v1.0.8) | 拦截架构回滚到 sendEvent 层，修复方向键完全没拦 |
+| [v1.0.7](https://github.com/123bnb/PageTurner/releases/tag/v1.0.7) | 修复录制回归（进入学习页延迟 1 秒再接收）+ 设置图标改标准 29×29 |
+| [v1.0.6](https://github.com/123bnb/PageTurner/releases/tag/v1.0.6) | 【核心】修复模拟触摸注入：注入事件补 senderID；调试模式改为点触可视化 |
+| [v1.0.5](https://github.com/123bnb/PageTurner/releases/tag/v1.0.5) | 【核心】修复映射动作不生效：特征提取搬到 IOHIDEvent 层；新增调试模式与日志页 |
+| [v1.0.4](https://github.com/123bnb/PageTurner/releases/tag/v1.0.4) | 设置 App 里 PageTurner 条目加图标 |
+| [v1.0.3](https://github.com/123bnb/PageTurner/releases/tag/v1.0.3) | 修复学习收集失效（搬进设置页 bundle 自 hook）+ 首页空条目与方案页布局 |
+| [v1.0.2](https://github.com/123bnb/PageTurner/releases/tag/v1.0.2) | 修复设置里看不到 PageTurner 条目（PreferenceLoader 入口 plist 缺字段） |
+| [v1.0.1](https://github.com/123bnb/PageTurner/releases/tag/v1.0.1) | 架构修正：UI 全部移入系统设置页，App 内零 UI；sender 录进特征不再写死设备 |
+| [v1.0.0](https://github.com/123bnb/PageTurner/releases/tag/v1.0.0) | 首个正式版：注入所有 App，拦截翻页器触摸键并映射为动作序列 |
 
 ## 常见问题
 
