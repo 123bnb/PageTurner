@@ -68,7 +68,7 @@ jobs:
             -fobjc-arc -fobjc-abi-version=2 \
             -Wl,-undefined,dynamic_lookup \
             -Wno-unused-variable -Wno-deprecated-declarations -Wno-arc-performSelector-leaks -Wno-unused-function \
-            -Icommon -Iptftouch -include ptftouch/Compat.h \
+            -I. -Icommon -Iptftouch -include ptftouch/Compat.h \
             -framework Foundation -framework UIKit \
             -dynamiclib $SRCS -o "$OUT" \
             && echo "编译 OK (arm64+arm64e)" \
@@ -77,7 +77,7 @@ jobs:
                    -fobjc-arc -fobjc-abi-version=2 \
                    -Wl,-undefined,dynamic_lookup \
                    -Wno-unused-variable -Wno-deprecated-declarations -Wno-arc-performSelector-leaks -Wno-unused-function \
-                   -Icommon -Iptftouch -include ptftouch/Compat.h \
+                   -I. -Icommon -Iptftouch -include ptftouch/Compat.h \
                    -framework Foundation -framework UIKit \
                    -dynamiclib $SRCS -o "$OUT" \
                    && echo "编译 OK (仅arm64)"; }
