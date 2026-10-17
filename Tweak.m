@@ -13,10 +13,13 @@
 // ============================================================
 #import "PTEngine.h"
 #import <dlfcn.h>
+#import <stdio.h>
+#import <mach-o/dyld.h>   // _dyld_image_count / _dyld_get_image_name（jbroot 探测）
 
 // MSHookMessageEx 由 -lsubstrate（ellekit substrate 兼容库）提供。
-// 必须 extern "C"：Tweak.m 由 clang 编译，缺 extern "C" 会被 C++ 名字修饰，链接器找不到。
-extern "C" void MSHookMessageEx(Class _cls, SEL _name, IMP _imp, IMP *_orig);
+// 注意：本文件是 Tweak.m（Objective-C，按 C 编译），不能用 C++ 的 extern "C" 写法——
+// 原 Tweak.xm 经 Logos 转成 .mm（C++）才需要 extern "C"；这里直接 extern 即为 C 链接。
+extern void MSHookMessageEx(Class _cls, SEL _name, IMP _imp, IMP *_orig);
 
 static NSString *kPrefsBundleID = @"com.apple.Preferences";
 static NSString *gBundleID = nil;
