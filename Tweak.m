@@ -6,7 +6,7 @@
 //   · 配置路径（/var/mobile 多候选 + jbroot 探测）—— 通过 PTSetCfgPath 注入引擎
 //   · 总开关 + 指定 App 生效门控（PTSetInterceptEnabled）—— 关掉 / 非指定 App 直接放行
 //   · 用 MSHookMessageEx 装 hook（ellekit 要求含该符号才会注入第三方 App）
-//   · 注入标记文件（Filza 一眼可查是否注入）
+//   · 日志统一写入共享 jbroot 的 Documents（诊断已证实 App 侧与设置页双向可通）
 //
 // 已删除：注入探针（旧版无法注入时的兜底弹窗 PTShowProbeAlert / 提醒条 PTShowToast，
 //         早该删）；多候选路径日志冗余收敛为单路径。
@@ -25,29 +25,8 @@ static NSString *kPrefsBundleID = @"com.apple.Preferences";
 static NSString *gBundleID = nil;
 static BOOL gIsPreferences = NO;
 
-// 跨沙盒读全局 plist（照抄原 Tweak.xm）：roothide 下第三方 App 沙盒读 /var/mobile 会被重定向，
-// 从 .jbroot-XXX 根拼真实偏好路径。
-static NSString *PTJbrootRoot(void) {
-    static NSString *root = nil;
-    static dispatch_once_t on;
-    dispatch_once(&on, ^{
-        uint32_t n = _dyld_image_count();
-        for (uint32_t i = 0; i < n; i++) {
-            const char *img = _dyld_get_image_name(i);
-            if (!img) continue;
-            NSString *p = [NSString stringWithUTF8String:img];
-            NSRange r = [p rangeOfString:@"/.jbroot-"];
-            if (r.location == NSNotFound) continue;
-            NSRange startSeg = r;
-            NSRange after = NSMakeRange(NSMaxRange(startSeg), p.length - NSMaxRange(startSeg));
-            NSRange slash = [p rangeOfString:@"/" options:0 range:after];
-            NSUInteger end = (slash.location != NSNotFound) ? slash.location : p.length;
-            root = [p substringToIndex:end];
-            break;
-        }
-    });
-    return root;
-}
+// 跨沙盒读全局 plist：roothide 下第三方 App 沙盒读 /var/mobile 会被重定向，
+// 从 .jbroot-XXX 根拼真实偏好路径。jbroot 探测统一用引擎的 PTJbrootRoot()（含目录扫描兜底）。
 
 static NSString *PTGlobalPlistPath(void) {
     NSString *name = @"com.yourname.pageturner.plist";
@@ -67,32 +46,7 @@ static NSString *PTGlobalPlistPath(void) {
     return cands.firstObject;
 }
 
-// 注入标记文件（照抄原 Tweak.xm）：constructor 一被加载就写，Filza 看
-// /var/mobile/Documents/PageTurner-injected-<bid>.txt 即知该进程有没有被注入。
-static void PTWriteInjectMarker(NSString *bid) {
-    @try {
-        NSString *line = [NSString stringWithFormat:@"%@ 注入标记 进程=%@ bundleID=%@\n",
-                          [NSDate date], NSProcessInfo.processInfo.processName, bid];
-        NSMutableArray *paths = [NSMutableArray arrayWithArray:@[
-            [NSString stringWithFormat:@"/var/mobile/Documents/PageTurner-injected-%@.txt", bid],
-            @"/var/mobile/Documents/PageTurner-injected.txt",
-            [NSString stringWithFormat:@"/tmp/PageTurner-injected-%@.txt", bid]]];
-        NSString *jb = PTJbrootRoot();
-        if (jb.length) {
-            [paths addObject:[jb stringByAppendingPathComponent:
-                [NSString stringWithFormat:@"var/mobile/Documents/PageTurner-injected-%@.txt", bid]]];
-        }
-        for (NSString *p in paths) {
-            NSFileManager *fm = NSFileManager.defaultManager;
-            NSString *dir = [p stringByDeletingLastPathComponent];
-            if (dir.length && ![fm fileExistsAtPath:dir])
-                [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-            if (![fm fileExistsAtPath:p]) [fm createFileAtPath:p contents:nil attributes:nil];
-            FILE *f = fopen(p.UTF8String, "a");
-            if (f) { fputs(line.UTF8String, f); fclose(f); }
-        }
-    } @catch (NSException *e) {}
-}
+// v1.0.59：注入标记功能已删除（注入早已稳定可靠，不再产生 PageTurner-injected-*.txt）
 
 static void PTHook(NSString *clsName, NSString *selName, IMP newImp, IMP *origSlot) {
     Class cls = NSClassFromString(clsName);
@@ -103,18 +57,15 @@ static void PTHook(NSString *clsName, NSString *selName, IMP newImp, IMP *origSl
     MSHookMessageEx(cls, sel, newImp, origSlot);
 }
 
-// v1.0.58 诊断：探测某个日志路径是否真的可写（建目录 + 建文件 + 可写判定）
-static BOOL PTProbeWritable(NSString *path) {
-    @try {
-        NSFileManager *fm = NSFileManager.defaultManager;
-        NSString *dir = [path stringByDeletingLastPathComponent];
-        if (dir.length && ![fm fileExistsAtPath:dir])
-            [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-        if (![fm fileExistsAtPath:path]) {
-            if (![fm createFileAtPath:path contents:nil attributes:nil]) return NO;
-        }
-        return [fm isWritableFileAtPath:path];
-    } @catch (NSException *e) { return NO; }
+// v1.0.59：日志统一写入「共享 jbroot 的 Documents」——诊断已证实这是 App 侧与设置页
+// 唯一双向可通的路径（第三方沙盒 App 写不了普通 /var/mobile/Documents，但能写 jbroot）。
+static NSString *PTLogPathFor(NSString *bid) {
+    NSString *jb = PTJbrootRoot();
+    NSString *name = [NSString stringWithFormat:@"PageTurner-%@.log", bid];
+    if (jb.length) return [jb stringByAppendingPathComponent:[@"var/mobile/Documents" stringByAppendingPathComponent:name]];
+    // jbroot 探测不到时兜底写自己容器（至少日志不丢）
+    NSString *home = NSHomeDirectory();
+    return [[home stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"PageTurner.log"];
 }
 
 __attribute__((constructor))
@@ -127,60 +78,12 @@ static void PTInit() {
 
         // 配置路径交给引擎（roothide 多候选 / jbroot）
         PTSetCfgPath(PTGlobalPlistPath());
-        NSString *home = NSHomeDirectory();
 
-        // ===== v1.0.58 诊断：探测所有候选日志路径 → 同时写入 → 结果落独立诊断 plist =====
-        NSString *logName = [NSString stringWithFormat:@"PageTurner-%@.log", bundleID];
-        NSMutableArray *cands = [NSMutableArray array];
-        [cands addObject:[@"/var/mobile/Documents" stringByAppendingPathComponent:logName]];
-        NSString *jb2 = PTJbrootRoot();
-        if (jb2.length) {
-            [cands addObject:[jb2 stringByAppendingPathComponent:
-                [@"var/mobile/Documents" stringByAppendingPathComponent:logName]]];
-        }
-        [cands addObject:[@"/tmp" stringByAppendingPathComponent:logName]];
-        [cands addObject:[[home stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"PageTurner.log"]];
-        NSMutableArray *okPaths = [NSMutableArray array];
-        NSMutableArray *badPaths = [NSMutableArray array];
-        for (NSString *p in cands) {
-            if (PTProbeWritable(p)) [okPaths addObject:p]; else [badPaths addObject:p];
-        }
-        PTSetLogPaths(okPaths);   // 日志同时写进所有可写候选
+        // v1.0.59：日志统一写到共享 jbroot 的 Documents（诊断已证实这是唯一双向可通的路径）
+        PTSetLogPath(PTLogPathFor(bundleID));
 
         PTDylibInitIOKit();
         PTDylibLoadConfig(YES);
-
-        // 诊断 plist 写到独立文件（不碰主配置，避免污染用户的方案/勾选数据）
-        @try {
-            NSDictionary *diag = @{
-                @"bundleID": bundleID, @"pid": @(getpid()),
-                @"jbroot": jb2 ?: @"(无)", @"container": home ?: @"",
-                @"writable": okPaths, @"failed": badPaths,
-                @"time": @([[NSDate date] timeIntervalSince1970]),
-            };
-            NSData *dd = [NSPropertyListSerialization dataWithPropertyList:diag
-                format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
-            if (dd) {
-                NSString *dn = [NSString stringWithFormat:@"PageTurner-diag-%@.plist", bundleID];
-                NSMutableArray *dp = [NSMutableArray array];
-                [dp addObject:[@"/var/mobile/Documents" stringByAppendingPathComponent:dn]];
-                if (jb2.length) {
-                    [dp addObject:[jb2 stringByAppendingPathComponent:
-                        [@"var/mobile/Documents" stringByAppendingPathComponent:dn]]];
-                }
-                [dp addObject:[@"/tmp" stringByAppendingPathComponent:dn]];
-                for (NSString *p in dp) {
-                    NSString *dir = [p stringByDeletingLastPathComponent];
-                    if (dir.length && ![NSFileManager.defaultManager fileExistsAtPath:dir])
-                        [NSFileManager.defaultManager createDirectoryAtPath:dir
-                                            withIntermediateDirectories:YES attributes:nil error:nil];
-                    [dd writeToFile:p atomically:YES];
-                }
-            }
-        } @catch (NSException *e) {}
-
-        PTDylibLog(@"[诊断] bundleID=%@ jbroot=%@ 可写=%@ 不可写=%@",
-              bundleID, jb2 ?: @"(无)", okPaths, badPaths);
 
         NSDictionary *cfg = PTConfigDict();
         BOOL masterEnabled = [cfg[@"masterEnabled"] boolValue];
@@ -188,13 +91,12 @@ static void PTInit() {
         NSMutableSet *enabledApps = [NSMutableSet setWithArray:apps ? apps : @[]];
 
         PTDylibLog(@"==================================================");
-        PTDylibLog(@"PageTurner v1.0.57 已注入 %@ (pid=%d) isPrefs=%d", bundleID, getpid(), gIsPreferences);
+        PTDylibLog(@"PageTurner v1.0.59 已注入 %@ (pid=%d) isPrefs=%d 日志=%@",
+              bundleID, getpid(), gIsPreferences, PTLogPathFor(bundleID));
         PTDylibLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu",
               PTGlobalPlistPath(), masterEnabled, (unsigned long)enabledApps.count,
               [cfg[@"debounceMs"] doubleValue] ?: 300.0,
               (unsigned long)(cfg[@"plans"] ? [cfg[@"plans"] count] : 0));
-
-        PTWriteInjectMarker(bundleID);
 
         if (gIsPreferences) {
             // 学习收集由设置页 bundle 负责（roothide 空 Filter 不注入系统 App，tweak 在此进程收不到事件）

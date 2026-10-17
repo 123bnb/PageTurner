@@ -80,6 +80,14 @@ static void PTDylibInit(void) {
         @autoreleasepool {
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"?";
+                // v1.0.59：日志统一写到共享 jbroot 的 Documents（诊断证实这是与设置页共通的路径，
+                // 巨魔注入的 App 也能写这里，设置页才读得到；探测不到 jbroot 时引擎会兜底写自己容器）
+                NSString *jb = PTJbrootRoot();
+                if (jb.length) {
+                    PTSetLogPath([jb stringByAppendingPathComponent:
+                        [@"var/mobile/Documents" stringByAppendingPathComponent:
+                            [NSString stringWithFormat:@"PageTurner-%@.log", bid]]]);
+                }
                 PTDylibInstallHooks();
                 PTDylibLog(@"==================================================");
                 PTDylibLog(@"PageTurnerDylib v1.0.57 已注入 %@ (pid=%d) 配置来源=%@",

@@ -20,6 +20,7 @@
 
 // ---------- 配置（路径由 target 注入） ----------
 extern NSString *PTDylibCfgPath(void);
+extern NSString *PTJbrootRoot(void);       // v1.0.59：共享 jbroot 根路径（roothide），nil=未探测到
 extern BOOL PTDylibUsingDebConfig(void);   // YES=复用 deb 版配置；NO=独立配置
 extern NSMutableDictionary *PTDylibReadCfg(void);
 extern void PTDylibWriteCfg(NSDictionary *cfg);
@@ -32,9 +33,6 @@ extern void PTDylibLog(NSString *fmt, ...);
 extern void PTDylibLogSetEnabled(BOOL on);
 extern NSArray *PTDylibLogLines(void);
 extern void PTSetLogPath(NSString *p);       // v1.0.57：日志文件路径由 target 注入
-// v1.0.58 诊断：同时写多个候选日志路径（探测 App 侧与设置页哪几条路能互通）
-extern void PTSetLogPaths(NSArray *paths);
-extern NSArray *PTLogActivePaths(void);      // 当前实际写入的日志路径列表
 
 // ---------- hook 装配 ----------
 extern void PTDylibInstallHooks(void);        // dylib 用：method_setImplementation + IOKit dlsym

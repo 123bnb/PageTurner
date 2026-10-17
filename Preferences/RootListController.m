@@ -254,7 +254,14 @@
 @property (nonatomic, strong) NSMutableArray *chips;   // v1.0.43：每行预设按钮数组（对应滑块行）
 @end
 
-@interface PTDebugLogVC : PSViewController
+@interface PTDebugLogVC : PSViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *table;
+@property (nonatomic, strong) NSArray *items;   // @[@{@"name":..., @"path":..., @"size":...}]
+@end
+
+// v1.0.59：单份日志的内容页（查看 + 一键复制）
+@interface PTLogContentVC : PSViewController
+@property (nonatomic, strong) NSString *logPath;
 @end
 
 @interface PTTestVC : PSViewController
@@ -357,14 +364,17 @@ static void SLogRefreshCfg(void) {
     NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:PT_PREFS];
     sLogEnabled = (cfg[@"debugLogEnabled"] == nil) ? YES : [cfg[@"debugLogEnabled"] boolValue];
 }
+// v1.0.59：设置页日志也统一写到「共享 jbroot 的 Documents」，与 App 侧同目录，
+// 这样设置页能读到各 App 的运行日志（PageTurner-<bundleID>.log）。
 static NSString *SLogProbePath(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray *cands = @[
-        [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject],
-        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
-        NSTemporaryDirectory(),
-        @"/var/mobile/Documents",
-    ];
+    NSMutableArray *cands = [NSMutableArray array];
+    NSString *jb = PTJbrootRootC();
+    if (jb.length) [cands addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents"]];
+    [cands addObject:@"/var/mobile/Documents"];
+    NSString *doc = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    if (doc.length) [cands addObject:doc];
+    [cands addObject:NSTemporaryDirectory()];
     for (NSString *d in cands) {
         if (!d.length) continue;
         if (![fm fileExistsAtPath:d]) [fm createDirectoryAtPath:d withIntermediateDirectories:YES attributes:nil error:nil];
@@ -372,14 +382,35 @@ static NSString *SLogProbePath(void) {
     }
     return nil;
 }
+
+// v1.0.59：清空全部日志（内存 + 所有 PageTurner*.log 文件）；调试日志开关关闭时调用
+static void PTClearAllLogs(void) {
+    @try {
+        [sLogLines removeAllObjects];
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSMutableArray *dirs = [NSMutableArray array];
+        NSString *jb = PTJbrootRootC();
+        if (jb.length) [dirs addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents"]];
+        [dirs addObject:@"/var/mobile/Documents"];
+        for (NSString *dir in dirs) {
+            NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+            for (NSString *it in items ?: @[]) {
+                if ([it hasPrefix:@"PageTurner"] && [it hasSuffix:@".log"]) {
+                    [fm removeItemAtPath:[dir stringByAppendingPathComponent:it] error:nil];
+                }
+            }
+        }
+        sLogPath = nil;   // 下次重新探测
+    } @catch (NSException *e) {}
+}
 // v1.0.42：文件日志只保留最近 1000 行，超过循环（删最旧，保留尾部 1000 行）
 static void SLogTrimFile(NSString *path) {
     @try {
         NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         if (!content) return;
         NSArray *lines = [content componentsSeparatedByString:@"\n"];
-        if (lines.count > 1000) {
-            NSArray *keep = [lines subarrayWithRange:NSMakeRange(lines.count - 1000, 1000)];
+        if (lines.count > 500) {
+            NSArray *keep = [lines subarrayWithRange:NSMakeRange(lines.count - 500, 500)];
             [[keep componentsJoinedByString:@"\n"] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
     } @catch (NSException *e) {}
@@ -395,14 +426,14 @@ static void SLog(NSString *fmt, ...) {
     time_t sec = tv.tv_sec; struct tm tmv; localtime_r(&sec, &tmv);
     char tbuf[64]; strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tmv);
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@", tbuf, (int)(tv.tv_usec/1000), msg];
-    if (sLogLines.count >= 200) [sLogLines removeObjectsInRange:NSMakeRange(0, 100)];   // v1.0.42：只存最近 200 条
+    if (sLogLines.count >= 500) [sLogLines removeObjectsInRange:NSMakeRange(0, 250)];   // v1.0.59：500 条循环
     [sLogLines addObject:line];
     if (!sLogPath) sLogPath = SLogProbePath();
     if (sLogPath) {
         static int sFileLines = 0;   // v1.0.42：文件行数计数（>1000 循环）
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
         if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; sFileLines++; } @catch (NSException *e) {} }
-        if (sFileLines > 1000) { SLogTrimFile(sLogPath); sFileLines = 1000; }
+        if (sFileLines > 500) { SLogTrimFile(sLogPath); sFileLines = 500; }
     } else {
         static BOOL sWarned = NO;
         if (!sWarned) { sWarned = YES; [sLogLines addObject:@"[SLog] ⚠️ 所有候选路径都不可写（仅内存日志）"]; }
@@ -938,20 +969,25 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [dots setProperty:@"开启后所有触摸显示绿点+轨迹（翻页器带P标记，映射执行也可见）。用于确认注入和点触生效。" forKey:@"staticText"];
         [specs addObject:dots];
 
-        // v1.0.42：调试日志开关（放在日志页上方；staticText 写明位置和作用）
+        // v1.0.42：调试日志开关（放在日志页上方）；v1.0.59：关开关联动隐藏下方入口 + 清空日志
+        NSDictionary *cfgNow = PTRead();
+        BOOL logOn = (cfgNow[@"debugLogEnabled"] == nil) ? YES : [cfgNow[@"debugLogEnabled"] boolValue];
         PSSpecifier *logSw = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
-            target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+            target:self set:@selector(setLogEnabled:specifier:) get:@selector(readPreferenceValue:)
             detail:nil cell:PSSwitchCell edit:nil];
         [logSw setProperty:@"debugLogEnabled" forKey:@"key"];
         [logSw setProperty:@YES forKey:@"default"];
-        [logSw setProperty:@"总日志开关：开启后记录注入/命中/执行全过程——内存保留最近 200 条，文件（/var/mobile/Documents/PageTurner.log）循环保留 1000 条；关闭则完全无日志。设置页即时生效，目标 App 重启后生效。" forKey:@"staticText"];
+        [logSw setProperty:@"总日志开关：开启后记录注入/命中/执行全过程——每个日志文件循环保留最近 500 条；关闭则完全无日志，并立即清空已产生的全部日志（内存与文件）。设置页即时生效，目标 App 重启后生效。" forKey:@"staticText"];
         [specs addObject:logSw];
 
-        PSSpecifier *log = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
-            target:self set:nil get:nil detail:NSClassFromString(@"PTDebugLogVC")
-            cell:PSLinkCell edit:nil];
-        [log setProperty:@"查看并复制最近日志（内存日志，最近 200 条，100% 可见），发给开发者定位" forKey:@"staticText"];
-        [specs addObject:log];
+        // v1.0.59：仅在开关打开时显示「调试日志」详情入口（联动隐藏）
+        if (logOn) {
+            PSSpecifier *log = [PSSpecifier preferenceSpecifierNamed:@"调试日志"
+                target:self set:nil get:nil detail:NSClassFromString(@"PTDebugLogVC")
+                cell:PSLinkCell edit:nil];
+            [log setProperty:@"选择要看哪份日志（设置页日志 / 各生效 App 的运行日志），查看并复制，发给开发者定位" forKey:@"staticText"];
+            [specs addObject:log];
+        }
 
         // v1.0.43：最底部版本号（居中样式在 viewWillAppear 统一设置）
         [specs addObject:[PSSpecifier groupSpecifierWithName:nil]];
@@ -989,6 +1025,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSMutableDictionary *cfg = PTRead();
     cfg[[spec propertyForKey:@"key"]] = value;
     PTWrite(cfg);
+    [self reloadSpecifiers];
+}
+
+// v1.0.59：调试日志开关——关闭时立即清空全部日志，并联动隐藏/显示「调试日志」详情入口
+- (void)setLogEnabled:(id)value specifier:(PSSpecifier *)spec {
+    NSMutableDictionary *cfg = PTRead();
+    cfg[[spec propertyForKey:@"key"]] = value;
+    PTWrite(cfg);
+    if (![value boolValue]) PTClearAllLogs();
     [self reloadSpecifiers];
 }
 
@@ -2595,9 +2640,103 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     return self;
 }
 
+// v1.0.59：构建日志列表——① 设置页日志 ② 各生效 App 的运行日志
+// 全部位于共享 jbroot 的 Documents（诊断证实这是 App 侧与设置页唯一双向可通的路径）
+- (NSArray *)buildLogItems {
+    NSMutableArray *arr = [NSMutableArray array];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *jb = PTJbrootRootC();
+    NSMutableArray *dirs = [NSMutableArray array];
+    if (jb.length) [dirs addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents"]];
+    [dirs addObject:@"/var/mobile/Documents"];
+    if (!dirs.count) return arr;
+
+    // ① 设置页日志（PageTurner.log，不带 bundleID）
+    NSString *mainPath = [dirs[0] stringByAppendingPathComponent:@"PageTurner.log"];
+    for (NSString *dir in dirs) {
+        NSString *p = [dir stringByAppendingPathComponent:@"PageTurner.log"];
+        NSDictionary *at = [fm attributesOfItemAtPath:p error:nil];
+        if (at) { mainPath = p; break; }
+    }
+    NSDictionary *mainAt = [fm attributesOfItemAtPath:mainPath error:nil];
+    [arr addObject:@{@"name": @"设置页日志（PageTurner.log）", @"path": mainPath,
+                     @"size": @(mainAt ? [mainAt fileSize] : 0)}];
+
+    // ② 各生效 App 的运行日志 PageTurner-<bundleID>.log（只列已勾选生效的 App）
+    NSDictionary *cfg = PTRead();
+    NSArray *apps = cfg[@"enabledApps"] ?: @[];
+    for (NSString *bid in apps) {
+        NSString *fname = [NSString stringWithFormat:@"PageTurner-%@.log", bid];
+        NSString *found = [dirs[0] stringByAppendingPathComponent:fname];
+        for (NSString *dir in dirs) {
+            NSString *p = [dir stringByAppendingPathComponent:fname];
+            if ([fm attributesOfItemAtPath:p error:nil]) { found = p; break; }
+        }
+        NSDictionary *at = [fm attributesOfItemAtPath:found error:nil];
+        [arr addObject:@{@"name": fname, @"path": found, @"size": @(at ? [at fileSize] : 0), @"bid": bid}];
+    }
+    return arr;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
-    // v1.0.35：统一成系统设置灰分组背景
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.items = [self buildLogItems];
+    self.table = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
+    self.table.dataSource = self;
+    self.table.delegate = self;
+    self.table.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:self.table];
+}
+
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)sec { return self.items.count; }
+
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    static NSString *ID = @"PTLogCell";
+    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:ID];
+    if (!c) {
+        c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:ID];
+        // v1.0.59：文件名一行显示不下 → 可横向滑动查看完整路径
+        UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectZero];
+        sv.tag = 900; sv.showsHorizontalScrollIndicator = NO;
+        UILabel *lb = [[UILabel alloc] init];
+        lb.tag = 901; lb.font = [UIFont systemFontOfSize:15]; lb.textColor = [UIColor labelColor];
+        [sv addSubview:lb];
+        [c.contentView addSubview:sv];
+    }
+    NSDictionary *it = self.items[ip.row];
+    unsigned long long sz = [it[@"size"] unsignedLongLongValue];
+    NSString *szTxt = sz >= 1024 ? [NSString stringWithFormat:@"%.1f KB", sz / 1024.0]
+                                 : [NSString stringWithFormat:@"%llu B", sz];
+    c.detailTextLabel.text = sz > 0 ? [NSString stringWithFormat:@"%@ · 点击查看", szTxt]
+                                    : @"暂无内容（还没产生日志）";
+    CGFloat w = self.view.bounds.size.width - 40;
+    UIScrollView *sv = [c.contentView viewWithTag:900];
+    UILabel *lb = [sv viewWithTag:901];
+    lb.text = it[@"name"];
+    [lb sizeToFit];
+    sv.frame = CGRectMake(16, 10, w, lb.bounds.size.height);
+    sv.contentSize = CGSizeMake(MAX(lb.bounds.size.width, w), lb.bounds.size.height);
+    c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return c;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:YES];
+    PTLogContentVC *vc = [PTLogContentVC new];
+    vc.logPath = self.items[ip.row][@"path"];
+    [self.navigationController pushViewController:vc animated:YES];
+}
+@end
+
+// ============================================================
+// 日志内容页（v1.0.59：查看单份日志 + 一键复制）
+// ============================================================
+@implementation PTLogContentVC
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = [self.logPath lastPathComponent];
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
     UITextView *tv = [[UITextView alloc] initWithFrame:self.view.bounds];
@@ -2605,122 +2744,23 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     tv.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
     tv.textContainerInset = UIEdgeInsetsMake(12, 12, 12, 12);
     tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+
+    NSString *s = [NSString stringWithContentsOfFile:self.logPath encoding:NSUTF8StringEncoding error:nil];
+    NSArray *ls = s.length ? [s componentsSeparatedByString:@"\n"] : @[];
+    NSUInteger n = ls.count;
+    NSUInteger from = n > 500 ? n - 500 : 0;   // v1.0.59：与 500 条循环一致，最多显示 500 行
+    tv.text = s.length
+        ? [[ls subarrayWithRange:NSMakeRange(from, n - from)] componentsJoinedByString:@"\n"]
+        : [NSString stringWithFormat:@"暂无日志内容。\n\n路径：%@\n\n可能原因：该 App 还没产生日志，或调试日志开关被关闭（关闭会清空全部日志）。", self.logPath];
     [self.view addSubview:tv];
 
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"复制"
         style:UIBarButtonItemStyleDone target:self action:@selector(copyLog)];
-
-    // ===== v1.0.58 诊断版：只做「App 与插件如何共通日志」的通路探测展示 =====
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSMutableString *d = [NSMutableString string];
-    NSString *jb = PTJbrootRootC();
-
-    [d appendString:@"===== 日志通路诊断（v1.0.58 诊断版）=====\n"];
-    [d appendString:@"目的：确认 App 侧(被注入进程)与设置页(Preferences 进程)到底哪条路径能互通\n\n"];
-
-    // ---- 1. 设置页能列出哪些目录、里面有哪些 PageTurner 文件 ----
-    [d appendString:@"【1】设置页(Preferences 进程)能访问的目录\n"];
-    NSMutableArray *dirs = [NSMutableArray array];
-    [dirs addObject:@"/var/mobile/Documents"];
-    if (jb.length) [dirs addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents"]];
-    [dirs addObject:NSTemporaryDirectory()];
-    NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    if (docDir.length) [dirs addObject:docDir];
-    for (NSString *dir in dirs) {
-        if (!dir.length) continue;
-        NSError *err = nil;
-        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:&err];
-        if (!items) {
-            [d appendFormat:@"  ❌ %@ —— 列目录失败（无权限或不存在）\n", dir];
-            continue;
-        }
-        [d appendFormat:@"  ✅ %@ —— 可列目录（%lu 项）\n", dir, (unsigned long)items.count];
-        for (NSString *it in items) {
-            if (![it hasPrefix:@"PageTurner"]) continue;
-            NSString *fp = [dir stringByAppendingPathComponent:it];
-            NSDictionary *at = [fm attributesOfItemAtPath:fp error:nil];
-            unsigned long long sz = at ? [at fileSize] : 0;
-            NSString *szTxt = (sz >= 1024) ? [NSString stringWithFormat:@"%.1fKB", sz/1024.0]
-                                           : [NSString stringWithFormat:@"%lluB", sz];
-            [d appendFormat:@"       • %@  [%@, 可读=%@]\n", it, szTxt,
-                [fm isReadableFileAtPath:fp] ? @"YES" : @"NO"];
-        }
-    }
-
-    // ---- 2. App 侧上报的诊断 plist（App 进程探测的可写/不可写路径）----
-    [d appendString:@"\n【2】App 侧上报（PageTurner-diag-*.plist，App 进程自己探测的结果）\n"];
-    BOOL foundDiag = NO;
-    for (NSString *dir in dirs) {
-        if (!dir.length) continue;
-        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
-        for (NSString *it in items ?: @[]) {
-            if (![it hasPrefix:@"PageTurner-diag-"] || ![it hasSuffix:@".plist"]) continue;
-            NSString *fp = [dir stringByAppendingPathComponent:it];
-            NSDictionary *dg = [NSDictionary dictionaryWithContentsOfFile:fp];
-            if (!dg) continue;
-            foundDiag = YES;
-            [d appendFormat:@"  📄 %@（在 %@）\n", it, dir];
-            [d appendFormat:@"     bundleID=%@ pid=%@\n", dg[@"bundleID"], dg[@"pid"]];
-            [d appendFormat:@"     jbroot=%@\n", dg[@"jbroot"]];
-            [d appendFormat:@"     容器=%@\n", dg[@"container"]];
-            [d appendString:@"     可写路径：\n"];
-            for (NSString *p in dg[@"writable"] ?: @[]) [d appendFormat:@"       ✅ %@\n", p];
-            [d appendString:@"     不可写路径：\n"];
-            for (NSString *p in dg[@"failed"] ?: @[]) [d appendFormat:@"       ❌ %@\n", p];
-        }
-    }
-    if (!foundDiag) {
-        [d appendString:@"  未读到任何诊断 plist → 说明「App 侧写文件」在设置页这边一条都看不到\n"];
-        [d appendString:@"  （请确认已打开过目标 App，让它产生一次注入）\n"];
-    }
-
-    // ---- 3. 设置页能读到哪个日志文件的内容（取尾部）----
-    [d appendString:@"\n【3】设置页能读到的日志内容（各候选，取尾部 30 行）\n"];
-    NSMutableArray *logCands = [NSMutableArray array];
-    [logCands addObject:@"/var/mobile/Documents/PageTurner.log"];
-    if (jb.length) [logCands addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents/PageTurner.log"]];
-    for (NSString *dir in dirs) {
-        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
-        for (NSString *it in items ?: @[]) {
-            if ([it hasPrefix:@"PageTurner-"] && [it hasSuffix:@".log"]) {
-                NSString *fp = [dir stringByAppendingPathComponent:it];
-                if (![logCands containsObject:fp]) [logCands addObject:fp];
-            }
-        }
-    }
-    BOOL anyLog = NO;
-    for (NSString *p in logCands) {
-        NSString *s = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
-        if (!s.length) continue;
-        anyLog = YES;
-        NSArray *ls = [s componentsSeparatedByString:@"\n"];
-        NSUInteger n = ls.count;
-        NSUInteger from = n > 30 ? n - 30 : 0;
-        NSString *tail = [[ls subarrayWithRange:NSMakeRange(from, n - from)] componentsJoinedByString:@"\n"];
-        [d appendFormat:@"\n  ---- %@ ----\n%@\n", p, tail];
-    }
-    if (!anyLog) {
-        [d appendString:@"  一个都读不到（全部候选路径为空或不可读）\n"];
-        if (sLogLines.count) {
-            NSArray *lines = sLogLines;
-            NSUInteger n = lines.count;
-            NSUInteger from2 = n > 30 ? n - 30 : 0;
-            [d appendFormat:@"\n  ---- 内存日志（设置页自身进程） ----\n%@\n",
-                [[lines subarrayWithRange:NSMakeRange(from2, n - from2)] componentsJoinedByString:@"\n"]];
-        }
-    }
-
-    tv.text = d;
 }
 
 - (void)copyLog {
     UITextView *tv = [self.view.subviews firstObject];
-    if (![tv isKindOfClass:[UITextView class]]) return;
-    UIPasteboard.generalPasteboard.string = tv.text;
-    UIAlertController *al = [UIAlertController alertControllerWithTitle:@"已复制"
-        message:@"日志已复制到剪贴板，可直接粘贴发送" preferredStyle:UIAlertControllerStyleAlert];
-    [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:al animated:YES completion:nil];
+    if ([tv isKindOfClass:[UITextView class]]) UIPasteboard.generalPasteboard.string = tv.text;
 }
 @end
 

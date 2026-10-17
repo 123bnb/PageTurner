@@ -1,51 +1,46 @@
-# PageTurner v1.0.58（日志通路诊断版）
+# PageTurner v1.0.59
 
-> **仅用于诊断「App 侧与设置页如何共通日志」，不含任何功能改动。**
+> 日志统一到「共享 jbroot 的 Documents」、调试日志改版；删除注入标记与全部诊断代码
 
-## ✨ 新增（诊断能力）
+依据 v1.0.58 诊断结论：**第三方沙盒 App 写不了普通 `/var/mobile/Documents`，但能写共享 jbroot 的 `var/mobile/Documents`，且设置页能读到**——故日志统一走 jbroot。
 
-- App 侧（被注入的进程）启动时，探测 **4 类候选日志路径**是否可写，日志会**同时写入所有可写路径**
-  1. `/var/mobile/Documents/PageTurner-<bundleID>.log`
-  2. `<jbroot>/var/mobile/Documents/PageTurner-<bundleID>.log`（roothide 真实路径）
-  3. `/tmp/PageTurner-<bundleID>.log`
-  4. App 自身容器 `Documents/PageTurner.log`（原行为，作对照）
-- 探测结果写入**独立诊断文件** `PageTurner-diag-<bundleID>.plist`（写到上述多个目录），**不碰主配置**，不会影响你的方案/勾选数据
-- 设置页「调试日志」页改为**诊断视图**，显示三部分：
-  1. 设置页进程能列出哪些目录、里面有哪些 `PageTurner*` 文件（大小 / 是否可读）
-  2. 能读到的 App 侧诊断 plist（App 自己探测出的可写 / 不可写路径、jbroot、容器路径）
-  3. 各候选日志文件能不能读到内容（尾部 30 行预览）
+## 🗑 删除
+
+- **注入标记功能**（`PTWriteInjectMarker`）：不再产生任何 `PageTurner-injected-*.txt`（含 `/var/mobile/Documents`、`/tmp`、jbroot 变体）。注入早已稳定，不再需要人工肉眼确认
+- **v1.0.58 的全部诊断代码**：诊断 plist（`PageTurner-diag-*.plist`）、多路径探测函数、设置页诊断视图
+- **`/var/mobile/Documents`（真实路径）不再存放任何日志文件**，日志只存在于 jbroot 的 Documents
+
+## ✨ 新增
+
+- **日志统一写入共享 jbroot 的 Documents**：
+  - `PageTurner.log` —— 设置页进程日志
+  - `PageTurner-<bundleID>.log` —— 各生效 App 的运行日志
+- **「调试日志（详情）」改版为「选日志」列表**：第一项是设置页日志，其后是各生效 App 的运行日志；显示文件大小，点击进内容页查看并一键复制
+- **长文件名一行显示不下可横向滑动**查看完整路径
+- **【调试日志】开关联动**：关闭时隐藏下方详情入口，并**立即清空全部日志**（内存 + 所有 `PageTurner*.log` 文件）
+- **巨魔 dylib 也写同一个 jbroot 目录**（此前写在自己容器，设置页读不到）
+- **jbroot 探测提到引擎共用**（`PTJbrootRoot`），并加「扫描 App 安装目录找 `.jbroot-*`」兜底，供**纯 dylib 注入的 App**（如用 TrollFools 注入的番茄小说）也能定位 jbroot
 
 ## 🔄 改动
 
-- 引擎 `common/PTEngine.m`：日志写入支持**多路径同时写**（新增 `PTSetLogPaths` / `PTLogActivePaths`）
+- **日志循环统一 500 条**（内存与文件一致；此前内存 200 条 / 文件 1000 行）
+- 设置页自身日志路径改到 jbroot（与 App 侧同目录，才能读到各 App 日志）
+- 兜底日志文件名 `PageTurnerDylib.log` → `PageTurner.log`
 
-## 🚫 本次**没有**改的东西（等诊断完再动）
+## 🔧 修复
 
-- 注入标记：保留未动
-- 调试日志开关与「调试日志(详情)」的联动：未做
-- 日志条数 500 条循环：未做
-- 日志文件名滚动显示：未做
-- 关闭调试日志时清空日志：未做
-
-## 🔍 怎么配合诊断（3 步）
-
-1. 安装本版 → **注销**
-2. 打开目标 App（例如番茄小说，让它被注入一次）→ 随便按几下翻页器
-3. 回到 **系统设置 → PageTurner → 调试日志**，把整页内容**全选复制**发给开发者
-
-**重点看两处**：
-
-- 【2】里有没有读到 App 上报的诊断 plist —— 有，说明「App 侧写的文件」设置页能读到
-- 【1】【3】里 `/var/mobile/Documents` 下的 `PageTurner-*.log` 是否存在且可读 —— 决定日志最终该落在哪条路径
+- **版本号日志硬编码**：此前始终打印 "v1.0.57"（升版本时漏改字符串），现已修正为实际版本，并在日志里附带当前日志文件路径
+- 修正「设置页读不到目标 App 运行日志」的老问题（根因：App 日志写在自己容器）
 
 ## 📦 下载与安装
 
 | 形态 | 文件 | 用法 |
 |------|------|------|
-| 越狱（Dopamine / roothide） | `PageTurner-1.0.58-roothide.deb` | 安装后**注销**，系统设置 → PageTurner → 调试日志 |
-| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.58.dylib` | 注入目标 App（本次诊断主要针对越狱 deb 形态） |
+| 越狱（Dopamine / roothide） | `PageTurner-1.0.59-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
+| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.59.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |
 
 ## 🔍 排查
 
-- 越狱版日志候选：`/var/mobile/Documents/PageTurner.log`、`PageTurner-<bundleID>.log`、`<jbroot>/var/mobile/Documents/...`、`/tmp/...`
-- 诊断文件：`PageTurner-diag-<bundleID>.plist`（可直接用 Filza 打开看）
+- 日志目录：`<jbroot>/var/mobile/Documents/`（如 `/private/var/containers/Bundle/Application/.jbroot-XXXX/var/mobile/Documents/`）
+- 设置页「调试日志」里直接选日志查看 / 复制，也可直接用 Filza 打开上述目录
+- 注意：巨魔 dylib 注入的 App，需在设置页「指定 App 生效」里勾选，其日志才会出现在列表中

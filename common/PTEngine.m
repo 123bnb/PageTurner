@@ -44,7 +44,7 @@
 // 常量
 // ============================================================
 static NSString *kDylibPrefsName = @"com.yourname.pageturnerdylib.plist";
-static NSString *kDylibLogName = @"PageTurnerDylib.log";
+static NSString *kDylibLogName = @"PageTurner.log";   // v1.0.59：兜底名（未注入 jbroot 路径时写容器）
 static const double kPagerWindowSec = 0.4;       // 翻页器活跃窗口（已学 sender 开窗）
 static const double kCollectWindowSec = 0.30;    // v1.0.19：学习/测试采集窗口放宽到 0.3s，减少系统繁忙时丢样本、便于"特征已稳定"达成（原 0.05s 过短）
 static const double kTapDistThreshold = 30.0;    // 位移 <30pt 判定 tap
@@ -56,6 +56,7 @@ static const int kLearnMin = 5;                  // 学习下限
 static const int kLearnMax = 15;                 // 学习上限
 static const double kConverge = 60.0;            // 位移收敛阈值
 #define kMaxLearnedSenders 64                    // 已学 sender 上限（必须用宏：C 中 static const int 不是编译期常量，数组会退化为 VLA，theos 的 -Werror 会把它升级为错误）
+#define PTLogMaxLines 500                        // v1.0.59：日志统一 500 条循环（内存与文件一致）
 
 // ptftouch/Compat.h 声明了 extern gInjectSender（本库未使用，补实体防止动态查找落空）
 uint64_t gInjectSender = 0;
@@ -77,20 +78,9 @@ void PTSetGestureMenuEnabled(BOOL b) { gGestureMenuEnabled = b; }
 // ============================================================
 static NSMutableArray *sLogLines = nil;
 static NSString *sLogFile = nil;
-static NSArray *sLogFiles = nil;   // v1.0.58 诊断：多候选日志路径（同时写，探测哪条能通）
-// v1.0.57：日志文件路径由 target 注入（roothide 多候选路径 / dylib 沙盒容器）；未注入则用默认沙盒路径
+// v1.0.57：日志文件路径由 target 注入（roothide jbroot Documents / dylib 沙盒容器）；未注入则用默认沙盒路径
 void PTSetLogPath(NSString *p) {
     if (p.length) sLogFile = [p copy];
-}
-// v1.0.58 诊断：注入多个候选路径，日志会同时写入所有路径（探测 App 侧与设置页到底哪条路能互通）
-void PTSetLogPaths(NSArray *paths) {
-    if (paths.count) sLogFiles = [paths copy];
-}
-NSArray *PTLogActivePaths(void) {
-    NSMutableArray *a = [NSMutableArray array];
-    if (sLogFile.length) [a addObject:sLogFile];
-    for (NSString *p in (sLogFiles ?: @[])) if (p.length && ![a containsObject:p]) [a addObject:p];
-    return [a copy];
 }
 static double sLogCfgMtime = -1;
 static BOOL sLogEnabled = YES;
@@ -122,8 +112,8 @@ static void PTDylibTrimLogFile(NSString *path) {
         NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         if (!content) return;
         NSArray *lines = [content componentsSeparatedByString:@"\n"];
-        if (lines.count > 1000) {
-            NSArray *keep = [lines subarrayWithRange:NSMakeRange(lines.count - 1000, 1000)];
+        if (lines.count > PTLogMaxLines) {
+            NSArray *keep = [lines subarrayWithRange:NSMakeRange(lines.count - PTLogMaxLines, PTLogMaxLines)];
             [[keep componentsJoinedByString:@"\n"] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
     } @catch (NSException *e) {}
@@ -152,29 +142,23 @@ void PTDylibLog(NSString *fmt, ...) {
     time_t sec = tv.tv_sec; struct tm tmv; localtime_r(&sec, &tmv);
     char tbuf[64]; strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &tmv);
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@", tbuf, (int)(tv.tv_usec / 1000), msg];
-    if (sLogLines.count >= 200) [sLogLines removeObjectsInRange:NSMakeRange(0, 100)];
+    if (sLogLines.count >= PTLogMaxLines) [sLogLines removeObjectsInRange:NSMakeRange(0, PTLogMaxLines / 2)];
     [sLogLines addObject:line];
-    if (!sLogFile && !sLogFiles.count) sLogFile = PTDylibLogFilePath();
-    // v1.0.58 诊断：把这一行同时写进所有候选路径，哪条真能落盘、哪条能被测到，一目了然
-    NSMutableArray *targets = [NSMutableArray array];
-    if (sLogFile.length) [targets addObject:sLogFile];
-    for (NSString *p in (sLogFiles ?: @[])) {
-        if (p.length && ![targets containsObject:p]) [targets addObject:p];
+    if (!sLogFile) sLogFile = PTDylibLogFilePath();
+    if (sLogFile) {
+        static int sFileLines = 0;
+        PTDylibEnsureLogFile(sLogFile);
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogFile];
+        if (fh) {
+            @try {
+                [fh seekToEndOfFile];
+                [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+                [fh closeFile];
+                sFileLines++;
+            } @catch (NSException *e) {}
+        }
+        if (sFileLines > PTLogMaxLines) { PTDylibTrimLogFile(sLogFile); sFileLines = PTLogMaxLines; }
     }
-    static int sFileLines = 0;
-    for (NSString *p in targets) {
-        PTDylibEnsureLogFile(p);
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:p];
-        if (!fh) continue;
-        @try {
-            [fh seekToEndOfFile];
-            [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
-            [fh closeFile];
-            sFileLines++;
-        } @catch (NSException *e) {}
-        if (sFileLines > 1000) { PTDylibTrimLogFile(p); }
-    }
-    if (sFileLines > 1000) sFileLines = 1000;
 }
 
 NSArray *PTDylibLogLines(void) {
@@ -198,6 +182,40 @@ double PTNowC(void) {
 //   统一固定为 App 容器内自己的配置文件，读写自洽。
 // ============================================================
 static NSString *gCfgPath = nil;
+
+// v1.0.59：共享 jbroot 根路径（roothide）——诊断证实所有进程共用同一个 .jbroot-XXX，
+// 且「jbroot 的 var/mobile/Documents」是 App 侧与设置页唯一双向可通的目录。
+// 探测方式：① 遍历已加载 dylib 镜像找 /.jbroot- ② 失败则扫描 App 安装目录找 .jbroot-*（供纯 dylib 注入的 App）
+NSString *PTJbrootRoot(void) {
+    static NSString *root = nil;
+    static dispatch_once_t on;
+    dispatch_once(&on, ^{
+        uint32_t n = _dyld_image_count();
+        for (uint32_t i = 0; i < n; i++) {
+            const char *img = _dyld_get_image_name(i);
+            if (!img) continue;
+            NSString *p = [NSString stringWithUTF8String:img];
+            NSRange r = [p rangeOfString:@"/.jbroot-"];
+            if (r.location == NSNotFound) continue;
+            NSRange after = NSMakeRange(NSMaxRange(r), p.length - NSMaxRange(r));
+            NSRange slash = [p rangeOfString:@"/" options:0 range:after];
+            NSUInteger end = (slash.location != NSNotFound) ? slash.location : p.length;
+            root = [p substringToIndex:end];
+            break;
+        }
+        if (!root.length) {
+            @try {
+                NSFileManager *fm = NSFileManager.defaultManager;
+                NSString *base = @"/private/var/containers/Bundle/Application";
+                NSArray *items = [fm contentsOfDirectoryAtPath:base error:nil];
+                for (NSString *it in items ?: @[]) {
+                    if ([it hasPrefix:@".jbroot-"]) { root = [base stringByAppendingPathComponent:it]; break; }
+                }
+            } @catch (NSException *e) {}
+        }
+    });
+    return root;
+}
 
 static void PTDylibInitConfigPath(void) {
     if (gCfgPath) return;
