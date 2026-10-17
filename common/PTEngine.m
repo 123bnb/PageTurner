@@ -55,7 +55,7 @@ static const double kTapDxThresh = 0.05;         // 点击位移方向判定阈�
 static const int kLearnMin = 5;                  // 学习下限
 static const int kLearnMax = 15;                 // 学习上限
 static const double kConverge = 60.0;            // 位移收敛阈值
-static const int kMaxLearnedSenders = 64;        // 已学 sender 上限
+#define kMaxLearnedSenders 64                    // 已学 sender 上限（必须用宏：C 中 static const int 不是编译期常量，数组会退化为 VLA，theos 的 -Werror 会把它升级为错误）
 
 // ptftouch/Compat.h 声明了 extern gInjectSender（本库未使用，补实体防止动态查找落空）
 uint64_t gInjectSender = 0;
@@ -234,11 +234,6 @@ void PTDylibSetLearningLocal(BOOL on) {
     PTDylibWriteCfg(cfg);
 }
 
-// v1.0.57：暴露当前配置字典，供 roothide target 读取 masterEnabled / enabledApps 计算拦截开关
-NSDictionary *PTConfigDict(void) {
-    return gConfig ? gConfig : @{};
-}
-
 // ============================================================
 // 运行端配置缓存（mtime；无总开关/无指定 App——dylib 注入即生效）
 // ============================================================
@@ -286,6 +281,12 @@ void PTDylibLoadConfig(BOOL force) {
         }
     }
     gLearnActive = [gConfig[@"learning"][@"active"] boolValue];
+}
+
+// v1.0.57：暴露当前配置字典，供 roothide target 读取 masterEnabled / enabledApps 计算拦截开关
+// 注意：必须定义在 gConfig 声明之后（C 要求先声明后使用）
+NSDictionary *PTConfigDict(void) {
+    return gConfig ? gConfig : @{};
 }
 
 // ============================================================
