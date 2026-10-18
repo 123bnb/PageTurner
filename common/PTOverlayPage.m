@@ -99,6 +99,8 @@
         }
     }
     self.selectedDot = self.dot1;   // 默认选中 1
+    [self clampAllDots];            // 预载/默认坐标钳制到屏幕内（防负数/出屏）
+    [self applySelection];          // 高亮当前选中圆点（1）
     [self updatePos];
     // 全屏拖动：按住屏幕任意处拖动选中的圆点（点圆点选中；默认 dot1）
     UIPanGestureRecognizer *gpan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onGreenPan:)];
@@ -126,7 +128,8 @@
 }
 
 - (void)dotTapped:(UITapGestureRecognizer *)g {
-    self.selectedDot = g.view;   // 点哪个圆点选中哪个（滑动时 1/2 可切换）
+    self.selectedDot = g.view;   // 点哪个圆点选中哪个（滑动时 1/2 可切换）；setter 自动高亮
+    [self updatePos];            // 刷新标题栏"选中点N"标记
 }
 
 - (void)onGreenPan:(UIPanGestureRecognizer *)g {
@@ -142,7 +145,7 @@
     if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:self.view];
         self.selectedDot.center = CGPointMake(self.selectedDot.center.x + t.x, self.selectedDot.center.y + t.y);
-        // 解除坐标钳制：可拖到屏幕任意位置（含边缘/屏幕外），标题坐标如实显示，保存原值
+        [self clampDot:self.selectedDot];   // 圆心钳到屏幕内：可半出屏，坐标不为负/不越界
         [g setTranslation:CGPointZero inView:self.view];
         [self updatePos];
     }
@@ -175,6 +178,41 @@
             (self.mode == PTOverlayModeDoubleTap) ? @"双击" : @"点击",
             (int)self.dot1.center.x, (int)self.dot1.center.y];
     }
+}
+
+// ---------- 选中高亮 / 坐标钳制 ----------
+- (void)setSelectedDot:(UIView *)selectedDot {
+    _selectedDot = selectedDot;
+    [self applySelection];   // 选中变化即刷新高亮（无需手动调用）
+}
+
+// 选中态可视化：选中放大+不透明+底色加亮+数字白字；未选中缩小半透明
+- (void)applySelection {
+    NSArray *dots = self.isSwipe ? @[self.dot1, self.dot2] : @[self.dot1];
+    for (UIView *d in dots) {
+        BOOL sel = (d == self.selectedDot);
+        d.transform = sel ? CGAffineTransformMakeScale(1.3, 1.3) : CGAffineTransformMakeScale(0.85, 0.85);
+        d.alpha = sel ? 1.0 : 0.4;
+        UIColor *base = [UIColor colorWithCGColor:d.layer.borderColor];   // 原色（绿/橙），边框不变
+        d.backgroundColor = [base colorWithAlphaComponent: sel ? 0.65 : 0.3];
+        UILabel *lbl = (UILabel *)d.subviews.firstObject;
+        if ([lbl isKindOfClass:[UILabel class]]) lbl.textColor = sel ? [UIColor whiteColor] : [UIColor labelColor];
+    }
+}
+
+// 把圆点圆心(坐标)钳制到屏幕内：允许圆点半出屏（如坐标0时出一半），但坐标不为负、不越界
+- (void)clampDot:(UIView *)dot {
+    CGFloat w = self.view.bounds.size.width;
+    CGFloat h = self.view.bounds.size.height;
+    CGPoint c = dot.center;
+    c.x = MIN(MAX(c.x, 0), w);
+    c.y = MIN(MAX(c.y, 0), h);
+    dot.center = c;
+}
+
+- (void)clampAllDots {
+    if (self.dot1) [self clampDot:self.dot1];
+    if (self.dot2) [self clampDot:self.dot2];
 }
 
 // ---------- 轨迹录制内容（滑动手动）----------
