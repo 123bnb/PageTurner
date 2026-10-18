@@ -1,53 +1,37 @@
-# PageTurner v1.0.62
+# PageTurner v1.0.63
 
-> 修复 dylib「新增滑动(手动)」点取消退回首页的问题；并把四个「新增映射」页面统一成一套共享模板
+> 修复「新增映射」三处体验问题：坐标提示垂直居中到标题栏；滑动(手动) 全屏任意处可做起点；点击/双击/滑动 改为按住屏幕任意处即可拖动圆点
 
-## 🐛 修复 — dylib 新增映射点「取消」应回方案页，而非插件首页
+## 🐛 修复 / ♻️ 改动（均在 `common/PTOverlayPage`）
 
-**【方案页 → 新增映射 → 滑动(手动)】，点左上角「取消」，直接退回 dylib 插件首页，应该返回「方案页」**
+### 1. 坐标提示「点击(坐标,坐标)」垂直居中到半黑标题栏（bug1）
+- **现象**：绿点页（点击 / 双击 / 滑动）的实时坐标提示被放在标题栏**下方**，没有在半黑标题栏里居中。
+- **修复**：坐标提示现在作为标题栏居中的「标题」——垂直居中在 56pt 半黑条内（`barY + 13`，文字白色），和「取消 / 完成」按钮并排，像导航栏标题一样。
+- 仅绿点页生效；滑动(手动) 仍用屏幕中央的提示框，未改动。
 
-- **根因**：原来的实现在弹出录制覆盖层时，走的是「全局关闭菜单再重建」的逻辑——`PTDylibCloseMenu` 会销毁菜单 `UIWindow` 连同里面的 `UINavigationController` 导航栈，
-  等取消 / 完成后再 `PTDylibShowMenu` 从首页（`PTDylibMenuVC`）重新搭起，自然就回不到原来的「方案页」了。
-- **修复（采用方案 B — 仅录制场景重建回方案页，不动全局菜单关闭逻辑）**：
-  - 新增 `PTDylibHideMenuPreserving()` —— 录制覆盖层弹出时**只隐藏菜单窗口、保留导航栈**，不再销毁；
-  - 录制结束（取消 / 完成）后 `PTDylibShowMenu()` 重新显示，保留的导航栈自动回到进入前的「方案页」，
-    并对对应的 `PTPlanVC` 调 `reload` 刷新列表；
-  - 全局 `PTDylibCloseMenu`（用户点「关闭」菜单）保持原样——彻底销毁，行为不变。
+### 2. 滑动(手动) 全屏任意处均可作为滑动起点（bug2）
+- **现象**：只能从标题栏**下方**开始滑，标题栏区域（含背景）按下去不录。
+- **修复**：去掉「标题栏内不录」的限制（`onRecPan` 的 `loc.y < recTopY` 排除 + `recTopY` 传参一并移除），现在**全屏幕任意处**（含标题栏背景）都能做起始点。
+- **关键**：通过新增的手势代理 `gestureRecognizer:shouldReceiveTouch:` **只避让【取消】【完成】两个按钮**，所以全屏可滑的同时，按钮的点击功能完全不受影响（按钮区域不交给 pan，按钮照常响应）。
 
-## ♻️ 改动（重构）— 四个「新增映射」页面统一成一套模板 `common/PTOverlayPage`
-
-之前 deb 与 dylib 各自写了一份「点击 / 双击 / 滑动」的 `PTActionVC`，以及各写了一份「滑动(手动)」的录制页
-（deb 是 `PTRecSwipeVC` 不透明灰全屏页，dylib 是 `PTRecShowOverlay` 半透明黑覆盖层），**逻辑重复、表现还不一致**。
-
-现在抽出**一份共享模板 `common/PTOverlayPage.{h,m}`**，deb 与 dylib 共用：
-
-- 统一了四个页面的**模板外壳 + 顶部 56pt「取消 / 完成」操作条 + 安全区回退**；
-- **半透明背景（按版本区分）**：
-  - `dylib`：`translucent = YES` → 四个页面均改为**半透明黑（alpha 0.4）覆盖层**，和原来的「滑动(手动)」观感一致；
-  - `deb`：`translucent = NO` → 仍是**不透明灰全屏页**（和系统设置页风格统一）。
-- **交互表现不变（按你的要求保留原样）**：
-  - 「点击 / 双击 / 滑动」继续用原来的**绿点拖动**录交互（绿点、拖动、坐标反馈 label 原样保留）；
-  - 「滑动(手动)」继续用原来的**手势轨迹录制**（3px 阈值降采样、蓝色 6pt 轨迹、录制点回调）；
-- 通过 **host 回调（`onSave` / `onDismiss` / `recStart` / `recStop`）** 把「保存配置、关闭、录制起止」交给宿主实现，
-  从而**避免把共享引擎链接进 deb 设置页**（deb 不链 `PTEngine`，用 `PTRead()/PTWrite()` 自己的本地实现），
-  实现真正的单份代码、双端复用。
+### 3. 点击 / 双击 / 滑动：不用按住圆点本身，按住屏幕任意处即可拖动（改动1）
+- **现象**：必须精确按住绿点才能拖动，体验别扭。
+- **修复**：
+  - 圆点改为「点一下即选中」（新增 `dotTapped` 轻点手势）：点 1 选中 1、点 2 选中 2（滑动时可在 1/2 间切换；点击/双击只有 1，恒选中）。
+  - 拖动改为**全屏 pan**（`onGreenPan`）：按住屏幕任意处拖动，移动的是「当前选中的圆点」。
+  - **默认选中 1**：没点过任何圆点就直接拖，移动的就是 1；先点某个圆点再拖，移动的才是那个。
+  - 同样通过手势代理避让【取消】【完成】按钮，拖动时按钮仍可点。
 
 ## 🔧 对应文件改动
 
 | 文件 | 改动 |
 |------|------|
-| `common/PTOverlayPage.{h,m}` | **新增** 四个新增映射页的共享模板 |
-| `Preferences/RootListController.m` | 接入 `PTOverlayPage`，删除旧的 `PTActionVC` / `PTRecSwipeVC` |
-| `Preferences/Makefile` | `PageTurner_FILES` 加入 `../common/PTOverlayPage.m`，`CFLAGS` 加 `-I../common` |
-| `targets/dylib/PTDylibUI.m` | 接入 `PTOverlayPage`，删除旧的 `PTActionVC` / `PTRecShowOverlay` 等录制代码 |
-| `targets/dylib/PTDylibMain.m` | 新增 `PTDylibHideMenuPreserving()` / `PTDylibMenuWindow()`，去掉 `PTRecMigrateOverlay()` 调用 |
-| `common/PTEngine.h` | 声明导出 `PTDylibHideMenuPreserving()` / `PTDylibMenuWindow()` |
-| `.github/workflows/build.yml` | dylib 编译 `SRCS` 加入 `common/PTOverlayPage.m` |
-| `control` / `Makefile` / `Preferences/Resources/Info.plist` | 版本号 **1.0.61 → 1.0.62** |
+| `common/PTOverlayPage.m` | 上述 3 处修复/改动；新增 `selectedDot` 选中态、手势代理避让按钮；移除废弃的 `recTopY` 与逐点 `drag:` |
+| `control` / `Makefile` / `Preferences/Resources/Info.plist` | 版本号 **1.0.62 → 1.0.63** |
 
 ## 📦 下载与安装
 
 | 形态 | 文件 | 用法 |
 |------|------|------|
-| 越狱（Dopamine / roothide） | `PageTurner-1.0.62-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
-| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.62.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |
+| 越狱（Dopamine / roothide） | `PageTurner-1.0.63-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
+| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.63.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |

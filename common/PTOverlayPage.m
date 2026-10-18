@@ -7,16 +7,19 @@
 //
 #import "PTOverlayPage.h"
 
-@interface PTOverlayPage ()
+@interface PTOverlayPage () <UIGestureRecognizerDelegate>
 @property (nonatomic, assign) BOOL isSwipe;
 @property (nonatomic, strong) UIView *dot1, *dot2;
+@property (nonatomic, strong) UIView *selectedDot;      // 当前选中的圆点（默认 dot1）
 @property (nonatomic, strong) CAShapeLayer *lineLayer;
 @property (nonatomic, strong) UILabel *feedbackLabel;   // 绿点页：实时坐标；录制页：提示
+@property (nonatomic, strong) UIView *topBar;           // 顶部 取消/完成 条
+@property (nonatomic, strong) UIButton *cancelBtn;      // 取消按钮（手势需避让）
+@property (nonatomic, strong) UIButton *doneBtn;        // 完成按钮（手势需避让）
 // 录制态
 @property (nonatomic, strong) CAShapeLayer *trailLayer;
 @property (nonatomic, strong) NSMutableArray *currentPts;
 @property (nonatomic, assign) CFAbsoluteTime recT0;
-@property (nonatomic, assign) double recTopY;           // 按钮行下缘：该区域内不录（防误触按钮行）
 @property (nonatomic, copy) void (^recDoneUI)(NSArray *pts);
 @end
 
@@ -41,26 +44,26 @@
     if (topInset < 20) topInset = 20;
 
     // 顶部按钮条（56pt）：取消 / 完成
-    UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, topInset, w, 56)];
-    bar.userInteractionEnabled = YES;
-    bar.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.78];
-    [self.view addSubview:bar];
+    self.topBar = [[UIView alloc] initWithFrame:CGRectMake(0, topInset, w, 56)];
+    self.topBar.userInteractionEnabled = YES;
+    self.topBar.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.78];
+    [self.view addSubview:self.topBar];
 
-    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
-    cancel.frame = CGRectMake(8, 10, 60, 36);
-    [cancel setTitle:@"取消" forState:UIControlStateNormal];
-    cancel.titleLabel.font = [UIFont systemFontOfSize:16];
-    [cancel setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [cancel addTarget:self action:@selector(onCancelTapped) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:cancel];
+    self.cancelBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.cancelBtn.frame = CGRectMake(8, 10, 60, 36);
+    [self.cancelBtn setTitle:@"取消" forState:UIControlStateNormal];
+    self.cancelBtn.titleLabel.font = [UIFont systemFontOfSize:16];
+    [self.cancelBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [self.cancelBtn addTarget:self action:@selector(onCancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBar addSubview:self.cancelBtn];
 
-    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
-    done.frame = CGRectMake(w - 68, 10, 60, 36);
-    done.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    [done setTitle:@"完成" forState:UIControlStateNormal];
-    [done setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [done addTarget:self action:@selector(onDoneTapped) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:done];
+    self.doneBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.doneBtn.frame = CGRectMake(w - 68, 10, 60, 36);
+    self.doneBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+    [self.doneBtn setTitle:@"完成" forState:UIControlStateNormal];
+    [self.doneBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [self.doneBtn addTarget:self action:@selector(onDoneTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.topBar addSubview:self.doneBtn];
 
     if (self.mode == PTOverlayModeRecSwipe) {
         [self setupRecSwipeWithTopInset:topInset width:w height:h];
@@ -95,7 +98,12 @@
             self.dot1.center = CGPointMake(w * 0.5, h * 0.5);
         }
     }
+    self.selectedDot = self.dot1;   // 默认选中 1
     [self updatePos];
+    // 全屏拖动：按住屏幕任意处拖动选中的圆点（点圆点选中；默认 dot1）
+    UIPanGestureRecognizer *gpan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onGreenPan:)];
+    gpan.delegate = self;
+    [self.view addGestureRecognizer:gpan];
 }
 
 - (UIView *)makeDot:(UIView *)superview label:(NSString *)label color:(UIColor *)color {
@@ -110,29 +118,44 @@
     l.textColor = [UIColor labelColor];
     l.font = [UIFont boldSystemFontOfSize:16];
     [dot addSubview:l];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
-    [dot addGestureRecognizer:pan];
+    // 点圆点即选中（无需按住圆点本身才能拖）：点哪个选中哪个
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dotTapped:)];
+    [dot addGestureRecognizer:tap];
     [superview addSubview:dot];   // 绿点加到全屏视图，可拖区域 = 全屏幕
     return dot;
 }
 
-- (void)drag:(UIPanGestureRecognizer *)g {
-    UIView *dot = g.view;
-    CGPoint t = [g translationInView:dot.superview];
-    dot.center = CGPointMake(dot.center.x + t.x, dot.center.y + t.y);
-    // 解除坐标钳制：可拖到屏幕任意位置（含边缘/屏幕外），标题坐标如实显示，保存原值
-    [g setTranslation:CGPointZero inView:dot.superview];
-    [self updatePos];
+- (void)dotTapped:(UITapGestureRecognizer *)g {
+    self.selectedDot = g.view;   // 点哪个圆点选中哪个（滑动时 1/2 可切换）
+}
+
+- (void)onGreenPan:(UIPanGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateBegan) {
+        CGPoint loc = [g locationInView:self.view];
+        // 按下时若落在某个圆点上，则选中它（按下即拖也生效）
+        if (self.isSwipe) {
+            if (CGRectContainsPoint(self.dot1.frame, loc)) self.selectedDot = self.dot1;
+            else if (CGRectContainsPoint(self.dot2.frame, loc)) self.selectedDot = self.dot2;
+        }
+    }
+    if (!self.selectedDot) self.selectedDot = self.dot1;
+    if (g.state == UIGestureRecognizerStateChanged) {
+        CGPoint t = [g translationInView:self.view];
+        self.selectedDot.center = CGPointMake(self.selectedDot.center.x + t.x, self.selectedDot.center.y + t.y);
+        // 解除坐标钳制：可拖到屏幕任意位置（含边缘/屏幕外），标题坐标如实显示，保存原值
+        [g setTranslation:CGPointZero inView:self.view];
+        [self updatePos];
+    }
 }
 
 - (void)updatePos {
     if (!self.feedbackLabel) {
-        CGFloat top = self.view.safeAreaInsets.top;
-        if (top < 20) top = 20;
         CGFloat w = self.view.bounds.size.width;
-        self.feedbackLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, top + 64, w, 30)];
+        // v1.0.63：坐标提示作为标题栏居中的「标题」，垂直居中在 56pt 半黑条内
+        CGFloat barY = self.topBar.frame.origin.y;
+        self.feedbackLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, barY + 13, w, 30)];
         self.feedbackLabel.textAlignment = NSTextAlignmentCenter;
-        self.feedbackLabel.textColor = self.translucent ? [UIColor whiteColor] : [UIColor labelColor];
+        self.feedbackLabel.textColor = [UIColor whiteColor];   // 半黑标题栏上用白字
         self.feedbackLabel.font = [UIFont boldSystemFontOfSize:16];
         [self.view addSubview:self.feedbackLabel];
     }
@@ -156,7 +179,8 @@
 
 // ---------- 轨迹录制内容（滑动手动）----------
 - (void)setupRecSwipeWithTopInset:(CGFloat)topInset width:(CGFloat)w height:(CGFloat)h {
-    self.recTopY = topInset + 56.0;   // 按钮行下缘：该区域内不录（防误触按钮行）
+    // v1.0.63：去掉「标题栏内不录」限制，全屏幕任意处（含标题栏背景）均可作为滑动起点；
+    // 仅【取消】【完成】按钮通过手势代理避让，保证按钮可点。
 
     // 提示字（背景，居中）
     CGFloat tw = w - 56, th = 150;
@@ -200,17 +224,18 @@
     };
 
     // 录制守卫（dylib 提供；deb 传 nil）：仅置 gRecArmed 供引擎排除录制态，真实抓取由下方 pan 完成
-    if (self.recStart) self.recStart(@"recSwipe", self.recTopY, self.recDoneUI);
+    // topY 传 0：v1.0.63 起全屏幕（含标题栏背景）均可作为起点，标题栏「按钮」由手势代理避让
+    if (self.recStart) self.recStart(@"recSwipe", 0, self.recDoneUI);
 
-    // 整个页面接收 pan（按钮行内误触已在 onRecPan 中排除）
+    // 整个页面接收 pan（含标题栏背景）；【取消】【完成】按钮由手势代理避让，不影响功能
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onRecPan:)];
+    pan.delegate = self;
     [self.view addGestureRecognizer:pan];
 }
 
 - (void)onRecPan:(UIPanGestureRecognizer *)pan {
     CGPoint loc = [pan locationInView:self.view];
     if (pan.state == UIGestureRecognizerStateBegan) {
-        if (loc.y < self.recTopY) { self.currentPts = nil; return; }   // 按钮行内误触：不录
         self.currentPts = [NSMutableArray array];
         self.recT0 = CFAbsoluteTimeGetCurrent();
         [self.currentPts addObject:@{@"x": @(loc.x), @"y": @(loc.y), @"t": @0}];
@@ -285,7 +310,7 @@
 - (void)recSwipeDone {
     if (self.currentPts.count < 2) {
         UIAlertController *al = [UIAlertController alertControllerWithTitle:@"还没录到"
-            message:@"请在按钮行下方的区域实地操作一次（滑动）" preferredStyle:UIAlertControllerStyleAlert];
+            message:@"请在屏幕任意处（含标题栏背景）实地滑动一次" preferredStyle:UIAlertControllerStyleAlert];
         [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:al animated:YES completion:nil];
         return;
@@ -296,6 +321,15 @@
     a[@"pts"] = [self.currentPts copy];
     if (self.onSave) self.onSave(a, self.editIndex, self.editAction);
     if (self.onDismiss) self.onDismiss(YES);
+}
+
+// ---------- 手势代理：避让【取消】【完成】按钮，保证按钮可点 ----------
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    CGPoint p = [touch locationInView:self.view];
+    CGRect cb = [self.cancelBtn convertRect:self.cancelBtn.bounds toView:self.view];
+    CGRect db = [self.doneBtn convertRect:self.doneBtn.bounds toView:self.view];
+    if (CGRectContainsPoint(cb, p) || CGRectContainsPoint(db, p)) return NO;
+    return YES;
 }
 
 @end
