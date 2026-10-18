@@ -570,33 +570,78 @@ static void PTTestTap(CGPoint p, BOOL doubleTap) {
 }
 
 // v1.0.52：滑动(手动)测试区回放——按录制轨迹逐点注入（保持时间间隔，最短 8ms 防风暴）
+// v1.0.61：录制轨迹插值（与引擎 PTRecSwipeInterp 一致）——按目标时间在录制点之间线性插值。
+// 此前设置页没有插值、直接把录制点当触摸事件发，点少时只有 Began+Ended，退化成「点击」。
+static CGPoint PTTestRecSwipeInterp(NSArray *xs, NSArray *ys, NSArray *ts, double targetT) {
+    NSUInteger m = [ts count];
+    if (m == 0) return CGPointZero;
+    double tA = [ts[0] doubleValue], tB = [ts[m - 1] doubleValue];
+    if (targetT <= tA) return CGPointMake([xs[0] doubleValue], [ys[0] doubleValue]);
+    if (targetT >= tB) return CGPointMake([xs[m - 1] doubleValue], [ys[m - 1] doubleValue]);
+    NSUInteger lo = 0, hi = m - 1;
+    while (hi - lo > 1) {
+        NSUInteger mid = (lo + hi) / 2;
+        if ([ts[mid] doubleValue] <= targetT) lo = mid; else hi = mid;
+    }
+    double ta = [ts[lo] doubleValue], tb = [ts[hi] doubleValue];
+    double fa = [xs[lo] doubleValue], fb = [xs[hi] doubleValue];
+    double ga = [ys[lo] doubleValue], gb = [ys[hi] doubleValue];
+    double f = (tb - ta) > 1e-6 ? (targetT - ta) / (tb - ta) : 0.0;
+    return CGPointMake(fa + (fb - fa) * f, ga + (gb - ga) * f);
+}
+
 static void PTTestRecSwipeAsync(NSArray *pts, void (^done)(void)) {
-    if (!pts.count) { if (done) done(); return; }
-    // v1.0.60：画出整条轨迹（此前 recSwipe 只注入触摸、从不画轨迹，测试区看不到）
-    CGPoint p0 = CGPointMake([pts[0][@"x"] doubleValue], [pts[0][@"y"] doubleValue]);
-    CGPoint pN = CGPointMake([pts[pts.count - 1][@"x"] doubleValue], [pts[pts.count - 1][@"y"] doubleValue]);
-    double t0 = [pts[0][@"t"] doubleValue], t1 = [pts[pts.count - 1][@"t"] doubleValue];
-    PTTestShowDot(p0, pN, YES, MAX((t1 - t0) / 1000.0, 0.05));
+    if (pts.count < 2) {
+        // 不足两点无法插值：退化为一次短按（避免什么都不做）
+        if (pts.count == 1) {
+            CGPoint p = CGPointMake([pts[0][@"x"] doubleValue], [pts[0][@"y"] doubleValue]);
+            NSInteger tid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
+            PTTestShowDot(p, p, NO, 0);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                [PTFakeMetaTouch fakeTouchId:tid AtPoint:p withTouchPhase:UITouchPhaseEnded];
+                if (done) done();
+            });
+        } else if (done) done();
+        return;
+    }
+    // 预解析 @{x,y,t}（避免每帧反复解包）
+    NSMutableArray *xs = [NSMutableArray array], *ys = [NSMutableArray array], *ts = [NSMutableArray array];
+    for (NSDictionary *p in pts) {
+        [xs addObject:@([p[@"x"] doubleValue])];
+        [ys addObject:@([p[@"y"] doubleValue])];
+        [ts addObject:@([p[@"t"] doubleValue])];
+    }
+    double t0 = [ts[0] doubleValue];
+    double totalMs = [ts[ts.count - 1] doubleValue] - t0;
+    if (totalMs <= 0) totalMs = 200;    // 录制时间异常 → 给默认时长，避免瞬间完成
+    if (totalMs < 50) totalMs = 50;   // 下限与引擎画轨迹一致（录制时长异常短时的兜底，避免退化成点击）
+
+    CGPoint p0 = CGPointMake([xs[0] doubleValue], [ys[0] doubleValue]);
+    CGPoint pN = CGPointMake([xs[ts.count - 1] doubleValue], [ys[ts.count - 1] doubleValue]);
+    PTTestShowDot(p0, pN, YES, totalMs / 1000.0);   // 画整条轨迹（时长对齐录制耗时）
+
+    // v1.0.61：与引擎 PTFakeRecSwipeAsync 对齐——60fps 逐帧插值回放，位置连续 → 真正的拖动
     __block NSInteger pid = -1;
-    __block int idx = 0;
-    __block void (^step)(void);
-    step = ^(void) {
-        if (idx >= (int)pts.count) { if (done) done(); return; }
-        NSDictionary *pt = pts[idx];
-        CGPoint p = CGPointMake([pt[@"x"] doubleValue], [pt[@"y"] doubleValue]);
-        UITouchPhase ph = (idx == 0) ? UITouchPhaseBegan
-                        : ((idx == (int)pts.count - 1) ? UITouchPhaseEnded : UITouchPhaseMoved);
-        if (idx == 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:ph];
-        else [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:ph];
-        PTTestShowDot(p, p, NO, 0);   // v1.0.60：逐点画轨迹点
-        idx++;
-        if (idx >= (int)pts.count) { if (done) done(); return; }
-        double waitMs = [pts[idx][@"t"] doubleValue] - [pt[@"t"] doubleValue];
-        if (waitMs < 8) waitMs = 8;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(waitMs * NSEC_PER_SEC / 1000)),
-                       dispatch_get_main_queue(), step);
+    __block BOOL ended = NO;
+    __block CFAbsoluteTime startT = CFAbsoluteTimeGetCurrent();
+    __block void (^tick)(void);
+    tick = ^(void) {
+        if (ended) return;
+        double elapsedMs = (CFAbsoluteTimeGetCurrent() - startT) * 1000.0;
+        CGPoint cur = PTTestRecSwipeInterp(xs, ys, ts, t0 + elapsedMs);
+        if (pid < 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:cur withTouchPhase:UITouchPhaseBegan];
+        else         [PTFakeMetaTouch fakeTouchId:pid AtPoint:cur withTouchPhase:UITouchPhaseMoved];
+        PTTestShowDot(cur, cur, NO, 0);   // 逐帧画点（此前逐点画，点少时只画两点）
+        if (elapsedMs >= totalMs) {
+            [PTFakeMetaTouch fakeTouchId:pid AtPoint:pN withTouchPhase:UITouchPhaseEnded];
+            ended = YES;
+            if (done) done();
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)),
+                       dispatch_get_main_queue(), tick);
     };
-    step();
+    tick();
 }
 
 // v1.0.48：音量动作类型已整体删除（第三方 App 进程无激活音频会话，读真实音量全部
