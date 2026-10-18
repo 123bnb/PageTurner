@@ -9,12 +9,13 @@ include $(THEOS_MAKE_PATH)/common.mk
 BUNDLE_NAME = PageTurner
 
 PageTurner_FILES = RootListController.m \
+	../common/PTOverlayPage.m \
 	../ptftouch/PTFakeMetaTouch.m ../ptftouch/UITouch-KIFAdditions.m \
 	../ptftouch/UIEvent+KIFAdditions.m ../ptftouch/IOHIDEvent+KIF.m
 PageTurner_FRAMEWORKS = UIKit
 PageTurner_PRIVATE_FRAMEWORKS = Preferences
 PageTurner_INSTALL_PATH = /Library/PreferenceBundles
-PageTurner_CFLAGS = -fobjc-arc -Wno-arc-performSelector-leaks -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-retain-cycles -I../ptftouch -include ../ptftouch/Compat.h
+PageTurner_CFLAGS = -fobjc-arc -Wno-arc-performSelector-leaks -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-retain-cycles -I../common -I../ptftouch -include ../ptftouch/Compat.h
 PageTurner_LDFLAGS = -Wl,-undefined,dynamic_lookup
 
 include $(THEOS_MAKE_PATH)/bundle.mk

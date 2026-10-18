@@ -20,6 +20,7 @@
 #include <float.h>
 #import "ptftouch/PTFakeMetaTouch.h"
 #import "PTEngine.h"
+#import "PTOverlayPage.h"   // v1.0.62：点击/双击/滑动/滑动(手动) 统一模板（与 deb 共用）
 
 // 配置读写 / 日志 / 工具统一走 core 实现
 #define PTRead() PTDylibReadCfg()
@@ -80,15 +81,6 @@
 - (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase;
 @end
 
-@interface PTActionVC : UIViewController
-@property (nonatomic, strong) NSString *actionType;
-@property (nonatomic, strong) NSString *planName;
-@property (nonatomic, strong) UIView *dot1, *dot2;
-@property (nonatomic, assign) BOOL isSwipe;
-@property (nonatomic, strong) CAShapeLayer *lineLayer;
-@property (nonatomic, assign) NSInteger editIndex;
-@property (nonatomic, strong) NSDictionary *editAction;
-@end
 
 // v1.0.12：手动录制改 keyWindow 上的半透明覆盖层（不再用全屏页面 VC）——
 // 覆盖层不拦截触摸（穿透到 App 实地操作），"完成/取消"按钮行在顶部，以下为录制区。
@@ -580,21 +572,17 @@ static const double kConverge = 60.0;
             [self presentViewController:al animated:YES completion:nil];
             return;
         }
-        // v1.0.14：滑动(手动)已录动作再次点击 → 覆盖层重新录入；旧配置残留的点击(手动)/双击(手动)
-        // 转对应普通动作编辑（保存后即转普通动作，手动点击录制已删）
+        // v1.0.62：滑动(手动)已录动作再次点击 → 统一模板重录（预载已有轨迹）
         if ([type isEqualToString:@"recSwipe"]) {
-            PTRecShowOverlay(type, self.planName, ip.row, act);
+            PTDylibPresentOverlay(PTOverlayModeRecSwipe, self.planName, ip.row, act);
             return;
         }
         if ([type isEqualToString:@"tapManual"]) type = @"tap";
         else if ([type isEqualToString:@"doubleTapManual"]) type = @"doubleTap";
         if (![type isEqualToString:@"delay"]) {
-            PTActionVC *vc = [PTActionVC new];
-            vc.planName = self.planName;
-            vc.actionType = type;
-            vc.editIndex = ip.row;
-            vc.editAction = act;
-            [self.navigationController pushViewController:vc animated:YES];
+            PTOverlayMode mode = [type isEqualToString:@"doubleTap"] ? PTOverlayModeDoubleTap
+                            : ([type isEqualToString:@"swipe"] ? PTOverlayModeSwipe : PTOverlayModeTap);
+            PTDylibPresentOverlay(mode, self.planName, ip.row, act);
         } else {
             PTActionParamVC *vc = [PTActionParamVC new];
             vc.planName = self.planName;
@@ -677,10 +665,72 @@ static const double kConverge = 60.0;
     [self presentViewController:al animated:YES completion:nil];
 }
 
+// v1.0.62：统一模板呈现"新增映射"四页面（dylib：半透明覆盖窗口 + 关菜单保留导航栈；
+// recStart/recStop 接引擎录制守卫）。取消/完成后重显菜单并回到方案页（修 bug B）。
+static UIWindow *gOverlayWindow = nil;
+static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInteger editIndex, NSDictionary *editAction) {
+    PTDylibHideMenuPreserving();   // 关菜单但保留导航栈（取消/完成后回到方案页，不改全局关菜单行为）
+    PTOverlayPage *page = [PTOverlayPage new];
+    page.mode = mode;
+    page.planName = planName;
+    page.editIndex = editIndex;
+    page.editAction = editAction;
+    page.translucent = YES;        // dylib 半透明黑，透出 App
+    __weak typeof(page) wpage = page;
+    page.onSave = ^(NSDictionary *a, NSInteger ei, NSDictionary *ea) {
+        // dylib 保存（与引擎回放字段一致）
+        NSMutableDictionary *cfg = PTRead();
+        NSMutableArray *plans = [NSMutableArray array];
+        for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
+            if ([p[@"name"] isEqualToString:planName]) {
+                NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+                NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
+                if (ei >= 0 && ea && ei < (NSInteger)acts.count) acts[ei] = a;
+                else [acts addObject:a];
+                np[@"actions"] = acts;
+                [plans addObject:np];
+            } else [plans addObject:p];
+        }
+        cfg[@"plans"] = plans;
+        PTWrite(cfg);
+    };
+    page.onDismiss = ^(BOOL saved) {
+        // 移除覆盖层窗口 + 重显菜单（保留的导航栈回到方案页）+ 刷新方案页
+        gOverlayWindow.hidden = YES;
+        gOverlayWindow.rootViewController = nil;
+        [gOverlayWindow removeFromSuperview];
+        gOverlayWindow = nil;
+        PTDylibShowMenu();
+        UINavigationController *nav = (UINavigationController *)PTDylibMenuWindow().rootViewController;
+        for (UIViewController *vc in nav.viewControllers) {
+            if ([vc isKindOfClass:[PTPlanVC class]] && [[(PTPlanVC *)vc planName] isEqualToString:planName]) {
+                [(PTPlanVC *)vc reload];
+                break;
+            }
+        }
+    };
+    // 录制守卫：仅 recSwipe 模式由 PTOverlayPage 内部调用（PTRecStart 置 gRecArmed 供引擎排除录制态）
+    page.recStart = ^(NSString *m, double topY, void (^doneUI)(NSArray *pts)) { PTRecStart(m, topY, doneUI); };
+    page.recStop = ^{ PTRecStop(); };
+
+    UIWindow *ow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]] &&
+            ((UIWindowScene *)scene).activationState == UISceneActivationStateForegroundActive) {
+            ow.windowScene = (UIWindowScene *)scene; break;
+        }
+    }
+    ow.windowLevel = UIWindowLevelAlert + 1;
+    ow.backgroundColor = [UIColor clearColor];
+    ow.rootViewController = page;
+    ow.hidden = NO;
+    gOverlayWindow = ow;
+}
+
 - (void)configAction:(NSString *)type {
     if ([type isEqualToString:@"recSwipe"]) {
-        // v1.0.14：滑动(手动)——覆盖层（关菜单 → 覆盖到 App 上实地操作，仅此一种手动动作）
-        PTRecShowOverlay(type, self.planName, -1, nil);
+        // v1.0.62：滑动(手动)——统一模板（半透明覆盖层实地录制，落盘 @{x,y,t} 与引擎回放一致）
+        PTDylibPresentOverlay(PTOverlayModeRecSwipe, self.planName, -1, nil);
     } else if ([type isEqualToString:@"delay"]) {
         UIAlertController *al = [UIAlertController alertControllerWithTitle:@"延迟"
             message:@"输入延迟毫秒数（如 500 = 0.5 秒）" preferredStyle:UIAlertControllerStyleAlert];
@@ -692,11 +742,9 @@ static const double kConverge = 60.0;
         }]];
         [self presentViewController:al animated:YES completion:nil];
     } else {
-        PTActionVC *vc = [PTActionVC new];
-        vc.actionType = type;
-        vc.planName = self.planName;
-        vc.editIndex = -1;
-        [self.navigationController pushViewController:vc animated:YES];
+        PTOverlayMode mode = [type isEqualToString:@"doubleTap"] ? PTOverlayModeDoubleTap
+                        : ([type isEqualToString:@"swipe"] ? PTOverlayModeSwipe : PTOverlayModeTap);
+        PTDylibPresentOverlay(mode, self.planName, -1, nil);
     }
 }
 
@@ -1299,401 +1347,7 @@ static const double kConverge = 60.0;
 }
 @end
 
-// ============================================================
-// 动作设置页（绿点坐标）
-// ============================================================
-@implementation PTActionVC
 
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.isSwipe = [self.actionType isEqualToString:@"swipe"];
-    self.title = self.isSwipe ? @"滑动设置" : ([self.actionType isEqualToString:@"doubleTap"] ? @"双击设置" : @"点击设置");
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
-        style:UIBarButtonItemStyleDone target:self action:@selector(done)];
-
-    CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-
-    if (self.isSwipe) {
-        self.lineLayer = [CAShapeLayer layer];
-        self.lineLayer.strokeColor = [UIColor systemGrayColor].CGColor;
-        self.lineLayer.fillColor = [UIColor clearColor].CGColor;
-        self.lineLayer.lineWidth = 2.5;
-        self.lineLayer.lineDashPattern = @[@6, @4];
-        [self.view.layer addSublayer:self.lineLayer];
-        self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
-        self.dot2 = [self makeDot:self.view label:@"2" color:[UIColor systemOrangeColor]];
-        if (self.editIndex >= 0 && self.editAction) {
-            self.dot1.center = CGPointMake([self.editAction[@"x1"] doubleValue], [self.editAction[@"y1"] doubleValue]);
-            self.dot2.center = CGPointMake([self.editAction[@"x2"] doubleValue], [self.editAction[@"y2"] doubleValue]);
-        } else {
-            self.dot1.center = CGPointMake(w * 0.3, h * 0.45);
-            self.dot2.center = CGPointMake(w * 0.7, h * 0.55);
-        }
-    } else {
-        self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
-        if (self.editIndex >= 0 && self.editAction) {
-            self.dot1.center = CGPointMake([self.editAction[@"x"] doubleValue], [self.editAction[@"y"] doubleValue]);
-        } else {
-            self.dot1.center = CGPointMake(w * 0.5, h * 0.5);
-        }
-    }
-    [self updatePos];
-}
-
-- (UIView *)makeDot:(UIView *)superview label:(NSString *)label color:(UIColor *)color {
-    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
-    dot.layer.cornerRadius = 22;
-    dot.backgroundColor = [color colorWithAlphaComponent:0.35];
-    dot.layer.borderWidth = 2;
-    dot.layer.borderColor = color.CGColor;
-    UILabel *l = [[UILabel alloc] initWithFrame:dot.bounds];
-    l.text = label;
-    l.textAlignment = NSTextAlignmentCenter;
-    l.textColor = [UIColor labelColor];
-    l.font = [UIFont boldSystemFontOfSize:16];
-    [dot addSubview:l];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
-    [dot addGestureRecognizer:pan];
-    [superview addSubview:dot];
-    return dot;
-}
-
-- (void)drag:(UIPanGestureRecognizer *)g {
-    UIView *dot = g.view;
-    CGPoint t = [g translationInView:dot.superview];
-    dot.center = CGPointMake(dot.center.x + t.x, dot.center.y + t.y);
-    [g setTranslation:CGPointZero inView:dot.superview];
-    [self updatePos];
-}
-
-- (void)updatePos {
-    if (self.isSwipe) {
-        if (self.lineLayer) {
-            CGMutablePathRef path = CGPathCreateMutable();
-            CGPathMoveToPoint(path, NULL, self.dot1.center.x, self.dot1.center.y);
-            CGPathAddLineToPoint(path, NULL, self.dot2.center.x, self.dot2.center.y);
-            self.lineLayer.path = path;
-            CGPathRelease(path);
-        }
-        self.title = [NSString stringWithFormat:@"滑动起点(%d,%d)→终点(%d,%d)",
-            (int)self.dot1.center.x, (int)self.dot1.center.y,
-            (int)self.dot2.center.x, (int)self.dot2.center.y];
-    } else {
-        self.title = [NSString stringWithFormat:@"%@(%d, %d)",
-            [self.actionType isEqualToString:@"doubleTap"] ? @"双击" : @"点击",
-            (int)self.dot1.center.x, (int)self.dot1.center.y];
-    }
-}
-
-- (void)done {
-    NSMutableDictionary *a = [NSMutableDictionary dictionary];
-    if (self.isSwipe) {
-        a[@"type"] = @"swipe";
-        a[@"x1"] = @(self.dot1.center.x); a[@"y1"] = @(self.dot1.center.y);
-        a[@"x2"] = @(self.dot2.center.x); a[@"y2"] = @(self.dot2.center.y);
-        a[@"speed"] = @(1000);
-        a[@"holdMs"] = @(20);
-        a[@"liftMs"] = @(0);
-        a[@"steps"] = @(12);
-        a[@"noInertia"] = @(YES);
-    } else if ([self.actionType isEqualToString:@"doubleTap"]) {
-        a[@"type"] = @"doubleTap";
-        a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
-        a[@"pressMs"] = @(30);
-        a[@"gapMs"] = @(120);
-    } else {
-        a[@"type"] = self.actionType;
-        a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
-        a[@"pressMs"] = @(30);
-    }
-    if (self.editIndex >= 0 && self.editAction) {
-        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"liftMs", @"steps", @"noInertia", @"ms"]) {
-            if (self.editAction[k]) a[k] = self.editAction[k];
-        }
-    }
-    NSMutableDictionary *cfg = PTRead();
-    NSMutableArray *plans = [NSMutableArray array];
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
-            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
-            NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
-            if (self.editIndex >= 0 && self.editAction && self.editIndex < (NSInteger)acts.count) {
-                acts[self.editIndex] = a;
-            } else {
-                [acts addObject:a];
-            }
-            np[@"actions"] = acts;
-            [plans addObject:np];
-        } else [plans addObject:p];
-    }
-    cfg[@"plans"] = plans;
-    PTWrite(cfg);
-    [self.navigationController popViewControllerAnimated:YES];
-}
-@end
-
-// ============================================================
-// 滑动(手动)录制页（v1.0.8）
-// 顶部按钮行往下才是录制区；手指在录制区按下开始录，抬起结束；
-// 提示字放录制区中心当背景字（v1.0.9：不被灵动岛遮挡，不拦截滑动）
-// ============================================================
-// ============================================================
-// 手动录制覆盖层（v1.0.12 起；v1.0.20 改 UIPanGestureRecognizer 抓轨迹，不再穿透到 App）
-// 关菜单 → 在 keyWindow 上叠半透明覆盖层（整层吃触摸，UIPanGestureRecognizer 抓真实滑动）→
-// 顶部"取消/完成"按钮行（56pt）以下为录制区 → 手指滑一道即被记录 →
-// 松手完成 → 保存动作（滑动(手动)）
-// ============================================================
-static UIView *gRecOverlay = nil;
-static UIButton *gRecDoneBtn = nil;
-static UIButton *gRecCancelBtn = nil;
-static UILabel *gRecTip = nil;
-static CAShapeLayer *gRecTrailLayer = nil;
-static NSString *gRecMode = nil;
-static NSString *gRecPlanName = nil;
-static NSInteger gRecEditIndex = -1;
-static NSDictionary *gRecEditAction = nil;
-static NSArray *gRecLastPts = nil;
-// v1.0.20：录制改为覆盖层 UIPanGestureRecognizer 抓真实轨迹（DVT 式，无穿透）——以下为录制态
-static NSMutableArray *gRecCurrentPts = nil;   // 当前正在录的 @{x,y,t} 字典（对照 DVT currentRecording）
-static CFAbsoluteTime gRecT0 = 0;
-static double gRecTopY = 0;                     // 按钮行下缘（窗口坐标）：该区域内不录（防误触按钮行）
-static void (^gRecDoneUI)(NSArray *) = nil;     // 录制完成回调（UI 端，更新 tip + gRecLastPts）
-
-// 前置声明（覆盖层函数在 target/菜单中使用）
-static void PTRecDrawTrail(void);
-static void PTRecOnPan(UIPanGestureRecognizer *pan);
-static void PTRecDoneTapped(void);
-static void PTRecCancelTapped(void);
-
-// 按钮/timer target（避免函数内无 self）
-@interface PTRecBtnTarget : NSObject
-@end
-@implementation PTRecBtnTarget
-- (void)doneTapped { PTRecDoneTapped(); }
-- (void)cancelTapped { PTRecCancelTapped(); }
-- (void)onRecPan:(UIPanGestureRecognizer *)pan { PTRecOnPan(pan); }
-@end
-static PTRecBtnTarget *gRecBtnTarget = nil;
-
-// v1.0.20：录制覆盖层不再做穿透 hitTest——改为整层 userInteractionEnabled=YES 吃触摸，
-// 由 UIPanGestureRecognizer 直接抓取真实滑动轨迹（照搬 DirectVolumeTap 滑动模式）。
-// 半透明黑 0.4 背景透出 App；按钮行内误触已在 PTRecOnPan 中排除。
-
-// v1.0.20：实时画录制轨迹（从 gRecCurrentPts 重建路径，替代旧 PTRecOverlayTick）
-static void PTRecDrawTrail(void) {
-    if (!gRecTrailLayer) return;
-    CGMutablePathRef path = CGPathCreateMutable();
-    for (NSUInteger i = 0; i < gRecCurrentPts.count; i++) {
-        NSDictionary *pt = gRecCurrentPts[i];
-        CGPoint p = CGPointMake([pt[@"x"] doubleValue], [pt[@"y"] doubleValue]);
-        if (i == 0) CGPathMoveToPoint(path, NULL, p.x, p.y);
-        else CGPathAddLineToPoint(path, NULL, p.x, p.y);
-    }
-    gRecTrailLayer.path = path;
-    CGPathRelease(path);
-}
-
-// v1.0.20：DVT 式录制——覆盖层 pan 抓真实轨迹（3px 阈值降采样），松手提交
-static void PTRecOnPan(UIPanGestureRecognizer *pan) {
-    if (!gRecOverlay) return;
-    CGPoint loc = [pan locationInView:gRecOverlay];
-    if (pan.state == UIGestureRecognizerStateBegan) {
-        if (loc.y < gRecTopY) { gRecCurrentPts = nil; return; }   // 按钮行内误触：不录
-        gRecCurrentPts = [NSMutableArray array];
-        gRecT0 = CFAbsoluteTimeGetCurrent();
-        [gRecCurrentPts addObject:@{@"x": @(loc.x), @"y": @(loc.y), @"t": @0}];
-    } else if (pan.state == UIGestureRecognizerStateChanged) {
-        if (!gRecCurrentPts) return;
-        NSDictionary *last = gRecCurrentPts.lastObject;
-        CGPoint lp = CGPointMake([last[@"x"] doubleValue], [last[@"y"] doubleValue]);
-        if (hypot(loc.x - lp.x, loc.y - lp.y) >= 3.0f) {
-            double tms = (CFAbsoluteTimeGetCurrent() - gRecT0) * 1000.0;
-            [gRecCurrentPts addObject:@{@"x": @(loc.x), @"y": @(loc.y), @"t": @(tms)}];
-            PTRecDrawTrail();
-        }
-    } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
-        if (gRecCurrentPts.count >= 2) {
-            PTRecDrawTrail();
-            if (gRecDoneUI) gRecDoneUI([gRecCurrentPts copy]);   // 更新 tip + gRecLastPts
-        }
-    }
-}
-
-static void PTRecSaveAction(void) {
-    if (!gRecLastPts.count) return;
-    NSMutableDictionary *a = [NSMutableDictionary dictionary];
-    a[@"type"] = gRecMode;
-    a[@"pts"] = gRecLastPts;
-    NSMutableDictionary *cfg = PTRead();
-    NSMutableArray *plans = [NSMutableArray array];
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:gRecPlanName]) {
-            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
-            NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
-            if (gRecEditIndex >= 0 && gRecEditAction && gRecEditIndex < (NSInteger)acts.count) {
-                acts[gRecEditIndex] = a;   // 编辑覆盖
-            } else {
-                [acts addObject:a];
-            }
-            np[@"actions"] = acts;
-            [plans addObject:np];
-        } else [plans addObject:p];
-    }
-    cfg[@"plans"] = plans;
-    PTWrite(cfg);
-}
-
-static void PTRecHideOverlay(void) {
-    PTRecStop();
-    [gRecOverlay removeFromSuperview];
-    gRecOverlay = nil;
-    gRecDoneBtn = nil; gRecCancelBtn = nil; gRecTip = nil;
-    gRecTrailLayer = nil;
-    gRecMode = nil; gRecPlanName = nil;
-    gRecEditIndex = -1; gRecEditAction = nil;
-    gRecLastPts = nil;
-    gRecCurrentPts = nil; gRecDoneUI = nil;
-}
-
-static void PTRecDoneTapped(void) {
-    if (!gRecLastPts.count) {
-        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"还没录到"
-            message:@"请在按钮行下方的区域实地操作一次（滑动/点击）" preferredStyle:UIAlertControllerStyleAlert];
-        [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        UIViewController *top = [UIApplication sharedApplication].keyWindow.rootViewController;
-        if (top) [top presentViewController:al animated:YES completion:nil];
-        return;
-    }
-    PTRecSaveAction();
-    PTRecHideOverlay();
-    PTDylibShowMenu();   // 保存后重新弹菜单看结果
-}
-
-static void PTRecCancelTapped(void) {
-    PTRecHideOverlay();
-    PTDylibShowMenu();
-}
-
-// v1.0.12：keyWindow 变化时迁移录制覆盖层（App 切全屏窗口）
-void PTRecMigrateOverlay(void) {
-    if (!gRecOverlay) return;
-    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
-    if (!kw) return;
-    if (gRecOverlay.superview == kw) return;
-    gRecOverlay.frame = kw.bounds;
-    [kw addSubview:gRecOverlay];
-}
-
-// v1.0.12：打开手动录制覆盖层（v1.0.14 起仅 recSwipe；v1.0.20 改 UIPanGestureRecognizer 抓轨迹，无穿透）
-void PTRecShowOverlay(NSString *mode, NSString *planName, NSInteger editIndex, NSDictionary *editAction) {
-    if (gRecOverlay) PTRecHideOverlay();
-    PTDylibCloseMenu();   // 关菜单，覆盖层才能叠到 App keyWindow 上
-    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
-    if (!kw) return;
-    gRecMode = mode; gRecPlanName = planName;
-    gRecEditIndex = editIndex; gRecEditAction = editAction;
-    gRecLastPts = (editIndex >= 0 && editAction) ? editAction[@"pts"] : nil;
-    if (!gRecBtnTarget) gRecBtnTarget = [PTRecBtnTarget new];
-
-    UIView *ov = [[UIView alloc] initWithFrame:kw.bounds];
-    ov.userInteractionEnabled = YES;                       // v1.0.20：整层吃触摸（无穿透）——DVT 式手势抓取
-    ov.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];   // 半透明黑 0.4：透出 App（DVT 同款）
-    [kw addSubview:ov];
-    gRecOverlay = ov;
-
-    // 顶部按钮行（56pt）：可交互（完成/取消），以下为录制区
-    // v1.0.14：按钮行下移到顶部安全区以下——此前从 y=0 开始，灵动岛机型按钮被灵动岛挡住按不到
-    CGFloat w = kw.bounds.size.width;
-    CGFloat h = kw.bounds.size.height;
-    // v1.0.16：安全区取最大兜底——注入环境下 keyWindow.safeAreaInsets.top 可能返回 0
-    // （导致按钮行仍被灵动岛盖住、按钮与横幅错位），用状态栏高度兜底：
-    // 灵动岛机型 statusBar≈54pt、刘海≈47pt、无刘海≈20pt
-    CGFloat topInset = kw.safeAreaInsets.top;
-    CGFloat statusH = [UIApplication sharedApplication].statusBarFrame.size.height;
-    if (topInset < statusH) topInset = statusH;
-    if (topInset < 20) topInset = 20;
-    gRecTopY = topInset + 56.0;   // 按钮行下缘：该区域内不录（防误触按钮行）
-    PTDylibLog(@"[录制] 布局：safeAreaTop=%.0f statusH=%.0f → topInset=%.0f (bar y=%.0f~%.0f 按钮 y=%.0f~%.0f)",
-        kw.safeAreaInsets.top, statusH, topInset, topInset, gRecTopY, topInset + 10, topInset + 46);
-    UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, topInset, w, 56)];
-    bar.userInteractionEnabled = YES;
-    bar.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.78];
-    [ov addSubview:bar];
-
-    gRecCancelBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    gRecCancelBtn.frame = CGRectMake(8, 10, 60, 36);   // v1.0.17：bar 内相对坐标（此前误用 topInset+10 导致按钮溢出 bar 底部渲染在横幅下方）
-    [gRecCancelBtn setTitle:@"取消" forState:UIControlStateNormal];
-    gRecCancelBtn.titleLabel.font = [UIFont systemFontOfSize:16];
-    [gRecCancelBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [gRecCancelBtn addTarget:gRecBtnTarget action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:gRecCancelBtn];
-
-    gRecDoneBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    gRecDoneBtn.frame = CGRectMake(w - 68, 10, 60, 36);   // v1.0.17：bar 内相对坐标
-    [gRecDoneBtn setTitle:@"完成" forState:UIControlStateNormal];
-    gRecDoneBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-    [gRecDoneBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [gRecDoneBtn addTarget:gRecBtnTarget action:@selector(doneTapped) forControlEvents:UIControlEventTouchUpInside];
-    [bar addSubview:gRecDoneBtn];
-
-    UILabel *barTip = [[UILabel alloc] initWithFrame:CGRectMake(76, 12, w - 152, 32)];   // v1.0.17：bar 内相对坐标
-    barTip.text = @"v1.0.20｜全屏可滑，松手录完";   // 带版本号，便于确认加载的是新版
-    barTip.font = [UIFont systemFontOfSize:12];
-    barTip.textColor = [UIColor whiteColor];
-    barTip.textAlignment = NSTextAlignmentCenter;
-    [bar addSubview:barTip];
-
-    // 提示字（背景，居中）
-    CGFloat tw = w - 56, th = 150;
-    gRecTip = [[UILabel alloc] initWithFrame:CGRectMake((w - tw) / 2.0, (h - th) / 2.0, tw, th)];
-    gRecTip.numberOfLines = 0;
-    gRecTip.textAlignment = NSTextAlignmentCenter;
-    gRecTip.font = [UIFont systemFontOfSize:16];
-    gRecTip.textColor = [UIColor whiteColor];
-    gRecTip.userInteractionEnabled = NO;
-    gRecTip.layer.cornerRadius = 12;
-    gRecTip.layer.masksToBounds = YES;
-    gRecTip.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
-    // v1.0.20：DVT 式录制只做「滑动(手动)」，mode 恒为 recSwipe
-    NSString *modeName = @"滑动(手动)";
-    if (gRecLastPts.count) {
-        gRecTip.text = [NSString stringWithFormat:@"%@\n已录 %lu 点，可重录\n完成按钮保存覆盖",
-            modeName, (unsigned long)gRecLastPts.count];
-    } else {
-        gRecTip.text = [NSString stringWithFormat:@"%@\n在区域内用手指滑一道，松手即录完\n顶部「取消/完成」可点击", modeName];
-    }
-    [ov addSubview:gRecTip];
-
-    // 轨迹线（蓝，lineWidth 6，DVT/deb 同款）
-    gRecTrailLayer = [CAShapeLayer layer];
-    gRecTrailLayer.strokeColor = [UIColor systemBlueColor].CGColor;
-    gRecTrailLayer.fillColor = [UIColor clearColor].CGColor;
-    gRecTrailLayer.lineWidth = 6;
-    gRecTrailLayer.lineJoin = kCALineJoinRound;
-    [ov.layer addSublayer:gRecTrailLayer];
-
-    // 预载已有轨迹（编辑重录）
-    if (gRecLastPts.count >= 2) { gRecCurrentPts = [NSMutableArray arrayWithArray:gRecLastPts]; PTRecDrawTrail(); }
-
-    // v1.0.20：录制完成回调——更新 tip + gRecLastPts（DVT 式 pan 抓取，松手后调用）
-    NSString *mn = modeName;
-    gRecDoneUI = ^(NSArray *pts) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (!gRecOverlay) return;
-            gRecLastPts = pts;
-            gRecTip.text = [NSString stringWithFormat:@"%@\n已录 %lu 点 ✓\n可重录，完成后点「完成」",
-                mn, (unsigned long)pts.count];
-        });
-    };
-
-    // 开始录制：PTRecStart 仅置 gRecArmed（供 Core 守卫），真实抓取由下方 pan 手势完成
-    PTRecStart(mode, gRecTopY, gRecDoneUI);
-
-    // v1.0.20：录制手势——整个覆盖层接收 pan（按钮行内误触已在 PTRecOnPan 中排除）
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gRecBtnTarget action:@selector(onRecPan:)];
-    [ov addGestureRecognizer:pan];
-}
 
 
 // ============================================================

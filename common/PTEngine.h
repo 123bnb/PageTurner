@@ -64,13 +64,13 @@ extern void PTTestShowDot(CGPoint from, CGPoint to, BOOL animate, double dur);
 // ---------- 手动录制（覆盖层 UIPanGestureRecognizer 抓取） ----------
 extern void PTRecStart(NSString *mode, double topY, void (^done)(NSArray *pts));
 extern void PTRecStop(void);
-extern void PTRecShowOverlay(NSString *mode, NSString *planName, NSInteger editIndex, NSDictionary *editAction);
 extern void PTDebugMigrateOverlay(void);
-extern void PTRecMigrateOverlay(void);
 
 // ---------- 主菜单窗口（main 实现，UI 关闭按钮调用） ----------
 extern void PTDylibCloseMenu(void);
 extern void PTDylibShowMenu(void);
+extern void PTDylibHideMenuPreserving(void);   // v1.0.62：关菜单但保留导航栈（录制/编辑后回方案页，不改全局关菜单行为）
+extern UIWindow *PTDylibMenuWindow(void);        // v1.0.62：暴露菜单窗口（导航栈含方案页）
 extern BOOL PTDylibIsMenuWindow(UIWindow *w);
 
 #endif

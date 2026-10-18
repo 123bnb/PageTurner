@@ -54,8 +54,8 @@ jobs:
         run: |
           SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
           mkdir -p out
-          # 统一引擎 common/PTEngine.m + dylib 薄壳 targets/dylib/* + ptftouch
-          SRCS="common/PTEngine.m targets/dylib/PTDylibMain.m targets/dylib/PTDylibUI.m \
+          # 统一引擎 common/PTEngine.m + 统一模板 common/PTOverlayPage.m + dylib 薄壳 targets/dylib/* + ptftouch
+          SRCS="common/PTEngine.m common/PTOverlayPage.m targets/dylib/PTDylibMain.m targets/dylib/PTDylibUI.m \
                 ptftouch/PTFakeMetaTouch.m ptftouch/UITouch-KIFAdditions.m \
                 ptftouch/UIEvent+KIFAdditions.m ptftouch/IOHIDEvent+KIF.m"
           # 打 tag(v*) 用 tag 名，普通 push 用 dev-<短sha>

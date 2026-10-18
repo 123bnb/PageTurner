@@ -67,8 +67,6 @@ uint64_t gInjectSender = 0;
 __attribute__((weak)) void PTDylibShowMenu(void) {}
 __attribute__((weak)) void PTDylibCloseMenu(void) {}
 __attribute__((weak)) BOOL PTDylibIsMenuWindow(UIWindow *w) { return NO; }
-__attribute__((weak)) void PTRecShowOverlay(NSString *mode, NSString *planName, NSInteger editIndex, NSDictionary *editAction) {}
-__attribute__((weak)) void PTRecMigrateOverlay(void) {}
 // roothide 不装双指长按菜单（用系统设置页），dylib 注入后开启
 static BOOL gGestureMenuEnabled = NO;
 void PTSetGestureMenuEnabled(BOOL b) { gGestureMenuEnabled = b; }
@@ -954,7 +952,7 @@ static double gLastExec = 0;
 // v1.0.8：手动滑动录制（滑动(手动)动作）——v1.0.20 起录制改为覆盖层 UIPanGestureRecognizer 抓取
 // （见 PTDylibUI.m 的 PTRecOnPan），不再用 sendEvent 钩子全局采集（旧版穿透到 App 抓真实触摸）。
 // 此处仅保留 PTRecStart/PTRecStop 开关 + gRecArmed 守卫（供双指检测等处排除录制态）。
-static BOOL gRecArmed = NO;                 // 录制覆盖层打开（PTDylibUI/PTRecShowOverlay 控制）
+static BOOL gRecArmed = NO;                 // 录制覆盖层打开（v1.0.62 起由 common/PTOverlayPage 经 PTRecStart/PTRecStop 控制）
 static void (^gRecDone)(NSArray *) = nil;    // 录制完成回调（UI 传入；UI 端用同块 gRecDoneUI）
 
 void PTRecStart(NSString *mode, double topY, void (^done)(NSArray *pts)) {

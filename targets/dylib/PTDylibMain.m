@@ -73,6 +73,18 @@ void PTDylibShowMenu(void) {
     PTDylibLog(@"双指长按 → 弹出主菜单");
 }
 
+// v1.0.62：关菜单但保留窗口与导航栈（不销毁）。供录制/编辑覆盖层使用：
+// 结束后 PTDylibShowMenu() 会重显该窗口，导航栈停留在方案页，而非退回首页。
+// 正常的「关闭菜单」(closeTapped) 仍走 PTDylibCloseMenu（销毁），全局行为不变。
+void PTDylibHideMenuPreserving(void) {
+    if (!gMenuWindow) return;
+    gMenuWindow.hidden = YES;   // 仅隐藏，保留 gMenuWindow 与导航栈
+}
+
+UIWindow *PTDylibMenuWindow(void) {
+    return gMenuWindow;
+}
+
 // 注入入口：TrollStore/巨魔注入 dylib 后立即执行
 __attribute__((constructor))
 static void PTDylibInit(void) {
@@ -97,14 +109,13 @@ static void PTDylibInit(void) {
                     [PTDylibReadCfg()[@"debounceMs"] doubleValue] ?: 300,
                     (unsigned long)([PTDylibReadCfg()[@"plans"] count] ?: 0));
                 PTDylibLog(@"==================================================");
-                // v1.0.7→v1.0.12：keyWindow 变化（App 切阅读页全屏窗口等）时——
-                // 迁移可视化覆盖层 & 录制覆盖层（若在录制）
-                [[NSNotificationCenter defaultCenter]
-                    addObserverForName:UIWindowDidBecomeKeyNotification
-                    object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
-                        PTDebugMigrateOverlay();
-                        PTRecMigrateOverlay();
-                    }];
+                    // v1.0.7→v1.0.12：keyWindow 变化（App 切阅读页全屏窗口等）时——
+                    // 迁移可视化覆盖层（录制覆盖层已并入统一模板的覆盖窗口，无需迁移）
+                    [[NSNotificationCenter defaultCenter]
+                        addObserverForName:UIWindowDidBecomeKeyNotification
+                        object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+                            PTDebugMigrateOverlay();
+                        }];
             });
         }
     });

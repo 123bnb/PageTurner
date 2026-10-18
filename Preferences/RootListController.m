@@ -158,6 +158,7 @@
 #include <float.h>
 #include <stdarg.h>
 #import "PTFakeMetaTouch.h"
+#import "PTOverlayPage.h"   // v1.0.62：点击/双击/滑动/滑动(手动) 统一模板（与 dylib 共用）
 
 @interface PSViewController (Private)
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier;
@@ -186,13 +187,7 @@
 - (void)reload;
 @end
 
-// v1.0.55：滑动(手动)录制器——照搬 DirectVolumeTap 的滑动模式（UIPanGestureRecognizer 抓轨迹），
-// 灰色不透明背景（系统设置页，无穿透）；落盘 @{x,y,t} 字典，与 Tweak.xm 的 PTFakeRecSwipeAsync 回放一致
-@interface PTRecSwipeVC : UIViewController
-@property (nonatomic, strong) NSArray *editPts;   // 重录时预载已有轨迹（字典数组）
-@property (nonatomic, copy) void (^onDone)(NSArray *pts);
-@property (nonatomic, copy) void (^onCancel)(void);
-@end
+// v1.0.62：滑动(手动)录制器已并入 common/PTOverlayPage（与 dylib 共用的统一模板）
 
 @interface PTPlanVC : PSViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) NSString *planName;
@@ -234,15 +229,7 @@
 - (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase;
 @end
 
-@interface PTActionVC : PSViewController
-@property (nonatomic, strong) NSString *actionType;
-@property (nonatomic, strong) NSString *planName;
-@property (nonatomic, strong) UIView *dot1, *dot2;
-@property (nonatomic, assign) BOOL isSwipe;
-@property (nonatomic, strong) CAShapeLayer *lineLayer;
-@property (nonatomic, assign) NSInteger editIndex;   // v1.0.29：-1=新增，>=0=编辑已有动作
-@property (nonatomic, strong) NSDictionary *editAction;
-@end
+// v1.0.62：点击/双击/滑动 动作设置页已并入 common/PTOverlayPage（与 dylib 共用的统一模板）
 
 @interface PTActionParamVC : PSViewController   // v1.0.28：长按动作 → 参数调整页
 @property (nonatomic, strong) NSString *planName;
@@ -1551,27 +1538,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             [self presentViewController:al animated:YES completion:nil];
             return;
         }
-        // v1.0.55：滑动(手动)再次点击 → 弹 PTRecSwipeVC 重录（预载已有轨迹），不再退化成普通【滑动】
+        // v1.0.62：滑动(手动)再次点击 → 统一模板重录（预载已有轨迹）
         if ([type isEqualToString:@"recSwipe"]) {
-            PTRecSwipeVC *rvc = [PTRecSwipeVC new];
-            rvc.modalPresentationStyle = UIModalPresentationFullScreen;
-            rvc.editPts = act[@"pts"];
-            __weak typeof(self) wself = self;
-            NSInteger ridx = ip.row;
-            rvc.onDone = ^(NSArray *pts) {
-                wself.actions[ridx] = @{@"type": @"recSwipe", @"pts": pts};
-                [wself saveActions];
-            };
-            [self presentViewController:rvc animated:YES completion:nil];
+            [self presentOverlayPageWithMode:PTOverlayModeRecSwipe editIndex:ip.row editAction:act];
             return;
         }
         if (![type isEqualToString:@"delay"]) {
-            PTActionVC *vc = [PTActionVC new];
-            vc.planName = self.planName;
-            vc.actionType = type;
-            vc.editIndex = ip.row;
-            vc.editAction = act;
-            [self.navigationController pushViewController:vc animated:YES];
+            PTOverlayMode mode = [type isEqualToString:@"doubleTap"] ? PTOverlayModeDoubleTap
+                            : ([type isEqualToString:@"swipe"] ? PTOverlayModeSwipe : PTOverlayModeTap);
+            [self presentOverlayPageWithMode:mode editIndex:ip.row editAction:act];
         } else {
             PTActionParamVC *vc = [PTActionParamVC new];
             vc.planName = self.planName;
@@ -1670,15 +1645,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 
 - (void)configAction:(NSString *)type {
     if ([type isEqualToString:@"recSwipe"]) {
-        // v1.0.55：滑动(手动)——照搬 DirectVolumeTap 的 pan 手势录制（灰色 PTRecSwipeVC，无穿透）
-        PTRecSwipeVC *rvc = [PTRecSwipeVC new];
-        rvc.modalPresentationStyle = UIModalPresentationFullScreen;
-        __weak typeof(self) wself = self;
-        rvc.onDone = ^(NSArray *pts) {
-            [wself.actions addObject:@{@"type": @"recSwipe", @"pts": pts}];
-            [wself saveActions];
-        };
-        [self presentViewController:rvc animated:YES completion:nil];
+        // v1.0.62：滑动(手动)——统一模板（不透明灰屏录制，落盘 @{x,y,t} 与运行端回放一致）
+        [self presentOverlayPageWithMode:PTOverlayModeRecSwipe editIndex:-1 editAction:nil];
     } else if ([type isEqualToString:@"delay"]) {
         UIAlertController *al = [UIAlertController alertControllerWithTitle:@"延迟"
             message:@"输入延迟毫秒数（如 500 = 0.5 秒）" preferredStyle:UIAlertControllerStyleAlert];
@@ -1690,12 +1658,52 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         }]];
         [self presentViewController:al animated:YES completion:nil];
     } else {
-        PTActionVC *vc = [PTActionVC new];
-        vc.actionType = type;
-        vc.planName = self.planName;
-        vc.editIndex = -1;   // v1.0.38：修复新增覆盖 bug——此前未设 editIndex 默认 0，done 里 0<count 命中"覆盖"分支把已有第 1 条映射顶掉
-        [self.navigationController pushViewController:vc animated:YES];
+        PTOverlayMode mode = [type isEqualToString:@"doubleTap"] ? PTOverlayModeDoubleTap
+                        : ([type isEqualToString:@"swipe"] ? PTOverlayModeSwipe : PTOverlayModeTap);
+        // v1.0.38：editIndex=-1 表示新增，避免 done 里误覆盖第 1 条映射
+        [self presentOverlayPageWithMode:mode editIndex:-1 editAction:nil];
     }
+}
+
+// v1.0.62：统一模板呈现（deb：全屏 modal + 不透明灰；recStart/recStop 不需要）
+- (void)presentOverlayPageWithMode:(PTOverlayMode)mode editIndex:(NSInteger)ei editAction:(NSDictionary *)ea {
+    PTOverlayPage *page = [PTOverlayPage new];
+    page.mode = mode;
+    page.planName = self.planName;
+    page.editIndex = ei;
+    page.editAction = ea;
+    page.translucent = NO;   // deb 不透明灰
+    __weak typeof(self) wself = self;
+    page.onSave = ^(NSDictionary *a, NSInteger ei2, NSDictionary *ea2) {
+        [wself saveAction:a editIndex:ei2 editAction:ea2];
+    };
+    page.onDismiss = ^(BOOL saved) {
+        [page dismissViewControllerAnimated:NO completion:nil];
+    };
+    page.recStart = nil;
+    page.recStop = nil;
+    page.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:page animated:NO completion:nil];
+}
+
+// v1.0.62：保存单条动作到方案（新增或覆盖），与引擎回放字段一致
+- (void)saveAction:(NSDictionary *)a editIndex:(NSInteger)ei editAction:(NSDictionary *)ea {
+    NSMutableDictionary *cfg = PTRead();
+    NSMutableArray *plans = [NSMutableArray array];
+    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
+        if ([p[@"name"] isEqualToString:self.planName]) {
+            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+            NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
+            // v1.0.38：editIndex>=0 且带原动作才覆盖，新增一律追加
+            if (ei >= 0 && ea && ei < (NSInteger)acts.count) acts[ei] = a;
+            else [acts addObject:a];
+            np[@"actions"] = acts;
+            [plans addObject:np];
+        } else [plans addObject:p];
+    }
+    cfg[@"plans"] = plans;
+    PTWrite(cfg);
+    [self.tv reloadData];
 }
 
 - (void)saveActions {
@@ -2353,155 +2361,6 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 @end
 
-// ============================================================
-// 动作设置页（绿点坐标）
-// ============================================================
-@implementation PTActionVC
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.isSwipe = [self.actionType isEqualToString:@"swipe"];
-    self.title = self.isSwipe ? @"滑动设置" : ([self.actionType isEqualToString:@"doubleTap"] ? @"双击设置" : @"点击设置");
-    // v1.0.28：标题栏白色，下方内容区统一灰色
-    // v1.0.35：统一成系统设置灰分组背景（与主设置页一致）
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
-        style:UIBarButtonItemStyleDone target:self action:@selector(done)];
-
-    CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-
-    if (self.isSwipe) {
-        // v1.0.28：两绿点之间画连线（看滑得直不直）；速度滑块已移除（改方案页长按调）
-        self.lineLayer = [CAShapeLayer layer];
-        self.lineLayer.strokeColor = [UIColor systemGrayColor].CGColor;
-        self.lineLayer.fillColor = [UIColor clearColor].CGColor;
-        self.lineLayer.lineWidth = 2.5;
-        self.lineLayer.lineDashPattern = @[@6, @4];
-        [self.view.layer addSublayer:self.lineLayer];
-        self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
-        self.dot2 = [self makeDot:self.view label:@"2" color:[UIColor systemOrangeColor]];
-        if (self.editIndex >= 0 && self.editAction) {
-            // v1.0.29 编辑模式：预填原坐标
-            self.dot1.center = CGPointMake([self.editAction[@"x1"] doubleValue], [self.editAction[@"y1"] doubleValue]);
-            self.dot2.center = CGPointMake([self.editAction[@"x2"] doubleValue], [self.editAction[@"y2"] doubleValue]);
-        } else {
-            self.dot1.center = CGPointMake(w * 0.3, h * 0.45);
-            self.dot2.center = CGPointMake(w * 0.7, h * 0.55);
-        }
-    } else {
-        self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
-        if (self.editIndex >= 0 && self.editAction) {
-            // v1.0.29 编辑模式：预填原坐标
-            self.dot1.center = CGPointMake([self.editAction[@"x"] doubleValue], [self.editAction[@"y"] doubleValue]);
-        } else {
-            self.dot1.center = CGPointMake(w * 0.5, h * 0.5);
-        }
-    }
-    [self updatePos];
-}
-
-- (UIView *)makeDot:(UIView *)superview label:(NSString *)label color:(UIColor *)color {
-    UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
-    dot.layer.cornerRadius = 22;
-    dot.backgroundColor = [color colorWithAlphaComponent:0.35];
-    dot.layer.borderWidth = 2;
-    dot.layer.borderColor = color.CGColor;
-    UILabel *l = [[UILabel alloc] initWithFrame:dot.bounds];
-    l.text = label;
-    l.textAlignment = NSTextAlignmentCenter;
-    l.textColor = [UIColor labelColor];
-    l.font = [UIFont boldSystemFontOfSize:16];
-    [dot addSubview:l];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)];
-    [dot addGestureRecognizer:pan];
-    [superview addSubview:dot];   // v1.0.28：绿点加到全屏视图，可拖区域 = 全屏幕
-    return dot;
-}
-
-- (void)drag:(UIPanGestureRecognizer *)g {
-    UIView *dot = g.view;
-    CGPoint t = [g translationInView:dot.superview];
-    dot.center = CGPointMake(dot.center.x + t.x, dot.center.y + t.y);
-    // v1.0.43：解除坐标钳制（原 MAX(22,…) 把绿点限死在最小 22pt）——现在可拖到
-    // 屏幕任意位置（含边缘/屏幕外），标题坐标如实显示，保存原值
-    [g setTranslation:CGPointZero inView:dot.superview];
-    [self updatePos];
-}
-
-// v1.0.28：标题实时显示动作 + 滑动连线实时更新（不再用下方小字）
-- (void)updatePos {
-    if (self.isSwipe) {
-        if (self.lineLayer) {
-            CGMutablePathRef path = CGPathCreateMutable();
-            CGPathMoveToPoint(path, NULL, self.dot1.center.x, self.dot1.center.y);
-            CGPathAddLineToPoint(path, NULL, self.dot2.center.x, self.dot2.center.y);
-            self.lineLayer.path = path;
-            CGPathRelease(path);
-        }
-        self.title = [NSString stringWithFormat:@"滑动起点(%d,%d)→终点(%d,%d)",
-            (int)self.dot1.center.x, (int)self.dot1.center.y,
-            (int)self.dot2.center.x, (int)self.dot2.center.y];
-    } else {
-        self.title = [NSString stringWithFormat:@"%@(%d, %d)",
-            [self.actionType isEqualToString:@"doubleTap"] ? @"双击" : @"点击",
-            (int)self.dot1.center.x, (int)self.dot1.center.y];
-    }
-}
-
-- (void)done {
-    NSMutableDictionary *a = [NSMutableDictionary dictionary];
-    if (self.isSwipe) {
-        a[@"type"] = @"swipe";
-        a[@"x1"] = @(self.dot1.center.x); a[@"y1"] = @(self.dot1.center.y);
-        a[@"x2"] = @(self.dot2.center.x); a[@"y2"] = @(self.dot2.center.y);
-        // v1.0.28：speed = 真实速度 pt/s（默认 1000，v1.0.43 由 200 上调）；
-        // holdMs = 按下停留（默认 20）
-        // v1.0.37：liftMs = 弹起停留（默认 0）；steps = 滑动分段（默认 12）
-        // v1.0.41：noInertia = 防惯性开关（默认开）；回滑参数已删除
-        a[@"speed"] = @(1000);
-        a[@"holdMs"] = @(20);
-        a[@"liftMs"] = @(0);
-        a[@"steps"] = @(12);
-        a[@"noInertia"] = @(YES);
-    } else if ([self.actionType isEqualToString:@"doubleTap"]) {
-        a[@"type"] = @"doubleTap";
-        a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
-        // v1.0.28：pressMs = 按下时长（默认 30）；gapMs = 两次间隔（默认 120）
-        a[@"pressMs"] = @(30);
-        a[@"gapMs"] = @(120);
-    } else {
-        a[@"type"] = self.actionType;
-        a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
-        a[@"pressMs"] = @(30);
-    }
-    // v1.0.29 编辑模式：保留原时序参数（pressMs/gapMs/speed/holdMs/liftMs/steps/noInertia/ms），只更新坐标
-    if (self.editIndex >= 0 && self.editAction) {
-        for (NSString *k in @[@"pressMs", @"gapMs", @"speed", @"holdMs", @"liftMs", @"steps", @"noInertia", @"ms"]) {
-            if (self.editAction[k]) a[k] = self.editAction[k];
-        }
-    }
-    NSMutableDictionary *cfg = PTRead();
-    NSMutableArray *plans = [NSMutableArray array];
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
-            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
-            NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
-            // v1.0.38：覆盖条件加 self.editAction 双保险——只有编辑模式（带原动作）才覆盖，
-            // 新增（editAction 为 nil）一律追加，杜绝 editIndex 默认 0 误覆盖第 1 条
-            if (self.editIndex >= 0 && self.editAction && self.editIndex < (NSInteger)acts.count) {
-                acts[self.editIndex] = a;   // 覆盖更新该条
-            } else {
-                [acts addObject:a];         // 新增
-            }
-            np[@"actions"] = acts;
-            [plans addObject:np];
-        } else [plans addObject:p];
-    }
-    cfg[@"plans"] = plans;
-    PTWrite(cfg);
-    [self.navigationController popViewControllerAnimated:YES];
-}
-@end
 
 // ============================================================
 // 动作参数调整页（v1.0.28 加）：方案页长按动作进入
@@ -2940,115 +2799,3 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
 }
 @end
 
-// ============================================================
-// v1.0.55：滑动(手动)录制器（照搬 DirectVolumeTap 滑动模式）
-// UIPanGestureRecognizer 抓轨迹（3px 阈值降采样）→ 灰色不透明背景（系统设置页，无穿透）→
-// 落盘 @{x,y,t} 字典（与 Tweak.xm PTFakeRecSwipeAsync 回放一致）。
-// ============================================================
-@implementation PTRecSwipeVC {
-    NSMutableArray *_pts;            // 当前正在录的 @{x,y,t}（对照 DVT 的 currentRecording）
-    CFAbsoluteTime _t0;
-    CAShapeLayer *_trail;
-    NSMutableArray<CAShapeLayer *> *_layers;
-}
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];  // 灰色不透明（无穿透）
-    _layers = [NSMutableArray array];
-    _pts = [NSMutableArray array];
-
-    CGFloat w = self.view.bounds.size.width, h = self.view.bounds.size.height;
-    // 提示
-    UILabel *tip = [[UILabel alloc] initWithFrame:CGRectMake(20, 90, w - 40, 80)];
-    tip.text = @"滑动(手动)：在灰色区域用手指滑一道，松手即录完。\n完成 = 保存到本方案，取消 = 丢弃。";
-    tip.textColor = [UIColor labelColor];
-    tip.textAlignment = NSTextAlignmentCenter;
-    tip.numberOfLines = 0;
-    tip.font = [UIFont boldSystemFontOfSize:15];
-    [self.view addSubview:tip];
-
-    // 取消 / 完成
-    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
-    cancel.frame = CGRectMake(20, h - 90, 120, 48);
-    [cancel setTitle:@"取消" forState:UIControlStateNormal];
-    [cancel setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    cancel.backgroundColor = [UIColor systemOrangeColor];
-    cancel.layer.cornerRadius = 10;
-    [cancel addTarget:self action:@selector(onCancelTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:cancel];
-
-    UIButton *done = [UIButton buttonWithType:UIButtonTypeSystem];
-    done.frame = CGRectMake(w - 150, h - 90, 130, 48);
-    [done setTitle:@"完成" forState:UIControlStateNormal];
-    [done setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    done.backgroundColor = [UIColor systemGreenColor];
-    done.layer.cornerRadius = 10;
-    [done addTarget:self action:@selector(onDoneTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:done];
-
-    // 轨迹层（蓝线，与 DVT 录制中同色系）
-    _trail = [CAShapeLayer layer];
-    _trail.strokeColor = [UIColor systemBlueColor].CGColor;
-    _trail.fillColor = [UIColor clearColor].CGColor;
-    _trail.lineWidth = 6;
-    _trail.lineCap = kCALineCapRound;
-    _trail.lineJoin = kCALineJoinRound;
-    [self.view.layer addSublayer:_trail];
-
-    // 重录：预载已有轨迹
-    if (self.editPts.count) { _pts = [NSMutableArray arrayWithArray:self.editPts]; [self drawTrail]; }
-
-    // pan 手势录制
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(onPan:)];
-    [self.view addGestureRecognizer:pan];
-}
-
-- (void)onPan:(UIPanGestureRecognizer *)pan {
-    CGPoint loc = [pan locationInView:self.view];   // 全屏模态，视图坐标 = 窗口坐标（回放命中目标 App 同点）
-    if (pan.state == UIGestureRecognizerStateBegan) {
-        _pts = [NSMutableArray array];
-        _t0 = CFAbsoluteTimeGetCurrent();
-        [_pts addObject:@{@"x": @(loc.x), @"y": @(loc.y), @"t": @0}];
-    } else if (pan.state == UIGestureRecognizerStateChanged) {
-        NSDictionary *last = _pts.lastObject;
-        CGPoint lp = CGPointMake([last[@"x"] doubleValue], [last[@"y"] doubleValue]);
-        if (hypot(loc.x - lp.x, loc.y - lp.y) >= 3.0f) {   // 3px 阈值降采样（照搬 DVT）
-            double tms = (CFAbsoluteTimeGetCurrent() - _t0) * 1000.0;
-            [_pts addObject:@{@"x": @(loc.x), @"y": @(loc.y), @"t": @(tms)}];
-            [self drawTrail];
-        }
-    } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
-        if (_pts.count >= 2) [self drawTrail];
-    }
-}
-
-- (void)drawTrail {
-    for (CALayer *l in _layers) [l removeFromSuperlayer];
-    [_layers removeAllObjects];
-    if (_pts.count < 2) return;
-    UIBezierPath *path = [UIBezierPath new];
-    for (NSUInteger i = 0; i < _pts.count; i++) {
-        NSDictionary *p = _pts[i];
-        CGPoint pt = CGPointMake([p[@"x"] doubleValue], [p[@"y"] doubleValue]);
-        if (i == 0) [path moveToPoint:pt]; else [path addLineToPoint:pt];
-    }
-    _trail.path = path.CGPath;
-}
-
-- (void)onDoneTapped {
-    if (_pts.count < 2) {
-        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"还没录到"
-            message:@"请在灰色区域用手指滑一道" preferredStyle:UIAlertControllerStyleAlert];
-        [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:al animated:YES completion:nil];
-        return;
-    }
-    if (self.onDone) self.onDone([_pts copy]);
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)onCancelTapped {
-    if (self.onCancel) self.onCancel();
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-@end
