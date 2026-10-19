@@ -6,7 +6,7 @@
 //   · 配置路径（/var/mobile 多候选 + jbroot 探测）—— 通过 PTSetCfgPath 注入引擎
 //   · 总开关 + 指定 App 生效门控（PTSetInterceptEnabled）—— 关掉 / 非指定 App 直接放行
 //   · 用 MSHookMessageEx 装 hook（ellekit 要求含该符号才会注入第三方 App）
-//   · 日志统一写入共享 jbroot 的 Documents（诊断已证实 App 侧与设置页双向可通）
+//   · 日志：仅「勾选生效」的 App 写共享 jbroot 的 Documents（设置页可读）；未勾选 App 不写文件（v1.0.65 修正滥建）
 //
 // 已删除：注入探针（旧版无法注入时的兜底弹窗 PTShowProbeAlert / 提醒条 PTShowToast，
 //         早该删）；多候选路径日志冗余收敛为单路径。
@@ -57,8 +57,9 @@ static void PTHook(NSString *clsName, NSString *selName, IMP newImp, IMP *origSl
     MSHookMessageEx(cls, sel, newImp, origSlot);
 }
 
-// v1.0.59：日志统一写入「共享 jbroot 的 Documents」——诊断已证实这是 App 侧与设置页
-// 唯一双向可通的路径（第三方沙盒 App 写不了普通 /var/mobile/Documents，但能写 jbroot）。
+// v1.0.65：仅「勾选生效」的 App 才调用本函数拿共享 jbroot 的 Documents 路径（设置页可读）；
+// 未勾选的 App 不调用，由 PTSetFileLogEnabled(NO) 关掉文件日志。v1.0.59 曾对所有注入 App 都钉此路径，
+// 导致 jbroot Documents 被一堆未启用的 PageTurner-<bid>.log 占满——现已修正。
 static NSString *PTLogPathFor(NSString *bid) {
     NSString *jb = PTJbrootRoot();
     NSString *name = [NSString stringWithFormat:@"PageTurner-%@.log", bid];
@@ -79,9 +80,6 @@ static void PTInit() {
         // 配置路径交给引擎（roothide 多候选 / jbroot）
         PTSetCfgPath(PTGlobalPlistPath());
 
-        // v1.0.59：日志统一写到共享 jbroot 的 Documents（诊断已证实这是唯一双向可通的路径）
-        PTSetLogPath(PTLogPathFor(bundleID));
-
         PTDylibInitIOKit();
         PTDylibLoadConfig(YES);
 
@@ -89,10 +87,18 @@ static void PTInit() {
         BOOL masterEnabled = [cfg[@"masterEnabled"] boolValue];
         NSArray *apps = cfg[@"enabledApps"];
         NSMutableSet *enabledApps = [NSMutableSet setWithArray:apps ? apps : @[]];
+        // 是否真正生效（勾选拦截）：设置页进程恒为 YES（它要写自己的诊断日志）
+        BOOL intercept = gIsPreferences ? YES : (masterEnabled && [enabledApps containsObject:bundleID]);
+
+        // v1.0.65：文件日志只给「勾选生效」的 App（写共享 jbroot，供设置页读取）；
+        // 未勾选/旁路的 App 关闭文件日志，不再在 jbroot Documents 留一堆无用 PageTurner-<bid>.log。
+        // 调试日志总开关关闭时，PTDylibLog 内部直接返回，也不会产生文件。
+        PTSetFileLogEnabled(intercept);
+        if (intercept) PTSetLogPath(PTLogPathFor(bundleID));
 
         PTDylibLog(@"==================================================");
-        PTDylibLog(@"PageTurner v1.0.59 已注入 %@ (pid=%d) isPrefs=%d 日志=%@",
-              bundleID, getpid(), gIsPreferences, PTLogPathFor(bundleID));
+        PTDylibLog(@"PageTurner v1.0.65 已注入 %@ (pid=%d) isPrefs=%d 写文件=%@",
+              bundleID, getpid(), gIsPreferences, intercept ? PTLogPathFor(bundleID) : @"(关闭·不写文件)");
         PTDylibLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu",
               PTGlobalPlistPath(), masterEnabled, (unsigned long)enabledApps.count,
               [cfg[@"debounceMs"] doubleValue] ?: 300.0,
@@ -102,7 +108,6 @@ static void PTInit() {
             // 学习收集由设置页 bundle 负责（roothide 空 Filter 不注入系统 App，tweak 在此进程收不到事件）
             PTDylibLog(@"Preferences 进程旁路：学习收集由设置页 bundle 负责");
         } else {
-            BOOL intercept = masterEnabled && [enabledApps containsObject:bundleID];
             PTSetInterceptEnabled(intercept);
             if (intercept) {
                 IMP origAdd = NULL, origSend = NULL;
@@ -112,7 +117,7 @@ static void PTInit() {
                 PTSetOrigSendEvent(origSend);
                 PTDylibLog(@"生效 App 就绪：学过的 sender 按键将被拦截");
             } else {
-                PTDylibLog(@"旁路：未生效 App（bundleID=%@ 不在列表(%lu)或总开关=%d）",
+                PTDylibLog(@"旁路：未生效 App（bundleID=%@ 不在列表(%lu)或总开关=%d）——不写日志文件",
                       bundleID, (unsigned long)enabledApps.count, masterEnabled);
             }
         }

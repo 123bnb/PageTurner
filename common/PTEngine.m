@@ -82,6 +82,11 @@ void PTSetLogPath(NSString *p) {
 }
 static double sLogCfgMtime = -1;
 static BOOL sLogEnabled = YES;
+// v1.0.65：文件日志总开关（由 target 注入）。NO=任何路径都不写文件，仅留内存。
+// 默认 YES（巨魔 dylib 形态保持原行为：被注入且调试日志开的 App 写文件）；
+// roothide deb 形态在 Tweak.m 里按「是否勾选生效」设为 NO，避免给每个 App 建无用日志文件。
+static BOOL sFileLogEnabled = YES;
+void PTSetFileLogEnabled(BOOL b) { sFileLogEnabled = b; }
 
 // v1.0.2：日志文件固定 App 容器 Documents（TrollStore 注入无沙盒外权限，/var/mobile/Documents
 // 与 jbroot 变体均不可写，不再探测）
@@ -129,9 +134,11 @@ static void PTDylibLogRefreshCfg(void) {
 }
 
 void PTDylibLog(NSString *fmt, ...) {
-    // v1.0.19：关日志即零 IO——直接返回，不再读 plist/写文件。开启时才按 mtime 探测运行时切换。
-    if (!sLogEnabled) return;
+    // v1.0.65：先把调试日志开关按 mtime 同步好，再决定是否返回——
+    // 修复「首条日志用默认 YES、先于配置生效」，导致【关了调试日志仍建文件】的 bug。
     PTDylibLogRefreshCfg();
+    // v1.0.19：关日志即零 IO——直接返回，不写文件。开启时才写。
+    if (!sLogEnabled) return;
     if (!sLogLines) sLogLines = [NSMutableArray array];
     va_list ap; va_start(ap, fmt);
     NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
@@ -142,20 +149,23 @@ void PTDylibLog(NSString *fmt, ...) {
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@", tbuf, (int)(tv.tv_usec / 1000), msg];
     if (sLogLines.count >= PTLogMaxLines) [sLogLines removeObjectsInRange:NSMakeRange(0, PTLogMaxLines / 2)];
     [sLogLines addObject:line];
-    if (!sLogFile) sLogFile = PTDylibLogFilePath();
-    if (sLogFile) {
-        static int sFileLines = 0;
-        PTDylibEnsureLogFile(sLogFile);
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogFile];
-        if (fh) {
-            @try {
-                [fh seekToEndOfFile];
-                [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
-                [fh closeFile];
-                sFileLines++;
-            } @catch (NSException *e) {}
+    // v1.0.65：sFileLogEnabled=NO（如 roothide 下未勾选生效的 App）时不写任何文件，仅留内存日志。
+    if (sFileLogEnabled) {
+        if (!sLogFile) sLogFile = PTDylibLogFilePath();
+        if (sLogFile) {
+            static int sFileLines = 0;
+            PTDylibEnsureLogFile(sLogFile);
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogFile];
+            if (fh) {
+                @try {
+                    [fh seekToEndOfFile];
+                    [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+                    [fh closeFile];
+                    sFileLines++;
+                } @catch (NSException *e) {}
+            }
+            if (sFileLines > PTLogMaxLines) { PTDylibTrimLogFile(sLogFile); sFileLines = PTLogMaxLines; }
         }
-        if (sFileLines > PTLogMaxLines) { PTDylibTrimLogFile(sLogFile); sFileLines = PTLogMaxLines; }
     }
 }
 

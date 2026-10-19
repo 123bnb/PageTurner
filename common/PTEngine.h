@@ -33,6 +33,7 @@ extern void PTDylibLog(NSString *fmt, ...);
 extern void PTDylibLogSetEnabled(BOOL on);
 extern NSArray *PTDylibLogLines(void);
 extern void PTSetLogPath(NSString *p);       // v1.0.57：日志文件路径由 target 注入
+extern void PTSetFileLogEnabled(BOOL b);  // v1.0.65：文件日志总开关（NO=不写文件，仅内存）；deb 按是否勾选生效注入
 
 // ---------- hook 装配 ----------
 extern void PTDylibInstallHooks(void);        // dylib 用：method_setImplementation + IOKit dlsym

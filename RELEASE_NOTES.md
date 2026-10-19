@@ -1,3 +1,30 @@
+# PageTurner v1.0.65
+
+> 修复「打开任意被注入的 App 都会往 jbroot 的 Documents 生成 `PageTurner-<bid>.log`」的 bug——之前即使是关掉调试日志、且未勾选生效的 App 也会建文件，导致 jbroot Documents 被一堆无用日志占满。
+
+## 🐛 修复
+
+### 1. 关掉调试日志仍建文件（根因）
+- **现象**：总开关开、调试日志关、App 未勾选生效，打开该 App（如 Filza）仍会在 jbroot Documents 生成 `PageTurner-com.tigisoftware.Filza.log`，且每次打开都重建。
+- **根因**：`PTDylibLog`（common/PTEngine.m）里「关日志即返回」的检查排在「从 plist 读 `debugLogEnabled`」之前，而 `sLogEnabled` 默认 `YES`；于是**首条日志用默认的 YES 放行、创建了文件之后**才读到你已关闭的配置。
+- **修复**：把 `PTDylibLogRefreshCfg()` 移到提前返回之前，首条日志就先按配置判定——调试日志关时**完全不建文件**。
+
+### 2. 未勾选生效的 App 也被建日志（根因）
+- **现象**：几乎所有被注入的 App 都会在 jbroot Documents 留下一份 `PageTurner-<bid>.log`，纯浪费空间，且无实际作用。
+- **根因**：`Tweak.m` 的 `PTInit` 无条件把日志路径钉到共享 jbroot Documents，且「旁路（未勾选）」App 也会跑启动日志。
+- **修复**：新增文件日志总开关 `PTSetFileLogEnabled(BOOL)`（引擎），`PTInit` 仅在 App **勾选生效**时才打开文件日志并钉 jbroot 路径；未勾选/旁路 App 只走内存日志、**不写任何文件**。设置页进程仍写自己的诊断日志（保持原行为）。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+|------|------|
+| `common/PTEngine.m` | `PTDylibLog` 先同步配置再判定返回（修关日志仍建文件）；新增 `sFileLogEnabled` 关卡文件写入 |
+| `common/PTEngine.h` | 暴露 `PTSetFileLogEnabled(BOOL)` |
+| `Tweak.m` | `PTInit` 仅对「勾选生效」App 开文件日志；其余 App 不写文件 |
+| `targets/dylib/PTDylibMain.m` | 不受影响（保持巨魔形态：被注入且调试日志开的 App 仍写文件） |
+
+> 说明：共享 jbroot Documents 的日志原本是为「设置页调试日志查看器」跨进程读各 App 运行日志而设；现在只有勾选生效的 App 才会产生，设置页仍能正常读取这些日志。
+
 # PageTurner v1.0.64
 
 > 修复「新增映射」绿点拖动的坐标范围问题，并给滑动(手动) 的 1/2 选中加上可视化高亮提醒。（均在 `common/PTOverlayPage`）
