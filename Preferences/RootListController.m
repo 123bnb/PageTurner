@@ -35,6 +35,7 @@
 // v1.0.42（调试日志总开关 + 日志上限）：调试组「调试日志」条目上方新增开关（key=debugLogEnabled，默认开），
 // 下方 staticText 写明位置与作用；开关控制所有日志（设置页内存+文件、运行端文件），关=完全无日志；
 // 内存日志只存最近 200 条，文件日志循环保留 1000 行（超过删最旧）；运行端改动重启目标 App 后生效
+// （注：这是 v1.0.42 当时的行为；v1.0.59 起内存与文件都已统一为 500，以下方实现为准）
 //
 // v1.0.37（滑动时序参数扩展，与运行端同步）：
 //   1. 动作参数页滑动分支：按下停留 + 弹起停留(liftMs) + 滑动速度 + 滑动分段(steps 默认12)
@@ -339,7 +340,7 @@ static double PTNowC(void) {
 }
 
 // ---------- 日志系统（v1.0.17 加：内存+文件双写；v1.0.42：受调试日志开关控制）----------
-static NSMutableArray *sLogLines = nil;      // 内存日志（日志页直接显示；v1.0.42 只存最近 200 条）
+static NSMutableArray *sLogLines = nil;      // 内存日志（日志页直接显示；v1.0.59 起循环保留最近 500 条）
 static NSString *sLogPath = nil;             // 文件日志实际路径（nil=全部不可写）
 static double sLogCfgMtime = -1;             // v1.0.42：配置 mtime 缓存（开关改动即时生效）
 static BOOL sLogEnabled = YES;               // v1.0.42：受 debugLogEnabled 控制
@@ -351,8 +352,9 @@ static void SLogRefreshCfg(void) {
     NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:PT_PREFS];
     sLogEnabled = (cfg[@"debugLogEnabled"] == nil) ? YES : [cfg[@"debugLogEnabled"] boolValue];
 }
-// v1.0.59：设置页日志也统一写到「共享 jbroot 的 Documents」，与 App 侧同目录，
-// 这样设置页能读到各 App 的运行日志（PageTurner-<bundleID>.log）。
+// 设置页自己的日志写到「共享 jbroot 的 Documents」（PageTurner.log，不带 bundleID）。
+// 注意：与 App 侧同目录只是为了清理时一处搞定，不代表设置页要读别人的文件——
+// 各 App 的 PageTurner-<bid>.log 只有「勾选生效」的 App 才会写，且由 buildLogItems 按 enabledApps 枚举。
 static NSString *SLogProbePath(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray *cands = [NSMutableArray array];
@@ -390,7 +392,7 @@ static void PTClearAllLogs(void) {
         sLogPath = nil;   // 下次重新探测
     } @catch (NSException *e) {}
 }
-// v1.0.42：文件日志只保留最近 1000 行，超过循环（删最旧，保留尾部 1000 行）
+// 文件日志循环保留最近 500 行（删最旧，保留尾部 500 行；v1.0.42 时曾为 1000，v1.0.59 起与内存统一为 500）
 static void SLogTrimFile(NSString *path) {
     @try {
         NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
@@ -417,7 +419,7 @@ static void SLog(NSString *fmt, ...) {
     [sLogLines addObject:line];
     if (!sLogPath) sLogPath = SLogProbePath();
     if (sLogPath) {
-        static int sFileLines = 0;   // v1.0.42：文件行数计数（>1000 循环）
+        static int sFileLines = 0;   // 文件行数计数（>500 循环，与上方 SLogTrimFile 一致）
         NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
         if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; sFileLines++; } @catch (NSException *e) {} }
         if (sFileLines > 500) { SLogTrimFile(sLogPath); sFileLines = 500; }
@@ -2552,8 +2554,10 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     return self;
 }
 
-// v1.0.59：构建日志列表——① 设置页日志 ② 各生效 App 的运行日志
-// 全部位于共享 jbroot 的 Documents（诊断证实这是 App 侧与设置页唯一双向可通的路径）
+// 构建日志列表——① 设置页日志 ② 各「勾选生效」App 的运行日志
+// 全部位于共享 jbroot 的 Documents（诊断证实这是 App 侧与设置页唯一双向可通的路径）。
+// ②只枚举 enabledApps：App 侧也只为勾选生效的 App 写文件（见 Tweak.m 的 PTInit），两侧规则一致；
+// 未勾选的 App 不会生成 PageTurner-<bid>.log，列表里自然也不该出现它。
 - (NSArray *)buildLogItems {
     NSMutableArray *arr = [NSMutableArray array];
     NSFileManager *fm = NSFileManager.defaultManager;

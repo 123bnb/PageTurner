@@ -87,25 +87,30 @@ static void PTInit() {
         BOOL masterEnabled = [cfg[@"masterEnabled"] boolValue];
         NSArray *apps = cfg[@"enabledApps"];
         NSMutableSet *enabledApps = [NSMutableSet setWithArray:apps ? apps : @[]];
-        // 是否真正生效（勾选拦截）：设置页进程恒为 YES（它要写自己的诊断日志）
-        BOOL intercept = gIsPreferences ? YES : (masterEnabled && [enabledApps containsObject:bundleID]);
+        // 是否安装拦截 hook：总开关开且本 App 被勾选（「设置」进程旁路，学习收集由设置页 bundle 负责）
+        BOOL intercept = !gIsPreferences && masterEnabled && [enabledApps containsObject:bundleID];
 
-        // v1.0.65：文件日志只给「勾选生效」的 App（写共享 jbroot，供设置页读取）；
-        // 未勾选/旁路的 App 关闭文件日志，不再在 jbroot Documents 留一堆无用 PageTurner-<bid>.log。
-        // 调试日志总开关关闭时，PTDylibLog 内部直接返回，也不会产生文件。
-        PTSetFileLogEnabled(intercept);
-        if (intercept) PTSetLogPath(PTLogPathFor(bundleID));
+        // v1.0.65：是否落盘日志——只给 enabledApps 里的 App。
+        // 规则必须与「谁会读」严格一致：设置页 buildLogItems 只枚举 enabledApps，没被勾选的 App
+        // 写出来也没有任何代码会读，只会在 jbroot 的 Documents 堆垃圾。
+        // 注意「设置」进程自身同样不落盘：它的日志由 RootListController 单独写成 PageTurner.log，
+        // 与本函数的 PageTurner-<bid>.log 不是同一个文件名，两者互不影响。
+        // 还有两点：① 总开关关闭时整体停用，也不该再留日志；
+        //         ② 调试日志总开关关闭时 PTDylibLog 会直接返回，任何 App 都不会建文件。
+        BOOL fileLog = masterEnabled && [enabledApps containsObject:bundleID];
+        PTSetFileLogEnabled(fileLog);
+        if (fileLog) PTSetLogPath(PTLogPathFor(bundleID));
 
         PTDylibLog(@"==================================================");
         PTDylibLog(@"PageTurner v1.0.65 已注入 %@ (pid=%d) isPrefs=%d 写文件=%@",
-              bundleID, getpid(), gIsPreferences, intercept ? PTLogPathFor(bundleID) : @"(关闭·不写文件)");
+              bundleID, getpid(), gIsPreferences, fileLog ? PTLogPathFor(bundleID) : @"(关闭·仅内存)");
         PTDylibLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu",
               PTGlobalPlistPath(), masterEnabled, (unsigned long)enabledApps.count,
               [cfg[@"debounceMs"] doubleValue] ?: 300.0,
               (unsigned long)(cfg[@"plans"] ? [cfg[@"plans"] count] : 0));
 
         if (gIsPreferences) {
-            // 学习收集由设置页 bundle 负责（roothide 空 Filter 不注入系统 App，tweak 在此进程收不到事件）
+            // 学习收集由设置页 bundle 负责；本进程旁路（不装 hook，也不写日志文件，见上方 fileLog 规则）
             PTDylibLog(@"Preferences 进程旁路：学习收集由设置页 bundle 负责");
         } else {
             PTSetInterceptEnabled(intercept);

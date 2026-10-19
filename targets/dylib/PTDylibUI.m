@@ -6,7 +6,7 @@
 //   · 删除主设置页（specifiers 总开关/指定App生效/探针）与 PTAppListVC——
 //     dylib 无总开关、无指定 App 生效
 //   · 配置读写走 PTDylibReadCfg/PTDylibWriteCfg（共享 deb 配置或独立配置）
-//   · 日志走 PTDylibLog（内存+文件）
+//   · 日志走 PTDylibLog（v1.0.65 起巨魔形态只留内存 PTDylibLogLines()，不落盘任何文件）
 //   · 学习/测试采集 hook 由 PTDylibCore 统一装配（不再单独 SCollectHook）
 //   · 新增主菜单 PTDylibMenuVC（双指长按弹出，v1.0.12 起由三指改为双指）：
 //     防抖间隔 / 记录与映射 / 调试可视化(开关) / 调试日志(开关) / 调试日志(入口)

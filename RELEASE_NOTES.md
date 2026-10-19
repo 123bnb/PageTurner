@@ -12,18 +12,26 @@
 ### 2. 未勾选生效的 App 也被建日志（根因）
 - **现象**：几乎所有被注入的 App 都会在 jbroot Documents 留下一份 `PageTurner-<bid>.log`，纯浪费空间，且无实际作用。
 - **根因**：`Tweak.m` 的 `PTInit` 无条件把日志路径钉到共享 jbroot Documents，且「旁路（未勾选）」App 也会跑启动日志。
-- **修复**：新增文件日志总开关 `PTSetFileLogEnabled(BOOL)`（引擎），`PTInit` 仅在 App **勾选生效**时才打开文件日志并钉 jbroot 路径；未勾选/旁路 App 只走内存日志、**不写任何文件**。设置页进程仍写自己的诊断日志（保持原行为）。
+- **修复**：新增文件日志总开关 `PTSetFileLogEnabled(BOOL)`（引擎），`PTInit` 仅在 App **勾选生效**时才打开文件日志并钉 jbroot 路径；未勾选/旁路 App 只走内存日志、**不写任何文件**。「设置」进程自身同样不再落盘（它的日志由 `RootListController` 单独写成 `PageTurner.log`，与本项无关）。
+
+### 3. 巨魔(dylib) 构建同样不再建任何日志文件
+- **现象**：TrollStore 注入的 dylib 会给**每个**被注入的 App 在 jbroot Documents 建一份 `PageTurner-<bid>.log`。
+- **判定依据**：设置页的 `buildLogItems` **只枚举 `enabledApps`**；而 dylib 用的是自己的容器配置（`PTDylibUsingDebConfig()` 恒为 `NO`，没有「指定 App 生效」机制、注入即生效）——这些文件**没有任何代码会读**，100% 是垃圾。
+- **修复**：移除 `PTDylibMain.m` 里无条件的 `PTSetLogPath`（不再钉 jbroot 路径）；引擎 `sFileLogEnabled` 默认改为 **NO**，dylib 因此完全不落盘，日志只留在内存（`PTDylibLogLines()`）。
 
 ## 🔧 对应文件改动
 
 | 文件 | 改动 |
 |------|------|
-| `common/PTEngine.m` | `PTDylibLog` 先同步配置再判定返回（修关日志仍建文件）；新增 `sFileLogEnabled` 关卡文件写入 |
+| `common/PTEngine.m` | `PTDylibLog` 先同步配置再判定返回（修关日志仍建文件）；新增 `sFileLogEnabled` 关卡文件写入，**默认 NO** |
 | `common/PTEngine.h` | 暴露 `PTSetFileLogEnabled(BOOL)` |
-| `Tweak.m` | `PTInit` 仅对「勾选生效」App 开文件日志；其余 App 不写文件 |
-| `targets/dylib/PTDylibMain.m` | 不受影响（保持巨魔形态：被注入且调试日志开的 App 仍写文件） |
+| `Tweak.m` | `PTInit` 仅对「勾选生效」App 开文件日志；其余 App（含「设置」进程自身）不写文件 |
+| `targets/dylib/PTDylibMain.m` | 移除无条件的 `PTSetLogPath`，巨魔形态不再落盘任何日志文件（仅内存日志） |
+| `Preferences/RootListController.m` | 修正与实际不符的注释（日志条数 `200`/`1000` → 实际 `500`），并写明读写两侧都以 `enabledApps` 为准 |
 
-> 说明：共享 jbroot Documents 的日志原本是为「设置页调试日志查看器」跨进程读各 App 运行日志而设；现在只有勾选生效的 App 才会产生，设置页仍能正常读取这些日志。
+> 说明：共享 jbroot Documents 的日志是为「设置页调试日志查看器」跨进程读 App 运行日志而设。**落盘规则与读取规则现已严格一致**：写入侧只为 `enabledApps` 里的 App 建文件，读取侧也只枚举 `enabledApps`，其余 App 一律不产生文件。
+>
+> 顺带清理：本次修正了多处与代码实际行为不符的注释（如日志上限注释写 `200`/`1000`，实际均为 `500`；以及「统一写到共享 jbroot」等过期描述），避免后续被这些注释误导。
 
 # PageTurner v1.0.64
 

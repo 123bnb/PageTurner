@@ -12,7 +12,8 @@
 //     学习/测试激活时只采集放行不拦截；否则正常运行拦截
 //   · 配置：有 deb 版配置（com.yourname.pageturner.plist 5 候选路径）就复用；
 //     没有则自建独立配置 com.yourname.pageturnerdylib.plist
-//   · 日志：统一 PTDylibLog（内存 200 条 + 文件 PageTurnerDylib.log 1000 行循环）
+//   · 日志：统一 PTDylibLog——debugLogEnabled 决定是否记录；是否落盘由 target 用
+//     PTSetFileLogEnabled(YES) 显式开启（默认不落盘），内存与文件均按 PTLogMaxLines 循环
 // v1.0.20（本次变更，与 deb 版 v1.0.55 同步）：
 //   · 【滑动(手动)】录制改为覆盖层 UIPanGestureRecognizer 抓真实轨迹（照搬 DirectVolumeTap），
 //     不再穿透到 App、不再用 sendEvent 全局采集；半透明黑 0.4 背景仍透出 App。
@@ -44,7 +45,7 @@
 // 常量
 // ============================================================
 static NSString *kDylibPrefsName = @"com.yourname.pageturnerdylib.plist";
-static NSString *kDylibLogName = @"PageTurner.log";   // v1.0.59：兜底名（未注入 jbroot 路径时写容器）
+static NSString *kDylibLogName = @"PageTurner.log";   // 兜底名：target 开了文件日志但未用 PTSetLogPath 注入路径时，写 App 容器 Documents
 static const double kPagerWindowSec = 0.4;       // 翻页器活跃窗口（已学 sender 开窗）
 static const double kCollectWindowSec = 0.30;    // v1.0.19：学习/测试采集窗口放宽到 0.3s，减少系统繁忙时丢样本、便于"特征已稳定"达成（原 0.05s 过短）
 static const double kTapDistThreshold = 30.0;    // 位移 <30pt 判定 tap
@@ -72,20 +73,24 @@ static BOOL gGestureMenuEnabled = NO;
 void PTSetGestureMenuEnabled(BOOL b) { gGestureMenuEnabled = b; }
 
 // ============================================================
-// 日志（内存 200 条 + 文件 PageTurnerDylib.log 1000 行循环，受 debugLogEnabled 控制）
+// 日志
+//   · 是否记录：配置项 debugLogEnabled（关 → PTDylibLog 直接返回，零 IO）
+//   · 是否落盘：target 显式调用 PTSetFileLogEnabled(YES) 才写文件，默认 NO（不建任何日志文件）
+//   · 循环上限：内存与文件均 PTLogMaxLines=500 行
 // ============================================================
 static NSMutableArray *sLogLines = nil;
 static NSString *sLogFile = nil;
-// v1.0.57：日志文件路径由 target 注入（roothide jbroot Documents / dylib 沙盒容器）；未注入则用默认沙盒路径
+// v1.0.65：日志文件路径由 target 注入；未注入路径时兜底写 App 容器（文件名 kDylibLogName）
 void PTSetLogPath(NSString *p) {
     if (p.length) sLogFile = [p copy];
 }
 static double sLogCfgMtime = -1;
 static BOOL sLogEnabled = YES;
-// v1.0.65：文件日志总开关（由 target 注入）。NO=任何路径都不写文件，仅留内存。
-// 默认 YES（巨魔 dylib 形态保持原行为：被注入且调试日志开的 App 写文件）；
-// roothide deb 形态在 Tweak.m 里按「是否勾选生效」设为 NO，避免给每个 App 建无用日志文件。
-static BOOL sFileLogEnabled = YES;
+// v1.0.65：文件日志总开关，**默认 NO（不落盘）**，target 必须显式 PTSetFileLogEnabled(YES) 才写文件。
+// 默认关的原因：PageTurner-<bid>.log 的唯一读者是 deb 设置页的日志列表，它只枚举 deb 配置里的
+// enabledApps（见 Preferences/RootListController.m 的 buildLogItems）；没被勾选的 App 写出来也没有
+// 任何代码会读，只会在 jbroot 的 Documents 里堆垃圾。落盘必须由 target 确认「本 App 有读者」后再开。
+static BOOL sFileLogEnabled = NO;
 void PTSetFileLogEnabled(BOOL b) { sFileLogEnabled = b; }
 
 // v1.0.2：日志文件固定 App 容器 Documents（TrollStore 注入无沙盒外权限，/var/mobile/Documents
@@ -149,7 +154,7 @@ void PTDylibLog(NSString *fmt, ...) {
     NSString *line = [NSString stringWithFormat:@"%s.%03d %@", tbuf, (int)(tv.tv_usec / 1000), msg];
     if (sLogLines.count >= PTLogMaxLines) [sLogLines removeObjectsInRange:NSMakeRange(0, PTLogMaxLines / 2)];
     [sLogLines addObject:line];
-    // v1.0.65：sFileLogEnabled=NO（如 roothide 下未勾选生效的 App）时不写任何文件，仅留内存日志。
+    // v1.0.65：sFileLogEnabled=NO（默认；roothide 下未勾选生效的 App、以及巨魔 dylib）时不写任何文件，仅留内存日志。
     if (sFileLogEnabled) {
         if (!sLogFile) sLogFile = PTDylibLogFilePath();
         if (sLogFile) {
