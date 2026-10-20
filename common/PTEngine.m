@@ -1245,7 +1245,7 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
         BOOL noInertia = a[@"noInertia"] ? [a[@"noInertia"] boolValue] : YES;
         double dist = hypot(to.x - from.x, to.y - from.y);
         double durMs = (dist / MAX(speed, 1.0)) * 1000.0;
-        if (durMs < 50) durMs = 50;
+        if (durMs < 90) durMs = 90;   // v1.0.66-fix：保底时长，连滑提速也不低于此，确保 App 识别为滑动而非点按
         PTFakeSwipeAsync(from, to, durMs, holdMs, liftMs, noInertia, token, next);
     } else if ([type isEqualToString:@"recSwipe"]) {
         // v1.0.8：滑动(手动)——按录制轨迹回放；v1.0.66(#6)：带连滑提速倍率
@@ -1310,7 +1310,8 @@ static void PTChainStartOrContinue(NSString *plan) {
     gChainLastHitT = now;
     if (gChainCount >= kSwipeBurstThreshold) {
         gChainBurst = YES;
-        gChainRate = MIN(1.0 + (gChainCount - kSwipeBurstThreshold + 1) * 0.25, 4.0);   // 每多一次 +0.25，封顶 4x
+        // v1.0.66-fix：提速更温和（每多一次 +0.2，封顶 2x），避免倍率过高把翻页回放压到 App 识别不了
+        gChainRate = MIN(1.0 + (gChainCount - kSwipeBurstThreshold + 1) * 0.2, 2.0);
     }
     PTChainPillUpdate();
 }
@@ -1513,6 +1514,9 @@ void PTDylibSendEvent(id self, SEL _cmd, UIEvent *event) {
     if (event && (PTNowC() < gPagerWindowUntil || gSession.active)) {
         if (PTHandlePagerEvent(event)) return;
     }
+    // v1.0.66-fix：翻页器窗口已过且无在飞会话 → 连滑链立即刹停复位，
+    // 避免提速倍率残留卡在高位、把后续翻页回放压到 App 识别不了（表现为"划了没反应"）
+    if (!gSession.active && gChainPlan && PTNowC() >= gPagerWindowUntil) PTChainReset();
     // 诊断：非注入触摸会话 Began 打一行 sender
     if (event) {
         for (UITouch *t in event.allTouches) {
