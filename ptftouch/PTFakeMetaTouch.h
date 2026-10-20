@@ -27,4 +27,11 @@
  */
 + (NSInteger)getAvailablePointId;
 
+/**
+ * 判断一个 UITouch 是否是本类注入的假触摸（来自内部 touchAry 池）。
+ * v1.0.66-fix：飞快势途中，引擎需在 sendEvent 里区分"本次注入的假触摸(放行给 App)"
+ * 与"用户新按的真实翻页器触摸(放行去匹配以支持连滑/中断)"。
+ */
++ (BOOL)isPoolTouch:(UITouch *)touch;
+
 @end

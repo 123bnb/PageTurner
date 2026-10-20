@@ -582,17 +582,24 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         BOOL noInertia = a[@"noInertia"] ? [a[@"noInertia"] boolValue] : YES;
         PTTestShowDot(from, to, YES, durMs / 1000.0);
         double durSec = MAX(durMs / 1000.0, 0.001);
+        int token = gExecToken;   // v1.0.66-fix：捕获本次令牌，中断上一段测试手势用
         __block NSInteger pid = -1;
+        __block CGPoint lastP = from;   // 中止时在最后已知位置抬手，避免粘手
         __block void (^stillAt)(CGPoint, int);
         stillAt = ^(CGPoint pos, int ms) {
             __block int n = MAX(ms, 0) / 16;
             __block void (^still)(void);
-            still = ^(void) {
-                if (n <= 0) {
-                    [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseEnded];
-                    if (next) next();
-                    return;
-                }
+        still = ^(void) {
+            if (token != gExecToken) {   // v1.0.66-fix：被新手势中断 → 抬手收尾
+                if (pid >= 0) [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseEnded];
+                if (next) next();
+                return;
+            }
+            if (n <= 0) {
+                [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseEnded];
+                if (next) next();
+                return;
+            }
                 n--;
                 [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseMoved];
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), still);
@@ -602,6 +609,11 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
         __block CFAbsoluteTime t0;
         __block void (^step)(void);
         step = ^(void) {
+            if (token != gExecToken) {   // v1.0.66-fix：被新手势中断 → 在最后位置抬手收尾
+                if (pid >= 0) [PTFakeMetaTouch fakeTouchId:pid AtPoint:lastP withTouchPhase:UITouchPhaseEnded];
+                if (next) next();
+                return;
+            }
             double t = MIN((CFAbsoluteTimeGetCurrent() - t0) / durSec, 1.0);
             if (t >= 1.0) {
                 if (noInertia) {
@@ -620,12 +632,15 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
                 return;
             }
             CGPoint pp = CGPointMake(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            lastP = pp;
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:pp withTouchPhase:UITouchPhaseMoved];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
         };
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(40 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+            if (token != gExecToken) { if (next) next(); return; }   // v1.0.66-fix：已中断则不落新手势
             pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                if (token != gExecToken) { if (pid >= 0) [PTFakeMetaTouch fakeTouchId:pid AtPoint:from withTouchPhase:UITouchPhaseEnded]; if (next) next(); return; }
                 t0 = CFAbsoluteTimeGetCurrent();
                 step();
             });
@@ -657,13 +672,17 @@ static void PTTestExecPlan(NSString *name) {
     double now = PTNowC();
     // 注意：此处不再无条件 PTChainReset()——否则每次按测试按钮都把连滑链清零，测试页永远触发不了连滑。
     // 连滑累计改由 PTTestOnEnded 命中方案后调用 PTChainStartOrContinue 完成（与真实翻页路径一致）。
-    if (sTestInjecting || now - sLastTestExec < 0.3) { PTDylibLog(@"[测试] 防抖：忽略 %@", name); return; }
+    // v1.0.66-fix：连滑进行中（同方案、链未超时）→ 跳过"执行中吞单"与防抖，允许中断上一段测试手势并续滑/提速。
+    BOOL chaining = gChainEnabled && gChainPlan && [gChainPlan isEqualToString:name] &&
+                    (CFAbsoluteTimeGetCurrent() - gChainLastHitT) <= kChainStaleSec;
+    if (!chaining && (sTestInjecting || now - sLastTestExec < 0.3)) { PTDylibLog(@"[测试] 防抖：忽略 %@", name); return; }
     sLastTestExec = now;
     NSDictionary *plan = nil;
     for (NSDictionary *p in PTDylibReadCfg()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:name]) { plan = p; break; }
     if (!plan) return;
     NSArray *actions = plan[@"actions"] ?: @[];
     if (!actions.count) { PTDylibLog(@"[测试] %@ 无动作，跳过", name); return; }
+    gExecToken++;   // v1.0.66-fix：递增令牌 → 上一段测试手势(swipe/recSwipe)按 token 失配中止收尾，支持中断+连滑
     PTDylibLog(@"[测试] 命中「%@」，执行 %lu 条动作", name, (unsigned long)actions.count);
     sTestInjecting = YES;
     __block int idx = 0;
@@ -1328,7 +1347,12 @@ static void PTChainReset(void) {
 // 执行方案动作序列（防抖：序列执行中或距上次执行 < 防抖间隔都忽略）
 static void PTExecutePlan(NSString *name) {
     double now = PTNowC();
-    if (gExecRunning || (now - gLastExec < gDebounceMs / 1000.0)) {
+    // v1.0.66-fix：连滑进行中（同方案、链未超时）→ 跳过“执行中吞单”与防抖，
+    // 让每次按键都能中断上一段在飞快势并立即续滑/提速。gExecToken++ 会令旧手势
+    // token 失配 → PTFakeSwipeAsync/PTFakeRecSwipeAsync 的 abortEnd() 把旧触摸 Ended，不粘手。
+    BOOL chaining = gChainEnabled && gChainPlan && [gChainPlan isEqualToString:name] &&
+                    (CFAbsoluteTimeGetCurrent() - gChainLastHitT) <= kChainStaleSec;
+    if (!chaining && (gExecRunning || (now - gLastExec < gDebounceMs / 1000.0))) {
         PTDylibLog(@"[执行] 防抖：忽略 %@（执行中=%d，%.0fms 内已执行）", name, gExecRunning, gDebounceMs);
         return;
     }
@@ -1447,14 +1471,26 @@ void PTDylibSendEvent(id self, SEL _cmd, UIEvent *event) {
     // gRecArmed 仍保留（上方双指检测等处用其排除录制态）。
     // 注入触摸/执行中：放行（注入触摸没有 addEvent、sender 残留翻页器，走拦截会把映射触摸 Began 吞掉）
     if (gInFakeTouch || gIsInjecting || sTestInjecting) {
-        if (gDebugDots && event) {   // v1.0.66(#2)：映射注入触摸照常画点（pager=NO），保证命中时可见的是映射轨迹而非翻页器原始轨迹
+        // v1.0.66-fix：飞快势途中用户又按翻页器 → 该真实触摸不在 PTFakeMetaTouch 注入池中，
+        // 放行到下方运行拦截(匹配/连滑/中断)；本次注入的假触摸(在池中)仍按原逻辑放行给 App。
+        BOOL realPagerDuringInject = NO;
+        if (gIsInjecting && !gInFakeTouch && !sTestInjecting && event &&
+            [event respondsToSelector:@selector(allTouches)]) {
             for (UITouch *t in event.allTouches) {
-                CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
-                PTDebugUpdate((__bridge void *)t, p, t.phase, NO);
+                if (![PTFakeMetaTouch isPoolTouch:t]) { realPagerDuringInject = YES; break; }
             }
         }
-        if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
-        return;
+        if (!realPagerDuringInject) {
+            if (gDebugDots && event) {   // v1.0.66(#2)：映射注入触摸照常画点（pager=NO），保证命中时可见的是映射轨迹而非翻页器原始轨迹
+                for (UITouch *t in event.allTouches) {
+                    CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+                    PTDebugUpdate((__bridge void *)t, p, t.phase, NO);
+                }
+            }
+            if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
+            return;
+        }
+        // realPagerDuringInject=YES → 不 return，继续走到下方运行拦截，让这次真实按键进入会话匹配
     }
     // 学习/测试激活：只采集放行，不拦截（即使按的是已学 sender 也不吞）
     if ((sCollectArmed || sTestArmed) && event && PTNowC() < sWindowUntil) {

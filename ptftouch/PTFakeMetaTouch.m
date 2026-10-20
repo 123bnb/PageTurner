@@ -95,4 +95,8 @@ static NSMutableArray *touchAry;
     availablePointId = availableIds.count==0 ? 0 : [[availableIds objectAtIndex:(arc4random() % availableIds.count)] integerValue];
     return availablePointId;
 }
+
++ (BOOL)isPoolTouch:(UITouch *)touch{
+    return touch && [touchAry containsObject:touch];
+}
 @end
