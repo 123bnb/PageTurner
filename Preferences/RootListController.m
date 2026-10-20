@@ -329,6 +329,8 @@ static NSInteger PTPlanIndexById(NSMutableArray *plans, NSString *pid) {
     return -1;
 }
 
+static void PTWrite(NSDictionary *cfg);   // 前向声明（PTRead 惰性补发 pid 落盘时要用）
+
 static NSMutableDictionary *PTRead(void) {
     NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:PT_PREFS];
     if (!d) d = [NSMutableDictionary dictionary];
