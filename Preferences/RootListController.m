@@ -194,6 +194,7 @@
 // v1.0.62：滑动(手动)录制器已并入 common/PTOverlayPage（与 dylib 共用的统一模板）
 
 @interface PTPlanVC : PSViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) NSString *planId;   // v1.0.66-fix：方案唯一身份（重名不串名）
 @property (nonatomic, strong) NSString *planName;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UILabel *recStatus;
@@ -211,6 +212,7 @@
 
 // v1.0.34：已录入特征列表页（点方案页【已录制完成】进入：点击=详情/重录，左滑=删除，无新增入口）
 @interface PTFeaturesVC : PSViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) NSString *planId;   // v1.0.66-fix：方案唯一身份
 @property (nonatomic, strong) NSString *planName;
 @property (nonatomic, strong) NSMutableArray *features;
 @property (nonatomic, strong) UITableView *tv;
@@ -218,6 +220,7 @@
 @end
 
 @interface PTLearnVC : PSViewController
+@property (nonatomic, strong) NSString *planId;   // v1.0.66-fix：方案唯一身份
 @property (nonatomic, strong) NSString *planName;
 @property (nonatomic, strong) UILabel *status;
 @property (nonatomic, strong) UILabel *countLabel;
@@ -242,6 +245,7 @@
 // v1.0.62：点击/双击/滑动 动作设置页已并入 common/PTOverlayPage（与 dylib 共用的统一模板）
 
 @interface PTActionParamVC : PSViewController   // v1.0.28：长按动作 → 参数调整页
+@property (nonatomic, strong) NSString *planId;   // v1.0.66-fix：方案唯一身份
 @property (nonatomic, strong) NSString *planName;
 @property (nonatomic, assign) NSInteger actionIndex;
 @property (nonatomic, strong) NSDictionary *action;
@@ -308,9 +312,50 @@ static NSString *PTJbrootRootC(void) {
     return root;
 }
 
+// v1.0.66-fix：方案 pid 辅助（必须在 PTRead 之前定义，PTRead 会调用 PTPlanId 做惰性补发）
+static NSString *PTPlanId(NSDictionary *p) {
+    NSString *pid = p[@"pid"];
+    return ([pid isKindOfClass:[NSString class]] && pid.length) ? pid : nil;
+}
+static NSDictionary *PTPlanById(NSArray *plans, NSString *pid) {
+    if (!pid) return nil;
+    for (NSDictionary *p in plans) if ([PTPlanId(p) isEqualToString:pid]) return p;
+    return nil;
+}
+static NSInteger PTPlanIndexById(NSMutableArray *plans, NSString *pid) {
+    if (!pid) return -1;
+    for (NSUInteger i = 0; i < plans.count; i++)
+        if ([PTPlanId(plans[i]) isEqualToString:pid]) return (NSInteger)i;
+    return -1;
+}
+
 static NSMutableDictionary *PTRead(void) {
     NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:PT_PREFS];
-    return d ? d : [NSMutableDictionary dictionary];
+    if (!d) d = [NSMutableDictionary dictionary];
+    // v1.0.66-fix：方案唯一身份 pid（防止重名时编辑/删除串名）。
+    // 旧版方案无 pid → 首次读取时按"name#序号"惰性补发唯一 pid 并落盘；新方案创建时必带 pid。
+    NSArray *plans = d[@"plans"];
+    if ([plans isKindOfClass:[NSArray class]] && plans.count) {
+        BOOL need = NO;
+        for (NSDictionary *p in plans) { if (![PTPlanId(p) length]) { need = YES; break; } }
+        if (need) {
+            NSMutableSet *seen = [NSMutableSet set];
+            NSMutableArray *out = [NSMutableArray array];
+            int idx = 0;
+            for (NSDictionary *p in plans) {
+                NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+                NSString *pid = PTPlanId(np);
+                if (!pid || [seen containsObject:pid]) pid = [NSString stringWithFormat:@"%@#%d", (np[@"name"] ?: @"plan"), idx];
+                np[@"pid"] = pid;
+                [seen addObject:pid];
+                [out addObject:np];
+                idx++;
+            }
+            d[@"plans"] = out;
+            PTWrite(d);   // 落盘唯一 pid（下次读即带 pid）
+        }
+    }
+    return d;
 }
 
 static void PTWrite(NSDictionary *cfg) {
@@ -483,6 +528,8 @@ static BOOL gTestInjecting = NO;      // 注入保护（防执行触摸再被本
 static UIView *sTestDot = nil;        // 测试页绿点视图（起点绿点）
 static CAShapeLayer *sTestLine = nil; // v1.0.66(#3)：方向线
 static UIView *sTestP = nil;          // v1.0.66(#3)：终点 P 标记
+static NSMutableArray *sTestTrail = nil; // v1.0.66-fix：滑动(手动)回放尾巴轨迹点（起点→…→当前）
+static int sTestTrailToken = 0;       // v1.0.66-fix：尾巴淡出令牌（防止上一段回放的余留淡出误清当前轨迹）
 static double sLastTestExec = 0;      // 测试防抖
 static __weak PTTestVC *sTestLogSink = nil;   // v1.0.28：测试页实时记录区（页面销毁即失效）
 
@@ -530,33 +577,39 @@ static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t
     return best;
 }
 
+// v1.0.66-fix：懒建 sTestLine / sTestP 覆盖层（供 PTTestShowDot 与滑动尾巴渲染共用）
+static void PTTestEnsureOverlay(void) {
+    if (!sTestDot || !sTestDot.superview) return;
+    UIView *parent = sTestDot.superview;
+    if (!sTestLine) {
+        sTestLine = [CAShapeLayer layer];
+        sTestLine.strokeColor = [UIColor systemGreenColor].CGColor;
+        sTestLine.fillColor = [UIColor clearColor].CGColor;
+        sTestLine.lineWidth = 3; sTestLine.lineCap = kCALineCapRound;
+        sTestLine.lineJoin = kCALineJoinRound;
+        [parent.layer addSublayer:sTestLine];
+    }
+    if (!sTestP) {
+        sTestP = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
+        sTestP.layer.cornerRadius = 18;
+        sTestP.backgroundColor = [UIColor systemGreenColor];
+        sTestP.userInteractionEnabled = NO; sTestP.hidden = YES;
+        UILabel *pl = [[UILabel alloc] initWithFrame:sTestP.bounds];
+        pl.text = @"P"; pl.textAlignment = NSTextAlignmentCenter;
+        pl.font = [UIFont boldSystemFontOfSize:18]; pl.textColor = [UIColor whiteColor];
+        [sTestP addSubview:pl];
+        [parent addSubview:sTestP];
+    }
+}
+
 // v1.0.66(#3)：轨迹可视化统一成「调试可视化同款」——起点绿点 + 方向线 + 终点 P 标记（真实坐标）。
 // 此前只画一个移动绿点（无方向线/无 P），与引擎回放回调(drawTrailWithDirection)样式不一致；现统一。
+// 注：本函数画「单段手势」（tap / 直线 swipe），from→to 是一条直线；滑动(手动)的连续尾巴见 PTTestDrawTrailHead。
 static void PTTestShowDot(CGPoint from, CGPoint to, BOOL animate, double dur) {
     if (!sTestDot) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIView *parent = sTestDot.superview;
-        if (!parent) return;
-        // 终点 P 标记（懒建）
-        if (!sTestP) {
-            sTestP = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
-            sTestP.layer.cornerRadius = 18;
-            sTestP.backgroundColor = [UIColor systemGreenColor];
-            sTestP.userInteractionEnabled = NO; sTestP.hidden = YES;
-            UILabel *pl = [[UILabel alloc] initWithFrame:sTestP.bounds];
-            pl.text = @"P"; pl.textAlignment = NSTextAlignmentCenter;
-            pl.font = [UIFont boldSystemFontOfSize:18]; pl.textColor = [UIColor whiteColor];
-            [sTestP addSubview:pl];
-            [parent addSubview:sTestP];
-        }
-        // 方向线（懒建）
-        if (!sTestLine) {
-            sTestLine = [CAShapeLayer layer];
-            sTestLine.strokeColor = [UIColor systemGreenColor].CGColor;
-            sTestLine.fillColor = [UIColor clearColor].CGColor;
-            sTestLine.lineWidth = 3; sTestLine.lineCap = kCALineCapRound;
-            [parent.layer addSublayer:sTestLine];
-        }
+        PTTestEnsureOverlay();
+        if (!sTestDot.superview) return;
         // 起点绿点
         sTestDot.hidden = NO; sTestDot.alpha = 0.9; sTestDot.center = from;
         // 终点 P + 方向线（from→to）
@@ -570,6 +623,47 @@ static void PTTestShowDot(CGPoint from, CGPoint to, BOOL animate, double dur) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((hold + 0.4) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             sTestDot.alpha = 0; sTestDot.hidden = YES;
             sTestP.alpha = 0; sTestP.hidden = YES; sTestLine.path = nil;
+        });
+    });
+}
+
+// v1.0.66-fix：滑动(手动)回放逐帧把当前点追加进「尾巴」折线（起点→…→当前）并渲染，绿点移到当前、P 隐藏。
+// 此前每帧 PTTestShowDot(cur,cur) 把方向线画成零长（不可见）+ P 标记跟着跳动，看着像"点击连成"，没有连续尾巴。
+static void PTTestDrawTrailHead(CGPoint cur) {
+    if (!sTestDot) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        PTTestEnsureOverlay();
+        if (!sTestDot.superview) return;
+        if (!sTestTrail) sTestTrail = [NSMutableArray array];
+        [sTestTrail addObject:[NSValue valueWithCGPoint:cur]];
+        CGMutablePathRef path = CGPathCreateMutable();
+        BOOL first = YES;
+        for (NSValue *v in sTestTrail) {
+            CGPoint pt = [v CGPointValue];
+            if (first) { CGPathMoveToPoint(path, NULL, pt.x, pt.y); first = NO; }
+            else CGPathAddLineToPoint(path, NULL, pt.x, pt.y);
+        }
+        sTestLine.path = path; CGPathRelease(path);
+        sTestDot.hidden = NO; sTestDot.alpha = 0.9; sTestDot.center = cur;
+        if (sTestP) sTestP.hidden = YES;
+    });
+}
+
+// v1.0.66-fix：滑动(手动)回放结束——终点显示 P，整条尾巴保留 hold 时长后淡出（用令牌防串场）
+static void PTTestTrailFinish(CGPoint pN, double hold) {
+    if (!sTestDot) return;
+    int myToken = sTestTrailToken;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        PTTestEnsureOverlay();
+        if (!sTestDot.superview) return;
+        if (sTestP) { sTestP.hidden = NO; sTestP.alpha = 0.95; sTestP.center = pN; }
+        double h = MAX(hold, 0.3);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((h + 0.4) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (myToken != sTestTrailToken) return;   // 已有新回放开始，不要误清当前轨迹
+            sTestDot.alpha = 0; sTestDot.hidden = YES;
+            if (sTestP) { sTestP.alpha = 0; sTestP.hidden = YES; }
+            sTestLine.path = nil;
+            sTestTrail = nil;
         });
     });
 }
@@ -640,9 +734,12 @@ static void PTTestRecSwipeAsync(NSArray *pts, void (^done)(void)) {
 
     CGPoint p0 = CGPointMake([xs[0] doubleValue], [ys[0] doubleValue]);
     CGPoint pN = CGPointMake([xs[ts.count - 1] doubleValue], [ys[ts.count - 1] doubleValue]);
-    PTTestShowDot(p0, pN, YES, totalMs / 1000.0);   // 画整条轨迹（时长对齐录制耗时）
+    sTestTrailToken++;   // v1.0.66-fix：新一段回放开始，作废上一段余留的淡出
+    sTestTrail = [NSMutableArray array];
+    PTTestDrawTrailHead(p0);   // 起点绿点 + 空尾巴（p0 自身即第一点）
 
     // v1.0.61：与引擎 PTFakeRecSwipeAsync 对齐——60fps 逐帧插值回放，位置连续 → 真正的拖动
+    // v1.0.66-fix：逐帧把当前点追加进尾巴折线（PTTestDrawTrailHead），形成连续尾巴轨迹，而非零长方向线
     __block NSInteger pid = -1;
     __block BOOL ended = NO;
     __block CFAbsoluteTime startT = CFAbsoluteTimeGetCurrent();
@@ -653,10 +750,11 @@ static void PTTestRecSwipeAsync(NSArray *pts, void (^done)(void)) {
         CGPoint cur = PTTestRecSwipeInterp(xs, ys, ts, t0 + elapsedMs);
         if (pid < 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:cur withTouchPhase:UITouchPhaseBegan];
         else         [PTFakeMetaTouch fakeTouchId:pid AtPoint:cur withTouchPhase:UITouchPhaseMoved];
-        PTTestShowDot(cur, cur, NO, 0);   // 逐帧画点（此前逐点画，点少时只画两点）
+        PTTestDrawTrailHead(cur);   // 逐帧追加尾巴（起点→…→当前）
         if (elapsedMs >= totalMs) {
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:pN withTouchPhase:UITouchPhaseEnded];
             ended = YES;
+            PTTestTrailFinish(pN, totalMs / 1000.0);   // 终点 P + 尾巴保留后淡出
             if (done) done();
             return;
         }
@@ -1361,17 +1459,18 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [tv deselectRowAtIndexPath:ip animated:YES];
     if (ip.row < (NSInteger)self.plans.count) {
         PTPlanVC *vc = [PTPlanVC new];
-        vc.planName = self.plans[ip.row][@"name"];
+        vc.planId = PTPlanId(self.plans[ip.row]);   // v1.0.66-fix：按唯一 pid 定位，重名不串
         [self.navigationController pushViewController:vc animated:YES];
     } else {
         NSMutableDictionary *cfg = PTRead();
         NSMutableArray *plans = [NSMutableArray arrayWithArray:cfg[@"plans"] ?: @[]];
         NSString *name = [NSString stringWithFormat:@"新方案%lu", (unsigned long)(plans.count + 1)];
-        [plans addObject:@{ @"name": name, @"actions": @[] }];
+        NSString *newPid = [[NSUUID UUID] UUIDString];   // v1.0.66-fix：新建即带唯一 pid
+        [plans addObject:@{ @"name": name, @"pid": newPid, @"actions": @[] }];
         cfg[@"plans"] = plans;
         PTWrite(cfg);
         PTPlanVC *vc = [PTPlanVC new];
-        vc.planName = name;
+        vc.planId = newPid;
         [self.navigationController pushViewController:vc animated:YES];
         [self reload];
     }
@@ -1380,12 +1479,10 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (ip.row >= (NSInteger)self.plans.count) return nil;
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
         title:@"删除" handler:^(UIContextualAction *action, UIView *v, void (^done)(BOOL)) {
-        NSDictionary *p = self.plans[ip.row];
+        // v1.0.66-fix：按行索引删除该方案（仅删这一行对应的方案，不再按名删除全部同名）
         NSMutableDictionary *cfg = PTRead();
-        NSMutableArray *plans = [NSMutableArray array];
-        for (NSDictionary *x in cfg[@"plans"] ?: @[]) {
-            if (![x[@"name"] isEqualToString:p[@"name"]]) [plans addObject:x];
-        }
+        NSMutableArray *plans = [NSMutableArray arrayWithArray:cfg[@"plans"] ?: @[]];
+        if (ip.row >= 0 && ip.row < (NSInteger)plans.count) [plans removeObjectAtIndex:ip.row];
         cfg[@"plans"] = plans;
         PTWrite(cfg);
         [self reload];
@@ -1458,11 +1555,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 
 - (void)reload {
-    NSDictionary *plan = nil;
-    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) { plan = p; break; }
-    }
+    NSDictionary *plan = PTPlanById(PTRead()[@"plans"] ?: @[], self.planId);   // v1.0.66-fix：按 pid 定位，重名不串
     if (!plan) { [self.navigationController popViewControllerAnimated:YES]; return; }
+    self.planName = plan[@"name"] ?: @"";   // 仅作显示用
     self.actions = [NSMutableArray arrayWithArray:plan[@"actions"] ?: @[]];
 
     CGFloat top = 110;
@@ -1548,35 +1643,32 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         NSString *newName = [al.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         if (!newName.length || [newName isEqualToString:self.planName]) return;
         NSMutableDictionary *cfg = PTRead();
-        NSMutableArray *plans = [NSMutableArray array];
-        for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-            if ([p[@"name"] isEqualToString:self.planName]) {
-                NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
-                np[@"name"] = newName;
-                [plans addObject:np];
-            } else [plans addObject:p];
+        NSMutableArray *plans = [NSMutableArray arrayWithArray:cfg[@"plans"] ?: @[]];
+        // v1.0.66-fix：按 pid 定位要改名的方案，只改这一个（重名时不会把所有同名都改掉）
+        NSInteger idx = PTPlanIndexById(plans, self.planId);
+        if (idx >= 0) {
+            NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:plans[idx]];
+            np[@"name"] = newName;
+            plans[idx] = np;
+            cfg[@"plans"] = plans;
+            PTWrite(cfg);
         }
-        cfg[@"plans"] = plans;
         self.planName = newName;
-        PTWrite(cfg);
         self.nameLabel.text = [NSString stringWithFormat:@"方案名： %@", newName];
     }]];
     [self presentViewController:al animated:YES completion:nil];
 }
 
 - (void)recordTapped {
-    NSDictionary *plan = nil;
-    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) { plan = p; break; }
-    }
+    NSDictionary *plan = PTPlanById(PTRead()[@"plans"] ?: @[], self.planId);   // v1.0.66-fix：按 pid 定位
     // v1.0.34：已录制 → 进特征列表页（查看/重录/左滑删）；未录制 → 正常学习页
     if (PTFeaturesOfPlan(plan).count) {
         PTFeaturesVC *vc = [PTFeaturesVC new];
-        vc.planName = self.planName;
+        vc.planId = self.planId;
         [self.navigationController pushViewController:vc animated:YES];
     } else {
         PTLearnVC *vc = [PTLearnVC new];
-        vc.planName = self.planName;
+        vc.planId = self.planId;
         [self.navigationController pushViewController:vc animated:YES];
     }
 }
@@ -1584,7 +1676,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 // v1.0.34：增加特征——单特征学习页（按 1 次记录，再按覆盖，以最后一下为准），保存后加入已录入特征
 - (void)addFeatureTapped {
     PTLearnVC *vc = [PTLearnVC new];
-    vc.planName = self.planName;
+    vc.planId = self.planId;
     vc.onceMode = YES;
     [self.navigationController pushViewController:vc animated:YES];
 }
@@ -1651,7 +1743,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             [self presentOverlayPageWithMode:mode editIndex:ip.row editAction:act];
         } else {
             PTActionParamVC *vc = [PTActionParamVC new];
-            vc.planName = self.planName;
+            vc.planId = self.planId;
             vc.actionIndex = ip.row;
             vc.action = act;
             [self.navigationController pushViewController:vc animated:YES];
@@ -1661,7 +1753,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (ip.row == (NSInteger)self.actions.count) { [self addActionMenu]; return; }
     // 最后一行：测试本方案（大白屏 + 绿点点触验证）
     PTTestVC *vc = [PTTestVC new];
-    vc.planName = self.planName;
+    vc.planName = self.planName;   // 仅显示用（测试页按特征匹配执行，不按 pid 写方案）
     [self.navigationController pushViewController:vc animated:YES];
 }
 // v1.0.66(#5b)：动作行手势分工（Z 方案）——点按=编辑(didSelect)、长按不动=参数页、长按并拖动=排序。
@@ -1726,7 +1818,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             NSInteger r = self.dragFrom;
             if (r >= (NSInteger)self.actions.count) { self.dragFrom = -1; return; }
             PTActionParamVC *vc = [PTActionParamVC new];
-            vc.planName = self.planName;
+            vc.planId = self.planId;
             vc.actionIndex = r;
             vc.action = self.actions[r];
             [self.navigationController pushViewController:vc animated:YES];
@@ -1822,7 +1914,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
     for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+        if ([PTPlanId(p) isEqualToString:self.planId]) {   // v1.0.66-fix：按 pid 写回，重名不串
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
             // v1.0.38：editIndex>=0 且带原动作才覆盖，新增一律追加
@@ -1841,7 +1933,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
     for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+        if ([PTPlanId(p) isEqualToString:self.planId]) {   // v1.0.66-fix：按 pid 写回，重名不串
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             np[@"actions"] = self.actions;
             [plans addObject:np];
@@ -1880,10 +1972,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 
 - (void)reload {
-    NSDictionary *plan = nil;
-    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) { plan = p; break; }
-    }
+    NSDictionary *plan = PTPlanById(PTRead()[@"plans"] ?: @[], self.planId);   // v1.0.66-fix：按 pid 定位
     if (!plan) { [self.navigationController popViewControllerAnimated:YES]; return; }
     self.features = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(plan)];
     [self.tv reloadData];
@@ -1952,7 +2041,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [al addAction:[UIAlertAction actionWithTitle:@"重新录制" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
         // 重录 = 进学习页（正常收敛模式），保存时替换这一条；返回不保存则原特征保留
         PTLearnVC *vc = [PTLearnVC new];
-        vc.planName = self.planName;
+        vc.planId = self.planId;
         vc.replaceIndex = ip.row;
         [self.navigationController pushViewController:vc animated:YES];
     }]];
@@ -1968,7 +2057,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
     for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+        if ([PTPlanId(p) isEqualToString:self.planId]) {   // v1.0.66-fix：按 pid 删特征，重名不串
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
             [fts removeObjectAtIndex:ip.row];
@@ -2328,7 +2417,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSMutableArray *plans = [NSMutableArray array];
     BOOL done = NO;
     for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+        if ([PTPlanId(p) isEqualToString:self.planId]) {   // v1.0.66-fix：按 pid 写回，重名不串
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
             [fts addObject:self.readyFt];
@@ -2342,9 +2431,9 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     cfg[@"plans"] = plans;
     PTWrite(cfg);
     PTSetLearningLocal(NO);
-    // 数一下该方案现在的特征数（写日志用）
-    NSUInteger total = 0;
-    for (NSDictionary *p in plans) if ([p[@"name"] isEqualToString:self.planName]) { total = PTFeaturesOfPlan(p).count; break; }
+    // 数一下该方案现在的特征数（写日志用，按 pid 取该方案）
+    NSDictionary *saved = PTPlanById(plans, self.planId);
+    NSUInteger total = PTFeaturesOfPlan(saved).count;
     [self appendLog:[NSString stringWithFormat:@"已增加 1 条特征（共 %lu 条），回方案页", (unsigned long)total]];
     // 回方案页（清掉学习页；方案页 viewWillAppear 自动刷新）
     NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
@@ -2367,7 +2456,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSMutableArray *plans = [NSMutableArray array];
     BOOL done = NO;
     for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+        if ([PTPlanId(p) isEqualToString:self.planId]) {   // v1.0.66-fix：按 pid 写回，重名不串
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
             if (self.replaceIndex >= 0 && self.replaceIndex < (NSInteger)fts.count) {
@@ -2646,7 +2735,7 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
     for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+        if ([PTPlanId(p) isEqualToString:self.planId]) {   // v1.0.66-fix：按 pid 写回，重名不串
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
             if (self.actionIndex >= 0 && self.actionIndex < (NSInteger)acts.count) {
@@ -2876,6 +2965,7 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     sTestDot = nil;
     if (sTestLine) { [sTestLine removeFromSuperlayer]; sTestLine = nil; }
     if (sTestP) { [sTestP removeFromSuperview]; sTestP = nil; }
+    sTestTrail = nil;
     sTestLogSink = nil;   // 返回即消失，测试记录不保留
 }
 
