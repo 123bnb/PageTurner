@@ -85,8 +85,8 @@
         self.dot2 = [self makeDot:self.view label:@"2" color:[UIColor systemOrangeColor]];
         if (self.editIndex >= 0 && self.editAction) {
             // v1.0.66(#4)：存储坐标为屏幕固定坐标，载入编辑时转回本视图坐标
-            self.dot1.center = [[UIScreen mainScreen].fixedCoordinateSpace convertPoint:CGPointMake([self.editAction[@"x1"] doubleValue], [self.editAction[@"y1"] doubleValue]) toView:self.view];
-            self.dot2.center = [[UIScreen mainScreen].fixedCoordinateSpace convertPoint:CGPointMake([self.editAction[@"x2"] doubleValue], [self.editAction[@"y2"] doubleValue]) toView:self.view];
+            self.dot1.center = [self.view convertPoint:CGPointMake([self.editAction[@"x1"] doubleValue], [self.editAction[@"y1"] doubleValue]) fromCoordinateSpace:[UIScreen mainScreen].fixedCoordinateSpace];
+            self.dot2.center = [self.view convertPoint:CGPointMake([self.editAction[@"x2"] doubleValue], [self.editAction[@"y2"] doubleValue]) fromCoordinateSpace:[UIScreen mainScreen].fixedCoordinateSpace];
         } else {
             self.dot1.center = CGPointMake(w * 0.3, h * 0.45);
             self.dot2.center = CGPointMake(w * 0.7, h * 0.55);
@@ -94,7 +94,7 @@
     } else {
         self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
         if (self.editIndex >= 0 && self.editAction) {
-            self.dot1.center = [[UIScreen mainScreen].fixedCoordinateSpace convertPoint:CGPointMake([self.editAction[@"x"] doubleValue], [self.editAction[@"y"] doubleValue]) toView:self.view];
+            self.dot1.center = [self.view convertPoint:CGPointMake([self.editAction[@"x"] doubleValue], [self.editAction[@"y"] doubleValue]) fromCoordinateSpace:[UIScreen mainScreen].fixedCoordinateSpace];
         } else {
             self.dot1.center = CGPointMake(w * 0.5, h * 0.5);
         }
