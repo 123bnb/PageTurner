@@ -1136,7 +1136,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
             detail:nil cell:PSSwitchCell edit:nil];
         [chain setProperty:@"chainEnabled" forKey:@"key"];
         [chain setProperty:@YES forKey:@"default"];
-        [chain setProperty:@"同一方案连续翻页自动提速（满 5 次进入连滑，倍率最高 4x）；换成其他方案或没命中即刹停。顶部会显示连滑进度/倍率。" forKey:@"staticText"];
+        [chain setProperty:@"同一方案连续翻页自动提速（满 5 次进入连滑，倍率最高 2x）；换成其他方案或没命中即刹停。顶部会显示连滑进度/倍率。注：连续按键间隔需小于 1.2s 才累计，超过即视为新链重新蓄力。" forKey:@"staticText"];
         [specs addObject:chain];
 
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"调试"]];

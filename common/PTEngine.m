@@ -573,7 +573,7 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
     } else if ([type isEqualToString:@"swipe"]) {
         CGPoint from = CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]);
         CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
-        double speed = [a[@"speed"] doubleValue] ?: 1000;
+        double speed = ([a[@"speed"] doubleValue] ?: 1000) * gChainRate;   // v1.0.66-fix2：测试页滑动同样吃连滑提速
         double distT = hypot(to.x - from.x, to.y - from.y);
         double durMs = (distT / MAX(speed, 1.0)) * 1000.0;
         if (durMs < 50) durMs = 50;
@@ -655,7 +655,8 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
 // 顺序执行方案动作序列（测试防抖 300ms；执行中同样忽略）
 static void PTTestExecPlan(NSString *name) {
     double now = PTNowC();
-    PTChainReset();   // v1.0.66(#6)：测试执行前复位连滑链，避免继承真实翻页残留的提速倍率
+    // 注意：此处不再无条件 PTChainReset()——否则每次按测试按钮都把连滑链清零，测试页永远触发不了连滑。
+    // 连滑累计改由 PTTestOnEnded 命中方案后调用 PTChainStartOrContinue 完成（与真实翻页路径一致）。
     if (sTestInjecting || now - sLastTestExec < 0.3) { PTDylibLog(@"[测试] 防抖：忽略 %@", name); return; }
     sLastTestExec = now;
     NSDictionary *plan = nil;
@@ -680,6 +681,7 @@ void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender, int tapD
     NSString *plan = PTTestMatchFeature(phase, dir, dist, sender, tapDx);
     if (plan) {
         PTDylibLog(@"[测试] 特征匹配 → 方案「%@」", plan);
+        PTChainStartOrContinue(plan);   // v1.0.66-fix2：测试页同样累计连滑（同方案提速/异方案刹停重开），便于验证
         PTTestExecPlan(plan);
         NSDictionary *pp = nil;
         for (NSDictionary *p in PTDylibReadCfg()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:plan]) { pp = p; break; }
@@ -1514,9 +1516,12 @@ void PTDylibSendEvent(id self, SEL _cmd, UIEvent *event) {
     if (event && (PTNowC() < gPagerWindowUntil || gSession.active)) {
         if (PTHandlePagerEvent(event)) return;
     }
-    // v1.0.66-fix：翻页器窗口已过且无在飞会话 → 连滑链立即刹停复位，
-    // 避免提速倍率残留卡在高位、把后续翻页回放压到 App 识别不了（表现为"划了没反应"）
-    if (!gSession.active && gChainPlan && PTNowC() >= gPagerWindowUntil) PTChainReset();
+    // v1.0.66-fix2：连滑刹停改用「同方案连续命中间隔」(kChainStaleSec=1.2s) 判停，
+    // 不再绑死 0.4s 翻页器窗口——否则每次按键后窗口过期就 PTChainReset() 把整条链清零，
+    // 按键间隔稍大于 0.4s（单次滑动回放本身就 ~400ms+）就永远到不了 5 次，连滑根本触发不了。
+    // 间隔超时本就在 PTChainStartOrContinue 内部处理；此处只在「无在飞会话」时被动收尾，
+    // 让停止翻页后提速倍率与进度条自然归零，避免残留卡高位（表现为"划了没反应"）。
+    if (!gSession.active && gChainPlan && (CFAbsoluteTimeGetCurrent() - gChainLastHitT) > kChainStaleSec) PTChainReset();
     // 诊断：非注入触摸会话 Began 打一行 sender
     if (event) {
         for (UITouch *t in event.allTouches) {
