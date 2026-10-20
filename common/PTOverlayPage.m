@@ -84,8 +84,9 @@
         self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
         self.dot2 = [self makeDot:self.view label:@"2" color:[UIColor systemOrangeColor]];
         if (self.editIndex >= 0 && self.editAction) {
-            self.dot1.center = CGPointMake([self.editAction[@"x1"] doubleValue], [self.editAction[@"y1"] doubleValue]);
-            self.dot2.center = CGPointMake([self.editAction[@"x2"] doubleValue], [self.editAction[@"y2"] doubleValue]);
+            // v1.0.66(#4)：存储坐标为屏幕固定坐标，载入编辑时转回本视图坐标
+            self.dot1.center = [[UIScreen mainScreen].fixedCoordinateSpace convertPoint:CGPointMake([self.editAction[@"x1"] doubleValue], [self.editAction[@"y1"] doubleValue]) toView:self.view];
+            self.dot2.center = [[UIScreen mainScreen].fixedCoordinateSpace convertPoint:CGPointMake([self.editAction[@"x2"] doubleValue], [self.editAction[@"y2"] doubleValue]) toView:self.view];
         } else {
             self.dot1.center = CGPointMake(w * 0.3, h * 0.45);
             self.dot2.center = CGPointMake(w * 0.7, h * 0.55);
@@ -93,7 +94,7 @@
     } else {
         self.dot1 = [self makeDot:self.view label:@"1" color:[UIColor systemGreenColor]];
         if (self.editIndex >= 0 && self.editAction) {
-            self.dot1.center = CGPointMake([self.editAction[@"x"] doubleValue], [self.editAction[@"y"] doubleValue]);
+            self.dot1.center = [[UIScreen mainScreen].fixedCoordinateSpace convertPoint:CGPointMake([self.editAction[@"x"] doubleValue], [self.editAction[@"y"] doubleValue]) toView:self.view];
         } else {
             self.dot1.center = CGPointMake(w * 0.5, h * 0.5);
         }
@@ -273,6 +274,9 @@
 
 - (void)onRecPan:(UIPanGestureRecognizer *)pan {
     CGPoint loc = [pan locationInView:self.view];
+    // v1.0.66(#4)：录制坐标转成屏幕固定坐标（与回放 PTFakeMetaTouch 注入的 keyWindow 坐标对齐），
+    // 避免覆盖层视图坐标系与屏幕坐标系不一致导致"从屏幕外滑入"
+    loc = [self.view convertPoint:loc toCoordinateSpace:[UIScreen mainScreen].fixedCoordinateSpace];
     if (pan.state == UIGestureRecognizerStateBegan) {
         self.currentPts = [NSMutableArray array];
         self.recT0 = CFAbsoluteTimeGetCurrent();
@@ -321,18 +325,22 @@
 - (void)greenDotDone {
     NSMutableDictionary *a = [NSMutableDictionary dictionary];
     if (self.isSwipe) {
+        CGPoint c1 = [self.view convertPoint:self.dot1.center toCoordinateSpace:[UIScreen mainScreen].fixedCoordinateSpace];
+        CGPoint c2 = [self.view convertPoint:self.dot2.center toCoordinateSpace:[UIScreen mainScreen].fixedCoordinateSpace];
         a[@"type"] = @"swipe";
-        a[@"x1"] = @(self.dot1.center.x); a[@"y1"] = @(self.dot1.center.y);
-        a[@"x2"] = @(self.dot2.center.x); a[@"y2"] = @(self.dot2.center.y);
+        a[@"x1"] = @(c1.x); a[@"y1"] = @(c1.y);
+        a[@"x2"] = @(c2.x); a[@"y2"] = @(c2.y);
         a[@"speed"] = @(1000); a[@"holdMs"] = @(20); a[@"liftMs"] = @(0);
         a[@"steps"] = @(12); a[@"noInertia"] = @(YES);
     } else if (self.mode == PTOverlayModeDoubleTap) {
+        CGPoint c1 = [self.view convertPoint:self.dot1.center toCoordinateSpace:[UIScreen mainScreen].fixedCoordinateSpace];
         a[@"type"] = @"doubleTap";
-        a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
+        a[@"x"] = @(c1.x); a[@"y"] = @(c1.y);
         a[@"pressMs"] = @(30); a[@"gapMs"] = @(120);
     } else {
+        CGPoint c1 = [self.view convertPoint:self.dot1.center toCoordinateSpace:[UIScreen mainScreen].fixedCoordinateSpace];
         a[@"type"] = @"tap";
-        a[@"x"] = @(self.dot1.center.x); a[@"y"] = @(self.dot1.center.y);
+        a[@"x"] = @(c1.x); a[@"y"] = @(c1.y);
         a[@"pressMs"] = @(30);
     }
     // 编辑模式：保留原时序参数，只更新坐标

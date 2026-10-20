@@ -291,12 +291,26 @@ static double gDebounceMs = 300;
 static BOOL gDebugDots = NO;
 static BOOL gDebugLogEnabled = YES;
 static void PTDebugDestroyOverlay(void);    // v1.0.12：可视化覆盖层销毁（前向声明）
-static void PTFakeRecSwipeAsync(NSArray *pts, int token, void (^done)(void));  // v1.0.13：测试区回放前向声明
+static void PTFakeRecSwipeAsync(NSArray *pts, int token, double rate, void (^done)(void));  // v1.0.13：测试区回放前向声明（v1.0.66(#6) 增 rate）
 static int gExecToken;   // v1.0.13：前向声明（定义在运行拦截段，测试区 recSwipe 回放需要）
+// v1.0.66(#6)：连滑状态机辅助（定义在 PTExecutePlan 之前，此处前向声明供 PTHandlePagerEvent 调用）
+static void PTChainStartOrContinue(NSString *plan);
+static void PTChainReset(void);
+static void PTChainPillUpdate(void);
 static NSMutableDictionary *gPlans = nil;      // name -> dict
 static BOOL gLearnActive = NO;
 static uint64_t gLearnedSenders[kMaxLearnedSenders];
 static int gLearnedSenderCount = 0;
+
+// v1.0.66(#6)：连滑（变速+刹停）状态机——同一方案连续命中累计提速，异方案/未命中/超时节拍停
+#define kSwipeBurstThreshold 5        // 同一方案连续命中达到此值 → 进入连滑提速
+#define kChainStaleSec 1.2            // 超过该间隔的再次命中视为新链（自动刹停旧链）
+static BOOL gChainEnabled = YES;      // 连滑总开关（设置项；默认开）
+static NSString *gChainPlan = nil;    // 当前连滑链归属方案
+static int gChainCount = 0;           // 同方案连续命中计数
+static BOOL gChainBurst = NO;         // 是否已进入连滑（提速）
+static double gChainRate = 1.0;       // 注入提速倍率（>1 更快）
+static CFAbsoluteTime gChainLastHitT = 0; // 上次命中时刻（用于自动刹停）
 
 void PTDylibLoadConfig(BOOL force) {
     NSString *p = PTDylibCfgPath();
@@ -312,6 +326,7 @@ void PTDylibLoadConfig(BOOL force) {
     // v1.0.12：可视化开关关掉 → 销毁绿点覆盖层（覆盖层不碰状态栏，开关只控制显示）
     if (!gDebugDots) PTDebugDestroyOverlay();
     gDebugLogEnabled = (gConfig[@"debugLogEnabled"] == nil) ? YES : [gConfig[@"debugLogEnabled"] boolValue];
+    gChainEnabled = (gConfig[@"chainEnabled"] == nil) ? YES : [gConfig[@"chainEnabled"] boolValue];   // v1.0.66(#6)
     gPlans = [NSMutableDictionary dictionary];
     gLearnedSenderCount = 0;
     for (NSDictionary *pl in gConfig[@"plans"] ?: @[]) {
@@ -630,7 +645,7 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
             double t1 = [pts[pts.count - 1][@"t"] doubleValue];
             PTTestShowDot(from, to, YES, MAX(t1 - t0, 50) / 1000.0);
         }
-        PTFakeRecSwipeAsync(pts, gExecToken, next);
+        PTFakeRecSwipeAsync(pts, gExecToken, gChainRate, next);   // v1.0.66(#6)：测试页同样支持连滑提速
     } else {
         // v1.0.5：音量+/音量-/静音切换已删除，旧配置里的这些动作在此跳过
         if (next) next();
@@ -640,6 +655,7 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
 // 顺序执行方案动作序列（测试防抖 300ms；执行中同样忽略）
 static void PTTestExecPlan(NSString *name) {
     double now = PTNowC();
+    PTChainReset();   // v1.0.66(#6)：测试执行前复位连滑链，避免继承真实翻页残留的提速倍率
     if (sTestInjecting || now - sLastTestExec < 0.3) { PTDylibLog(@"[测试] 防抖：忽略 %@", name); return; }
     sLastTestExec = now;
     NSDictionary *plan = nil;
@@ -808,10 +824,13 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
             NSString *plan = PTMatchPlan(f, gCurSender);
             if (plan) {
                 gSessTrail = nil;
-                PTDylibLog(@"[会话] 命中「%@」→ 执行映射（原始滑动已整段吞掉）", plan);
+                PTChainStartOrContinue(plan);   // v1.0.66(#6)：连滑记账（同方案提速/异方案刹停重开）
+                PTDylibLog(@"[会话] 命中「%@」→ 执行映射（原始滑动已整段吞掉）链:%@ 计数%d 倍率%.2f",
+                    plan, gChainBurst ? @"BURST" : @"-", gChainCount, gChainRate);
                 PTExecutePlan(plan);
                 return YES;
             }
+            PTChainReset();   // v1.0.66(#6)：未命中 → 刹停连滑
             PTDylibLog(@"[会话] 未命中：sender=0x%llx phase=%d dir=%.1f dist=%.1f → 重放轨迹放行",
                 gCurSender, f.phase, f.direction, f.dist);
             PTReplayTrailAsync();
@@ -1145,7 +1164,7 @@ static CGPoint PTRecSwipeInterp(NSArray *xs, NSArray *ys, NSArray *ts, double ta
     return CGPointMake(fa + (fb - fa) * f, ga + (gb - ga) * f);
 }
 
-static void PTFakeRecSwipeAsync(NSArray *pts, int token, void (^done)(void)) {
+static void PTFakeRecSwipeAsync(NSArray *pts, int token, double rate, void (^done)(void)) {
     if (!pts.count) { if (done) done(); return; }
     // 预解析 @{x,y,t} → 分离数组（避免每帧反复解包）
     NSMutableArray *xs = [NSMutableArray array], *ys = [NSMutableArray array], *ts = [NSMutableArray array];
@@ -1159,22 +1178,36 @@ static void PTFakeRecSwipeAsync(NSArray *pts, int token, void (^done)(void)) {
     double t0 = [ts[0] doubleValue];
     double totalMs = [ts[m-1] doubleValue] - t0;
     if (totalMs <= 0) totalMs = 1.0;
+    double ratev = (rate > 0) ? rate : 1.0;   // v1.0.66(#6)：提速倍率（连滑时 >1）
 
     __block NSInteger pid = -1;
     __block BOOL ended = NO;
     __block CFAbsoluteTime startT = CFAbsoluteTimeGetCurrent();
+    __block CFAbsoluteTime lastTick = startT;
+    __block double playMs = 0;   // v1.0.66(#6)：已播放毫秒（受 rate 与单帧封顶约束，单调推进）
     PTRecSwipeTickProxy *proxy = [PTRecSwipeTickProxy new];
     CADisplayLink *link = [CADisplayLink displayLinkWithTarget:proxy selector:@selector(onTick:)];
     [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     proxy.tick = ^{
         if (token != gExecToken) { [link invalidate]; if (done) done(); return; }
-        double elapsedMs = (CFAbsoluteTimeGetCurrent() - startT) * 1000.0;
-        CGPoint cur = PTRecSwipeInterp(xs, ys, ts, t0 + elapsedMs);   // 1:1 还原（无速率调节）
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        double realMs = (now - startT) * 1000.0;
+        double frameMs = (now - lastTick) * 1000.0;   // 距上次 tick 的真实间隔
+        lastTick = now;
+        // v1.0.66(#6)：看门狗——真实时间远超播放总时长（封顶 6x）仍没走完 → 强制结束，避免卡死
+        if (realMs > totalMs * 6.0) frameMs = totalMs;
+        double target = playMs + frameMs * ratev;      // 按 rate 推进目标
+        if (target > totalMs) target = totalMs;
+        // v1.0.66(#6)：单帧封顶——每帧最多推进 100ms，避免高 rate / 卡顿后瞬移
+        double cap = playMs + 100.0;
+        if (target > cap) target = cap;
+        playMs = target;
+        CGPoint cur = PTRecSwipeInterp(xs, ys, ts, t0 + playMs);   // 按推进量插值还原
         gInFakeTouch = YES;
         if (pid < 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:cur withTouchPhase:UITouchPhaseBegan];
         else         [PTFakeMetaTouch fakeTouchId:pid AtPoint:cur withTouchPhase:UITouchPhaseMoved];
         gInFakeTouch = NO;
-        if (elapsedMs >= totalMs && !ended) {
+        if (playMs >= totalMs && !ended) {
             CGPoint end = CGPointMake([xs[m-1] doubleValue], [ys[m-1] doubleValue]);
             gInFakeTouch = YES;
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:end withTouchPhase:UITouchPhaseEnded];
@@ -1206,7 +1239,7 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
     } else if ([type isEqualToString:@"swipe"]) {
         CGPoint from = CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]);
         CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
-        double speed = [a[@"speed"] doubleValue] ?: 1000;
+        double speed = ([a[@"speed"] doubleValue] ?: 1000) * gChainRate;   // v1.0.66(#6)：连滑提速（倍率>1 更快）
         int holdMs = [a[@"holdMs"] intValue] ?: 20;
         int liftMs = [a[@"liftMs"] intValue] ?: 0;
         BOOL noInertia = a[@"noInertia"] ? [a[@"noInertia"] boolValue] : YES;
@@ -1215,8 +1248,8 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
         if (durMs < 50) durMs = 50;
         PTFakeSwipeAsync(from, to, durMs, holdMs, liftMs, noInertia, token, next);
     } else if ([type isEqualToString:@"recSwipe"]) {
-        // v1.0.8：滑动(手动)——按录制轨迹回放
-        PTFakeRecSwipeAsync(a[@"pts"], token, next);
+        // v1.0.8：滑动(手动)——按录制轨迹回放；v1.0.66(#6)：带连滑提速倍率
+        PTFakeRecSwipeAsync(a[@"pts"], token, gChainRate, next);
     } else if ([type isEqualToString:@"delay"]) {
         double ms = [a[@"ms"] doubleValue] ?: 100;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
@@ -1224,6 +1257,69 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
         // v1.0.5：音量+/音量-/静音切换已删除，旧配置里的这些动作在此跳过
         if (next) next();
     }
+}
+
+// ============================================================
+// v1.0.66(#6)：连滑（变速+刹停）状态机辅助 + 顶部 pill
+// ============================================================
+static UIView *gChainPill = nil;
+static void PTChainPillUpdate(void) {
+    if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ PTChainPillUpdate(); }); return; }
+    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+    if (!kw) return;
+    // 链激活即提示：未进连滑显示蓄力进度，进连滑显示倍率
+    BOOL show = gChainEnabled && gChainPlan != nil && gChainCount >= 2;
+    if (!show) { [gChainPill removeFromSuperview]; gChainPill = nil; return; }
+    if (!gChainPill) {
+        gChainPill = [[UIView alloc] init];
+        gChainPill.layer.cornerRadius = 12;
+        gChainPill.userInteractionEnabled = NO;
+        UILabel *lb = [[UILabel alloc] init];
+        lb.tag = 101; lb.font = [UIFont boldSystemFontOfSize:13];
+        lb.textColor = [UIColor whiteColor]; lb.textAlignment = NSTextAlignmentCenter;
+        [gChainPill addSubview:lb];
+        [kw addSubview:gChainPill];
+    }
+    gChainPill.backgroundColor = gChainBurst
+        ? [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.92]
+        : [UIColor colorWithRed:0.3 green:0.3 blue:0.3 alpha:0.85];
+    UILabel *lb = [gChainPill viewWithTag:101];
+    lb.text = gChainBurst
+        ? [NSString stringWithFormat:@"⚡连滑 ×%.1f", gChainRate]
+        : [NSString stringWithFormat:@"连滑 %d/%d", gChainCount, kSwipeBurstThreshold];
+    [lb sizeToFit];
+    CGFloat w = lb.bounds.size.width + 20, h = 24;
+    CGFloat topInset = (kw.safeAreaInsets.top > 0) ? kw.safeAreaInsets.top : 20;
+    gChainPill.frame = CGRectMake((kw.bounds.size.width - w) / 2, topInset + 6, w, h);
+    lb.frame = CGRectMake(10, 0, w - 20, h);
+}
+
+// 命中方案时记账：同方案累计提速，异方案/过时刹停重开
+static void PTChainStartOrContinue(NSString *plan) {
+    if (!gChainEnabled || !plan) { PTChainReset(); return; }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (gChainPlan && ![gChainPlan isEqualToString:plan]) {
+        PTDylibLog(@"[连滑] 异方案「%@」→ 刹停旧链「%@」", plan, gChainPlan);
+        PTChainReset();
+    } else if (gChainPlan && (now - gChainLastHitT) > kChainStaleSec) {
+        PTDylibLog(@"[连滑] 间隔超时 → 刹停旧链「%@」", gChainPlan);
+        PTChainReset();
+    }
+    if (!gChainPlan) { gChainPlan = plan; gChainCount = 0; gChainBurst = NO; gChainRate = 1.0; }
+    gChainCount++;
+    gChainLastHitT = now;
+    if (gChainCount >= kSwipeBurstThreshold) {
+        gChainBurst = YES;
+        gChainRate = MIN(1.0 + (gChainCount - kSwipeBurstThreshold + 1) * 0.25, 4.0);   // 每多一次 +0.25，封顶 4x
+    }
+    PTChainPillUpdate();
+}
+
+// 刹停：清空连滑链（未命中/异方案/超时/功能关闭）——gExecToken 不变，留给在飞动作自然走完
+static void PTChainReset(void) {
+    if (gChainPlan) PTDylibLog(@"[连滑] 刹停：链「%@」结束（计数 %d 倍率%.2f）", gChainPlan, gChainCount, gChainRate);
+    gChainPlan = nil; gChainCount = 0; gChainBurst = NO; gChainRate = 1.0; gChainLastHitT = 0;
+    PTChainPillUpdate();
 }
 
 // 执行方案动作序列（防抖：序列执行中或距上次执行 < 防抖间隔都忽略）
@@ -1341,19 +1437,19 @@ void PTDylibSendEvent(id self, SEL _cmd, UIEvent *event) {
     PTDylibLoadConfig(NO);
     // v1.0.12：双指长按检测（最前面，任何触摸都能触发）——仅 dylib 开启（roothide 用设置页）
     if (gGestureMenuEnabled) PTDylibGestureTick(event);
-    // v1.0.6：调试可视化先画点（与 deb 对齐——未命中重放/动作执行的注入触摸也画点；
-    // 被拦截吞掉的翻页器原始轨迹仍不可见，v1.0.43 语义不变）
-    if (gDebugDots && event) {
-        for (UITouch *t in event.allTouches) {
-            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
-            PTDebugUpdate((__bridge void *)t, p, t.phase, NO);
-        }
-    }
+    // v1.0.66(#2)：调试绿点绘制移到「交付 App 之前」（见下方各交付分支），命中被吞的翻页器原始轨迹不再画点，
+    // 只显示映射注入轨迹；未命中放行/注入态的触摸在各自交付处补画。
     // v1.0.20：已删除「sendEvent 钩子全局采集录制」——旧版录制覆盖层穿透到 App、靠全局 sendEvent 抓真实触摸。
     // 现改为覆盖层 UIPanGestureRecognizer 直接抓轨迹（见 PTDylibUI.m PTRecOnPan），不再在此处采集。
     // gRecArmed 仍保留（上方双指检测等处用其排除录制态）。
     // 注入触摸/执行中：放行（注入触摸没有 addEvent、sender 残留翻页器，走拦截会把映射触摸 Began 吞掉）
     if (gInFakeTouch || gIsInjecting || sTestInjecting) {
+        if (gDebugDots && event) {   // v1.0.66(#2)：映射注入触摸照常画点（pager=NO），保证命中时可见的是映射轨迹而非翻页器原始轨迹
+            for (UITouch *t in event.allTouches) {
+                CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+                PTDebugUpdate((__bridge void *)t, p, t.phase, NO);
+            }
+        }
         if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
         return;
     }
@@ -1404,6 +1500,12 @@ void PTDylibSendEvent(id self, SEL _cmd, UIEvent *event) {
                 default: break;
             }
         }
+        if (gDebugDots && event) {   // v1.0.66(#2)：学习/测试期 App 真实收到的触摸照常画点
+            for (UITouch *t in event.allTouches) {
+                CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+                PTDebugUpdate((__bridge void *)t, p, t.phase, NO);
+            }
+        }
         if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
         return;
     }
@@ -1418,6 +1520,12 @@ void PTDylibSendEvent(id self, SEL _cmd, UIEvent *event) {
                 CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
                 PTDylibLog(@"[touch] sender=0x%llx phase=Began pos=(%.1f,%.1f)", gCurSender, p.x, p.y);
             }
+        }
+    }
+    if (gDebugDots && event) {   // v1.0.66(#2)：最终交付 App 的触摸画点（含未命中放行的翻页器原始触摸）
+        for (UITouch *t in event.allTouches) {
+            CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
+            PTDebugUpdate((__bridge void *)t, p, t.phase, NO);
         }
     }
     if (gOrigSendEvent) ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);

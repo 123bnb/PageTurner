@@ -185,6 +185,9 @@
 @interface PTPlansVC : PSViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) NSMutableArray *plans;
 @property (nonatomic, strong) UITableView *tv;
+@property (nonatomic, assign) NSInteger dragFrom;   // v1.0.66(#5)：长按拖拽起点行（-1=未拖）
+@property (nonatomic, assign) NSInteger dragRow;     // v1.0.66(#5)：当前落点行
+@property (nonatomic, strong) UIView *dragSnap;      // v1.0.66(#5)：拖拽浮层快照
 - (void)reload;
 @end
 
@@ -197,6 +200,12 @@
 @property (nonatomic, strong) UILabel *addFeatureBtn;   // v1.0.34：增加特征按钮（紧挨记录按钮）
 @property (nonatomic, strong) UITableView *tv;
 @property (nonatomic, strong) NSMutableArray *actions;
+@property (nonatomic, assign) NSInteger dragFrom;   // v1.0.66(#5b)：长按拖拽起点行
+@property (nonatomic, assign) NSInteger dragRow;     // v1.0.66(#5b)：当前落点行
+@property (nonatomic, strong) UIView *dragSnap;      // v1.0.66(#5b)：拖拽浮层快照
+@property (nonatomic, assign) CGPoint dragStartPt;   // v1.0.66(#5b)：长按起点
+@property (nonatomic, assign) BOOL didDrag;          // v1.0.66(#5b)：是否已进入拖动
+@property (nonatomic, assign) BOOL justDragged;      // v1.0.66(#5b)：刚拖完，忽略松手误触
 - (void)reload;
 @end
 
@@ -471,7 +480,9 @@ static void SAppendSample(int phase, double dir, double dist, int tapDx) {
 // ============================================================
 static BOOL sTestArmed = NO;          // 测试页打开时置 YES
 static BOOL gTestInjecting = NO;      // 注入保护（防执行触摸再被本 hook 处理）
-static UIView *sTestDot = nil;        // 测试页绿点视图
+static UIView *sTestDot = nil;        // 测试页绿点视图（起点绿点）
+static CAShapeLayer *sTestLine = nil; // v1.0.66(#3)：方向线
+static UIView *sTestP = nil;          // v1.0.66(#3)：终点 P 标记
 static double sLastTestExec = 0;      // 测试防抖
 static __weak PTTestVC *sTestLogSink = nil;   // v1.0.28：测试页实时记录区（页面销毁即失效）
 
@@ -519,25 +530,47 @@ static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t
     return best;
 }
 
-// 绿点可视化：tap 原地显示；swipe 从起点动画到终点，之后淡出
+// v1.0.66(#3)：轨迹可视化统一成「调试可视化同款」——起点绿点 + 方向线 + 终点 P 标记（真实坐标）。
+// 此前只画一个移动绿点（无方向线/无 P），与引擎回放回调(drawTrailWithDirection)样式不一致；现统一。
 static void PTTestShowDot(CGPoint from, CGPoint to, BOOL animate, double dur) {
     if (!sTestDot) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        sTestDot.hidden = NO;
-        sTestDot.alpha = 0.9;
-        sTestDot.center = from;
-        if (animate) {
-            [UIView animateWithDuration:dur animations:^{ sTestDot.center = to; }
-                completion:^(BOOL f) {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        sTestDot.alpha = 0; sTestDot.hidden = YES;
-                    });
-                }];
-        } else {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                sTestDot.alpha = 0; sTestDot.hidden = YES;
-            });
+        UIView *parent = sTestDot.superview;
+        if (!parent) return;
+        // 终点 P 标记（懒建）
+        if (!sTestP) {
+            sTestP = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
+            sTestP.layer.cornerRadius = 18;
+            sTestP.backgroundColor = [UIColor systemGreenColor];
+            sTestP.userInteractionEnabled = NO; sTestP.hidden = YES;
+            UILabel *pl = [[UILabel alloc] initWithFrame:sTestP.bounds];
+            pl.text = @"P"; pl.textAlignment = NSTextAlignmentCenter;
+            pl.font = [UIFont boldSystemFontOfSize:18]; pl.textColor = [UIColor whiteColor];
+            [sTestP addSubview:pl];
+            [parent addSubview:sTestP];
         }
+        // 方向线（懒建）
+        if (!sTestLine) {
+            sTestLine = [CAShapeLayer layer];
+            sTestLine.strokeColor = [UIColor systemGreenColor].CGColor;
+            sTestLine.fillColor = [UIColor clearColor].CGColor;
+            sTestLine.lineWidth = 3; sTestLine.lineCap = kCALineCapRound;
+            [parent.layer addSublayer:sTestLine];
+        }
+        // 起点绿点
+        sTestDot.hidden = NO; sTestDot.alpha = 0.9; sTestDot.center = from;
+        // 终点 P + 方向线（from→to）
+        sTestP.hidden = NO; sTestP.alpha = 0.95; sTestP.center = to;
+        CGMutablePathRef path = CGPathCreateMutable();
+        CGPathMoveToPoint(path, NULL, from.x, from.y);
+        CGPathAddLineToPoint(path, NULL, to.x, to.y);
+        sTestLine.path = path; CGPathRelease(path);
+        // 渐隐收尾：swipe 按其时长保留，tap 短暂保留
+        double hold = animate ? MAX(dur, 0.3) : 0.0;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((hold + 0.4) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            sTestDot.alpha = 0; sTestDot.hidden = YES;
+            sTestP.alpha = 0; sTestP.hidden = YES; sTestLine.path = nil;
+        });
     });
 }
 
@@ -999,6 +1032,15 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         [plans setProperty:@"新增方案：录制翻页器一个按键的特征（来源+方向+位移），再映射为动作序列。左滑可删除方案。" forKey:@"staticText"];
         [specs addObject:plans];
 
+        // v1.0.66(#6)：连滑（变速+刹停）总开关
+        PSSpecifier *chain = [PSSpecifier preferenceSpecifierNamed:@"连滑提速"
+            target:self set:@selector(setPreferenceValue:specifier:) get:@selector(readPreferenceValue:)
+            detail:nil cell:PSSwitchCell edit:nil];
+        [chain setProperty:@"chainEnabled" forKey:@"key"];
+        [chain setProperty:@YES forKey:@"default"];
+        [chain setProperty:@"同一方案连续翻页自动提速（满 5 次进入连滑，倍率最高 4x）；换成其他方案或没命中即刹停。顶部会显示连滑进度/倍率。" forKey:@"staticText"];
+        [specs addObject:chain];
+
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"调试"]];
         // v1.0.57：注入探针开关已删除（旧版无法注入时的兜底弹窗，早已失效，见 commit）
         PSSpecifier *dots = [PSSpecifier preferenceSpecifierNamed:@"调试可视化"
@@ -1100,7 +1142,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     NSMutableSet *sel = [NSMutableSet setWithArray:PTRead()[@"enabledApps"] ?: @[]];
     self.selected = sel;
     self.allApps = [self enumerateApps];
-    self.shown = [NSMutableArray arrayWithArray:self.allApps];
+    self.shown = [NSMutableArray arrayWithArray:[self buildShownFrom:self.allApps]];   // v1.0.66：勾选优先置顶（进入时才重排，打勾当下列表不动）
 
     CGFloat top = 100;
     if (self.view.safeAreaInsets.top > 20) top = self.view.safeAreaInsets.top + 40;
@@ -1147,17 +1189,27 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     return out;
 }
 
+- (NSArray *)buildShownFrom:(NSArray *)src {
+    // v1.0.66：勾选优先置顶——selected 排前、其余排后；src 已按名称排好，分区后拼接即得「勾选优先 + 名称序」
+    NSMutableArray *sel = [NSMutableArray array], *rest = [NSMutableArray array];
+    for (NSDictionary *a in src) {
+        if ([self.selected containsObject:a[@"bundle"]]) [sel addObject:a]; else [rest addObject:a];
+    }
+    [sel addObjectsFromArray:rest];
+    return sel;
+}
+
 - (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
-    if (!searchText.length) {
-        self.shown = [NSMutableArray arrayWithArray:self.allApps];
-    } else {
+    NSArray *base = self.allApps;
+    if (searchText.length) {
         NSMutableArray *f = [NSMutableArray array];
         for (NSDictionary *a in self.allApps) {
             if ([a[@"name"] localizedCaseInsensitiveContainsString:searchText] ||
                 [a[@"bundle"] localizedCaseInsensitiveContainsString:searchText]) [f addObject:a];
         }
-        self.shown = f;
+        base = f;
     }
+    self.shown = [NSMutableArray arrayWithArray:[self buildShownFrom:base]];   // v1.0.66：搜索结果内勾选项也优先置顶
     [self.tv reloadData];
 }
 
@@ -1256,6 +1308,11 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     self.tv.dataSource = self;
     self.tv.delegate = self;
     [self.view addSubview:self.tv];
+    self.dragFrom = -1; self.dragRow = -1;
+    // v1.0.66(#5)：长按方案行拖拽排序（自定义浮层，零三横线）
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(planLongPress:)];
+    lp.cancelsTouchesInView = YES;
+    [self.tv addGestureRecognizer:lp];
     [self reload];
 }
 
@@ -1336,6 +1393,49 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     }];
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
+
+// v1.0.66(#5)：长按方案行拖拽排序——自定义浮层快照跟手移动，实时换序，落点钳制在方案范围内，
+// 末行「新增方案」不参与拖拽（拖拽起点/落点都排除它）。
+- (void)planLongPress:(UILongPressGestureRecognizer *)g {
+    CGPoint p = [g locationInView:self.tv];
+    NSIndexPath *ip = [self.tv indexPathForRowAtPoint:p];
+    if (g.state == UIGestureRecognizerStateBegan) {
+        if (!ip || ip.row >= (NSInteger)self.plans.count) { self.dragFrom = -1; self.dragRow = -1; return; }
+        self.dragFrom = ip.row; self.dragRow = ip.row;
+        UITableViewCell *cell = [self.tv cellForRowAtIndexPath:ip];
+        if (!cell) { self.dragFrom = -1; return; }
+        self.dragSnap = [cell snapshotViewAfterScreenUpdates:NO];
+        self.dragSnap.frame = cell.frame;
+        [self.tv addSubview:self.dragSnap];
+        cell.hidden = YES;
+    } else if (g.state == UIGestureRecognizerStateChanged) {
+        if (self.dragFrom < 0) return;
+        self.dragSnap.center = CGPointMake(self.tv.bounds.size.width / 2.0, p.y);
+        NSIndexPath *target = [self.tv indexPathForRowAtPoint:p];
+        NSInteger t = target ? target.row : (self.plans.count - 1);
+        if (t < 0) t = 0;
+        if (t >= (NSInteger)self.plans.count) t = self.plans.count - 1;   // 排除末行「新增方案」
+        if (t != self.dragRow) {
+            id obj = self.plans[self.dragRow];
+            [self.plans removeObjectAtIndex:self.dragRow];
+            [self.plans insertObject:obj atIndex:t];
+            [self.tv moveRowAtIndexPath:[NSIndexPath indexPathForRow:self.dragRow inSection:0]
+                          toIndexPath:[NSIndexPath indexPathForRow:t inSection:0]];
+            self.dragRow = t;
+        }
+        UITableViewCell *cur = [self.tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:self.dragRow inSection:0]];
+        if (cur) cur.hidden = YES;   // 浮层替代当前行，隐藏真实 cell
+    } else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
+        if (self.dragFrom < 0) return;
+        for (UITableViewCell *c in self.tv.visibleCells) c.hidden = NO;
+        [self.dragSnap removeFromSuperview]; self.dragSnap = nil;
+        self.dragFrom = -1; self.dragRow = -1;
+        NSMutableDictionary *cfg = PTRead();
+        cfg[@"plans"] = self.plans;
+        PTWrite(cfg);
+        [self.tv reloadData];
+    }
+}
 @end
 
 // ============================================================
@@ -1347,9 +1447,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [super viewDidLoad];
     // v1.0.35：统一成系统设置灰分组背景
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    // v1.0.43：右上角「排序」→ 编辑态显示行最右侧 ≡ 手柄，按住拖动调整映射顺序
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"排序"
-        style:UIBarButtonItemStylePlain target:self action:@selector(toggleEdit)];
+    // v1.0.66(#5b)：移除「排序」按钮——排序改由动作行长按拖拽完成（见 longPressAction:）
     [self reload];
 }
 
@@ -1417,7 +1515,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
         // v1.0.28：映射区说明水平居中 + 字号 15
         // v1.0.43：补充排序入口提示
         UILabel *hv = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, w - 32, 34)];
-        hv.text = @"映射区：按一次该键 → 从上到下依次执行全部动作（右上角「排序」可拖动调整）";
+        hv.text = @"映射区：按一次该键 → 从上到下依次执行全部动作（点按=编辑，长按=参数，长按拖动=排序）";
         hv.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
         hv.textColor = [UIColor labelColor];
         hv.textAlignment = NSTextAlignmentCenter;
@@ -1499,6 +1597,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cid];
     if (ip.row < (NSInteger)self.actions.count) {
         c.textLabel.text = [NSString stringWithFormat:@"%ld. %@", (long)(ip.row + 1), PTActionText(self.actions[ip.row])];
+        c.textLabel.textColor = [UIColor labelColor];   // v1.0.66：动作行显式设色，避免复用「新增映射/测试本方案」cell 时串色（黑→绿/蓝）
         c.accessoryType = UITableViewCellAccessoryNone;
         // v1.0.28：长按动作 → 参数调整框（左滑删除并存）
         for (UIGestureRecognizer *g in c.gestureRecognizers)
@@ -1518,6 +1617,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
+    if (self.justDragged) { self.justDragged = NO; return; }   // v1.0.66(#5b)：刚拖完排序，忽略松手带来的误触
     if (ip.row < (NSInteger)self.actions.count) {
         // v1.0.29（问题6）：点击动作行 → 进动作设置页编辑（预填坐标，完成覆盖更新）
         NSDictionary *act = self.actions[ip.row];
@@ -1564,30 +1664,75 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     vc.planName = self.planName;
     [self.navigationController pushViewController:vc animated:YES];
 }
-// v1.0.28：长按动作 → 参数调整页（时序/速度全可调）
-// v1.0.43：最右侧是排序手柄区（编辑态），长按让给系统拖拽，不弹参数页
+// v1.0.66(#5b)：动作行手势分工（Z 方案）——点按=编辑(didSelect)、长按不动=参数页、长按并拖动=排序。
+// 旧「排序」按钮 + 系统编辑态手柄已删除，排序改由本长按手势的状态机完成（零三横线、无后遗症）。
 - (void)longPressAction:(UILongPressGestureRecognizer *)g {
-    if (g.state != UIGestureRecognizerStateBegan) return;
     UITableViewCell *cell = (UITableViewCell *)g.view;
-    CGPoint loc = [g locationInView:cell];
-    if (loc.x > cell.bounds.size.width - 56) return;   // 右侧 ≡ 排序手柄区
-    NSIndexPath *ip = [self.tv indexPathForCell:cell];
-    if (!ip || ip.row >= (NSInteger)self.actions.count) return;
-    // 点击(手动)/双击(手动) 废案已删除（旧配置残留）→ 提示，不进参数页
-    NSString *ltype = self.actions[ip.row][@"type"];
-    if ([ltype isEqualToString:@"tapManual"] || [ltype isEqualToString:@"doubleTapManual"]) {
-        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"该动作已删除"
-            message:@"点击(手动)/双击(手动)已删除（废案）。请在编辑中删除这个动作，换成其它动作。"
-            preferredStyle:UIAlertControllerStyleAlert];
-        [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:al animated:YES completion:nil];
-        return;
+    if (g.state == UIGestureRecognizerStateBegan) {
+        self.didDrag = NO; self.justDragged = NO;
+        self.dragFrom = -1; self.dragRow = -1;
+        NSIndexPath *ip = [self.tv indexPathForCell:cell];
+        if (!ip || ip.row >= (NSInteger)self.actions.count) return;
+        // 点击(手动)/双击(手动) 废案已删除（旧配置残留）→ 提示，不进参数页
+        NSString *ltype = self.actions[ip.row][@"type"];
+        if ([ltype isEqualToString:@"tapManual"] || [ltype isEqualToString:@"doubleTapManual"]) {
+            UIAlertController *al = [UIAlertController alertControllerWithTitle:@"该动作已删除"
+                message:@"点击(手动)/双击(手动)已删除（废案）。请在编辑中删除这个动作，换成其它动作。"
+                preferredStyle:UIAlertControllerStyleAlert];
+            [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:al animated:YES completion:nil];
+            return;
+        }
+        self.dragFrom = ip.row; self.dragRow = ip.row;
+        self.dragStartPt = [g locationInView:self.tv];
+        // 不立即进参数页：先等 Changed 判断是否拖动；未拖动(长按不动)才在 Ended 进参数页
+    } else if (g.state == UIGestureRecognizerStateChanged) {
+        if (self.dragFrom < 0) return;
+        CGPoint now = [g locationInView:self.tv];
+        if (!self.didDrag) {
+            CGFloat dx = now.x - self.dragStartPt.x, dy = now.y - self.dragStartPt.y;
+            if (hypot(dx, dy) < 10.0) return;   // 未超阈值：仍算"长按不动"，不进入拖拽
+            // 进入拖拽：建浮层快照替代原 cell
+            self.didDrag = YES;
+            UITableViewCell *c = [self.tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:self.dragRow inSection:0]];
+            if (c) { self.dragSnap = [c snapshotViewAfterScreenUpdates:NO]; self.dragSnap.frame = c.frame; [self.tv addSubview:self.dragSnap]; c.hidden = YES; }
+        }
+        self.dragSnap.center = CGPointMake(self.tv.bounds.size.width / 2.0, now.y);
+        NSIndexPath *target = [self.tv indexPathForRowAtPoint:now];
+        NSInteger t = target ? target.row : (self.actions.count - 1);
+        if (t < 0) t = 0;
+        if (t >= (NSInteger)self.actions.count) t = self.actions.count - 1;   // 落点钳制在动作行内（不拖到「新增映射/测试」）
+        if (t != self.dragRow) {
+            id obj = self.actions[self.dragRow];
+            [self.actions removeObjectAtIndex:self.dragRow];
+            [self.actions insertObject:obj atIndex:t];
+            [self.tv moveRowAtIndexPath:[NSIndexPath indexPathForRow:self.dragRow inSection:0]
+                          toIndexPath:[NSIndexPath indexPathForRow:t inSection:0]];
+            self.dragRow = t;
+        }
+        for (UITableViewCell *c in self.tv.visibleCells) c.hidden = NO;   // 先全显，再隐藏当前行，避免 cell 复用残留隐藏
+        UITableViewCell *cur = [self.tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:self.dragRow inSection:0]];
+        if (cur) cur.hidden = YES;
+    } else if (g.state == UIGestureRecognizerStateEnded || g.state == UIGestureRecognizerStateCancelled) {
+        if (self.dragFrom < 0) return;
+        if (self.didDrag) {
+            for (UITableViewCell *c in self.tv.visibleCells) c.hidden = NO;
+            [self.dragSnap removeFromSuperview]; self.dragSnap = nil;
+            [self saveActions];
+            [self.tv reloadData];
+            self.justDragged = YES;   // 防止松手瞬间被误判为点按进编辑页
+        } else {
+            // 长按不动 → 进参数页（原 longPressAction 行为）
+            NSInteger r = self.dragFrom;
+            if (r >= (NSInteger)self.actions.count) { self.dragFrom = -1; return; }
+            PTActionParamVC *vc = [PTActionParamVC new];
+            vc.planName = self.planName;
+            vc.actionIndex = r;
+            vc.action = self.actions[r];
+            [self.navigationController pushViewController:vc animated:YES];
+        }
+        self.dragFrom = -1; self.dragRow = -1; self.didDrag = NO;
     }
-    PTActionParamVC *vc = [PTActionParamVC new];
-    vc.planName = self.planName;
-    vc.actionIndex = ip.row;
-    vc.action = self.actions[ip.row];
-    [self.navigationController pushViewController:vc animated:YES];
 }
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
     if (ip.row >= (NSInteger)self.actions.count) return nil;
@@ -1601,24 +1746,8 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     return [UISwipeActionsConfiguration configurationWithActions:@[del]];
 }
 
-// v1.0.43：映射区排序——右上角「排序」进入编辑态，按住行最右侧 ≡ 手柄拖动调整顺序
-- (void)toggleEdit {
-    BOOL on = !self.tv.editing;
-    [self.tv setEditing:on animated:YES];
-    self.navigationItem.rightBarButtonItem.title = on ? @"完成" : @"排序";
-}
-- (BOOL)tableView:(UITableView *)tv canEditRowAtIndexPath:(NSIndexPath *)ip {
-    return ip.row < (NSInteger)self.actions.count;   // 只有映射动作行可编辑（显示排序手柄）
-}
-- (BOOL)tableView:(UITableView *)tv canMoveRowAtIndexPath:(NSIndexPath *)ip {
-    return ip.row < (NSInteger)self.actions.count;
-}
-- (UITableViewCellEditingStyle)tableView:(UITableView *)tv editingStyleForRowAtIndexPath:(NSIndexPath *)ip {
-    return UITableViewCellEditingStyleNone;   // 编辑态不显示删除红圈（删除走左滑）
-}
-- (BOOL)tableView:(UITableView *)tv shouldIndentWhileEditingRowAtIndexPath:(NSIndexPath *)ip {
-    return NO;
-}
+// v1.0.66(#5b)：映射区排序改由 longPressAction 长按拖拽完成（见上），以下系统编辑态排序方法已删除：
+// toggleEdit / canEditRowAtIndexPath / canMoveRowAtIndexPath / editingStyleForRowAtIndexPath / shouldIndentWhileEditingRowAtIndexPath
 - (void)tableView:(UITableView *)tv moveRowAtIndexPath:(NSIndexPath *)from toIndexPath:(NSIndexPath *)to {
     if (from.row >= (NSInteger)self.actions.count) return;
     // 目标钳制在动作行范围内（系统不允许拖到非动作行，这里双保险）
@@ -1652,7 +1781,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     } else if ([type isEqualToString:@"delay"]) {
         UIAlertController *al = [UIAlertController alertControllerWithTitle:@"延迟"
             message:@"输入延迟毫秒数（如 500 = 0.5 秒）" preferredStyle:UIAlertControllerStyleAlert];
-        [al addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.keyboardType = UIKeyboardTypeNumberPad; tf.placeholder = @"500"; }];
+        [al addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.keyboardType = UIKeyboardTypeNumberPad; tf.text = @"500"; }];   // v1.0.66：真实预填 500（非 placeholder），空按【添加】即添加 500
         [al addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
         [al addAction:[UIAlertAction actionWithTitle:@"添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
             double ms = [al.textFields.firstObject.text doubleValue];
@@ -2411,7 +2540,7 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
                   @{@"key": @"steps", @"name": @"滑动分段", @"unit": @"段", @"min": @6, @"max": @96, @"def": @12},
                   @{@"key": @"noInertia", @"name": @"防惯性", @"type": @"switch", @"def": @YES} ];
     } else if ([type isEqualToString:@"delay"]) {
-        defs = @[ @{@"key": @"ms", @"name": @"延迟时长", @"unit": @"ms", @"min": @50, @"max": @5000, @"def": @100} ];
+        defs = @[ @{@"key": @"ms", @"name": @"延迟时长", @"unit": @"ms", @"min": @50, @"max": @60000, @"def": @100} ];
     } else {
         [self.navigationController popViewControllerAnimated:YES];
         return;
@@ -2745,6 +2874,8 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     [super viewDidDisappear:animated];
     sTestArmed = NO;
     sTestDot = nil;
+    if (sTestLine) { [sTestLine removeFromSuperlayer]; sTestLine = nil; }
+    if (sTestP) { [sTestP removeFromSuperview]; sTestP = nil; }
     sTestLogSink = nil;   // 返回即消失，测试记录不保留
 }
 

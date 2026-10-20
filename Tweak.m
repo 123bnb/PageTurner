@@ -102,7 +102,7 @@ static void PTInit() {
         if (fileLog) PTSetLogPath(PTLogPathFor(bundleID));
 
         PTDylibLog(@"==================================================");
-        PTDylibLog(@"PageTurner v1.0.65 已注入 %@ (pid=%d) isPrefs=%d 写文件=%@",
+        PTDylibLog(@"PageTurner v1.0.66 已注入 %@ (pid=%d) isPrefs=%d 写文件=%@",
               bundleID, getpid(), gIsPreferences, fileLog ? PTLogPathFor(bundleID) : @"(关闭·仅内存)");
         PTDylibLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu",
               PTGlobalPlistPath(), masterEnabled, (unsigned long)enabledApps.count,
