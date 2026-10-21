@@ -292,7 +292,6 @@ static BOOL gDebugDots = NO;
 static BOOL gDebugLogEnabled = YES;
 static void PTDebugDestroyOverlay(void);    // v1.0.12：可视化覆盖层销毁（前向声明）
 static void PTFakeRecSwipeAsync(NSArray *pts, int token, double rate, void (^done)(void));  // v1.0.13：测试区回放前向声明（v1.0.66(#6) 增 rate）
-static int gExecToken;   // v1.0.13：前向声明（定义在运行拦截段，测试区 recSwipe 回放需要）
 // v1.0.66(#6)：连滑状态机辅助（定义在 PTExecutePlan 之前，此处前向声明供 PTHandlePagerEvent 调用）
 static void PTChainStartOrContinue(NSString *plan);
 static void PTChainReset(void);
@@ -311,6 +310,16 @@ static int gChainCount = 0;           // 同方案连续命中计数
 static BOOL gChainBurst = NO;         // 是否已进入连滑（提速）
 static double gChainRate = 1.0;       // 注入提速倍率（>1 更快）
 static CFAbsoluteTime gChainLastHitT = 0; // 上次命中时刻（用于自动刹停）
+// v1.0.66-fix4：排队续播状态——在飞动作不被打断，同方案连击入队、播完后续播
+static NSString *gExecPlan = nil;      // 当前在飞动作归属方案（用于判定"同方案连击续播"）
+static int gExecPending = 0;           // 同方案排队待续播次数（播完一轮再播下一轮）
+// v1.0.66-fix4：执行态全局变量上移至此，供测试页(PTTestExecPlan，早于下方原定义)与运行端共用，
+// 避免"使用先于定义"编译错误（C 要求 static 变量先声明后使用）。
+static BOOL gIsInjecting = NO;
+static BOOL gExecRunning = NO;
+static BOOL gInFakeTouch = NO;
+static int gExecToken = 0;
+static double gLastExec = 0;
 
 void PTDylibLoadConfig(BOOL force) {
     NSString *p = PTDylibCfgPath();
@@ -667,28 +676,54 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
     }
 }
 
-// 顺序执行方案动作序列（测试防抖 300ms；执行中同样忽略）
+// 顺序执行方案动作序列（测试页）。v1.0.66-fix4：与运行端统一为"排队续播"语义——
+// 在飞同方案连击入队、播完续播；异方案在飞直接无视；非在飞正常启动（仍受 0.3s 测试防抖约束）。
+// 连滑记账仍在 PTTestOnEnded 调用 PTChainStartOrContinue 完成（与真实翻页路径一致）。
 static void PTTestExecPlan(NSString *name) {
     double now = PTNowC();
-    // 注意：此处不再无条件 PTChainReset()——否则每次按测试按钮都把连滑链清零，测试页永远触发不了连滑。
-    // 连滑累计改由 PTTestOnEnded 命中方案后调用 PTChainStartOrContinue 完成（与真实翻页路径一致）。
-    // v1.0.66-fix：连滑进行中（同方案、链未超时）→ 跳过"执行中吞单"与防抖，允许中断上一段测试手势并续滑/提速。
-    BOOL chaining = gChainEnabled && gChainPlan && [gChainPlan isEqualToString:name] &&
-                    (CFAbsoluteTimeGetCurrent() - gChainLastHitT) <= kChainStaleSec;
-    if (!chaining && (sTestInjecting || now - sLastTestExec < 0.3)) { PTDylibLog(@"[测试] 防抖：忽略 %@", name); return; }
+    if (gExecRunning) {
+        // 在飞：同方案连击入队（不打断），异方案无视（Bug3）
+        if ([gExecPlan isEqualToString:name]) {
+            gExecPending++;
+            PTDylibLog(@"[测试] 同方案连击入队「%@」→ 排队 %d", name, gExecPending);
+            PTChainPillUpdate();
+            return;
+        }
+        PTDylibLog(@"[测试] 在飞忽略「%@」（异方案）", name);
+        return;
+    }
+    if (now - sLastTestExec < 0.3) { PTDylibLog(@"[测试] 防抖：忽略 %@", name); return; }
     sLastTestExec = now;
     NSDictionary *plan = nil;
     for (NSDictionary *p in PTDylibReadCfg()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:name]) { plan = p; break; }
     if (!plan) return;
     NSArray *actions = plan[@"actions"] ?: @[];
     if (!actions.count) { PTDylibLog(@"[测试] %@ 无动作，跳过", name); return; }
-    gExecToken++;   // v1.0.66-fix：递增令牌 → 上一段测试手势(swipe/recSwipe)按 token 失配中止收尾，支持中断+连滑
+    gExecToken++;   // 仅全新启动递增令牌（异常中止兜底；连击续播不再 token++ 砍手势）
+    int token = gExecToken;
     PTDylibLog(@"[测试] 命中「%@」，执行 %lu 条动作", name, (unsigned long)actions.count);
     sTestInjecting = YES;
+    gExecRunning = YES;
+    gExecPlan = name;
+    gExecPending = 0;
     __block int idx = 0;
     __block void (^runNext)(void);
     runNext = ^(void) {
-        if (idx >= (int)actions.count) { sTestInjecting = NO; PTDylibLog(@"[测试] %@ 序列完成", name); return; }
+        if (token != gExecToken) return;   // 令牌失配（异常中止兜底）→ 不再续播
+        if (idx >= (int)actions.count) {
+            if (gExecPending > 0) {
+                gExecPending--;
+                idx = 0;
+                PTDylibLog(@"[测试] 连滑续播「%@」：剩余排队 %d", name, gExecPending);
+                runNext();
+                return;
+            }
+            sTestInjecting = NO;
+            gExecRunning = NO;
+            gExecPlan = nil;
+            PTDylibLog(@"[测试] %@ 序列完成（含续播）", name);
+            return;
+        }
         NSDictionary *a = actions[idx++];
         PTTestRunAction(a, runNext);
     };
@@ -730,7 +765,7 @@ typedef struct {
     int tapDx;
 } PagerFeature;
 
-static void PTExecutePlan(NSString *name);
+static void PTExecutePlan(NSString *name, BOOL chainContinue);
 static NSString *PTMatchPlan(PagerFeature f, uint64_t sender);
 
 typedef struct {
@@ -845,10 +880,20 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
             NSString *plan = PTMatchPlan(f, gCurSender);
             if (plan) {
                 gSessTrail = nil;
+                // v1.0.66-fix4：在飞动作期间，异方案按键直接无视（Bug3：正常应让本动作完成，不执行其他动作）。
+                // 必须在链记账之前判定，否则 PTChainStartOrContinue 会把 gChainPlan 改成新方案、污染连滑链。
+                // 同方案按键则放行到 PTExecutePlan 入队续播（不打断在飞动作）。
+                if (gExecRunning && gExecPlan && ![gExecPlan isEqualToString:plan]) {
+                    PTDylibLog(@"[会话] 在飞忽略「%@」（异方案，本动作「%@」进行中按需求无视）", plan, gExecPlan);
+                    return YES;   // 吞掉该翻页器事件，什么都不做
+                }
+                CFAbsoluteTime nowHit = CFAbsoluteTimeGetCurrent();
+                BOOL chainContinue = gChainEnabled && gChainPlan && [gChainPlan isEqualToString:plan] &&
+                                     (nowHit - gChainLastHitT) <= kChainStaleSec;
                 PTChainStartOrContinue(plan);   // v1.0.66(#6)：连滑记账（同方案提速/异方案刹停重开）
-                PTDylibLog(@"[会话] 命中「%@」→ 执行映射（原始滑动已整段吞掉）链:%@ 计数%d 倍率%.2f",
-                    plan, gChainBurst ? @"BURST" : @"-", gChainCount, gChainRate);
-                PTExecutePlan(plan);
+                PTDylibLog(@"[会话] 命中「%@」→ 执行映射（原始滑动已整段吞掉）链:%@ 计数%d 倍率%.2f 续滑=%d",
+                    plan, gChainBurst ? @"BURST" : @"-", gChainCount, gChainRate, chainContinue);
+                PTExecutePlan(plan, chainContinue);
                 return YES;
             }
             PTChainReset();   // v1.0.66(#6)：未命中 → 刹停连滑
@@ -998,11 +1043,7 @@ static void PTDebugUpdate(void *touchPtr, CGPoint p, UITouchPhase phase, BOOL pa
 // ============================================================
 // 动作执行（PTFakeMetaTouch ＋ 延迟；v1.0.5 音量动作已删除）
 // ============================================================
-static BOOL gIsInjecting = NO;
-static BOOL gExecRunning = NO;
-static BOOL gInFakeTouch = NO;
-static int gExecToken = 0;
-static double gLastExec = 0;
+// v1.0.66-fix4：gIsInjecting/gExecRunning/gInFakeTouch/gExecToken/gLastExec 已上移至顶部全局区（供测试页共用）
 
 // v1.0.8：手动滑动录制（滑动(手动)动作）——v1.0.20 起录制改为覆盖层 UIPanGestureRecognizer 抓取
 // （见 PTDylibUI.m 的 PTRecOnPan），不再用 sendEvent 钩子全局采集（旧版穿透到 App 抓真实触摸）。
@@ -1090,6 +1131,7 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
         gInFakeTouch = YES;
         [PTFakeMetaTouch fakeTouchId:pid AtPoint:lastP withTouchPhase:UITouchPhaseEnded];
         gInFakeTouch = NO;
+        if (done) done();   // v1.0.66-fix3：旧代码此路径不回调 done，动作序列链悬挂
     };
     doEnd = ^{
         if (ended) { if (done) done(); return; }
@@ -1203,6 +1245,7 @@ static void PTFakeRecSwipeAsync(NSArray *pts, int token, double rate, void (^don
 
     __block NSInteger pid = -1;
     __block BOOL ended = NO;
+    __block CGPoint lastCur = CGPointZero;   // v1.0.66-fix3：最后注入坐标，中断时在此抬手
     __block CFAbsoluteTime startT = CFAbsoluteTimeGetCurrent();
     __block CFAbsoluteTime lastTick = startT;
     __block double playMs = 0;   // v1.0.66(#6)：已播放毫秒（受 rate 与单帧封顶约束，单调推进）
@@ -1210,7 +1253,17 @@ static void PTFakeRecSwipeAsync(NSArray *pts, int token, double rate, void (^don
     CADisplayLink *link = [CADisplayLink displayLinkWithTarget:proxy selector:@selector(onTick:)];
     [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     proxy.tick = ^{
-        if (token != gExecToken) { [link invalidate]; if (done) done(); return; }
+        // v1.0.66-fix3：被新手势砍断（token 失配）→ 先在最后位置发 Ended 抬手，再 invalidate。
+        // 旧代码只 invalidate 不发 Ended → 假手指粘半空、调试圆点永不消散、App 端叠成双指混乱。
+        if (token != gExecToken) {
+            if (pid >= 0 && !ended) {
+                ended = YES;
+                gInFakeTouch = YES;
+                [PTFakeMetaTouch fakeTouchId:pid AtPoint:lastCur withTouchPhase:UITouchPhaseEnded];
+                gInFakeTouch = NO;
+            }
+            [link invalidate]; if (done) done(); return;
+        }
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         double realMs = (now - startT) * 1000.0;
         double frameMs = (now - lastTick) * 1000.0;   // 距上次 tick 的真实间隔
@@ -1224,6 +1277,7 @@ static void PTFakeRecSwipeAsync(NSArray *pts, int token, double rate, void (^don
         if (target > cap) target = cap;
         playMs = target;
         CGPoint cur = PTRecSwipeInterp(xs, ys, ts, t0 + playMs);   // 按推进量插值还原
+        lastCur = cur;   // v1.0.66-fix3：记录最后坐标供中断抬手
         gInFakeTouch = YES;
         if (pid < 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:cur withTouchPhase:UITouchPhaseBegan];
         else         [PTFakeMetaTouch fakeTouchId:pid AtPoint:cur withTouchPhase:UITouchPhaseMoved];
@@ -1301,9 +1355,8 @@ static void PTChainPillUpdate(void) {
         [gChainPill addSubview:lb];
         [kw addSubview:gChainPill];
     }
-    gChainPill.backgroundColor = gChainBurst
-        ? [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.92]
-        : [UIColor colorWithRed:0.3 green:0.3 blue:0.3 alpha:0.85];
+    // v1.0.66-fix3：pill 统一绿色（用户要求：蓄力态与提速态不再分灰/绿两色）
+    gChainPill.backgroundColor = [UIColor colorWithRed:0.1 green:0.7 blue:0.2 alpha:0.92];
     UILabel *lb = [gChainPill viewWithTag:101];
     lb.text = gChainBurst
         ? [NSString stringWithFormat:@"⚡连滑 ×%.1f", gChainRate]
@@ -1344,32 +1397,61 @@ static void PTChainReset(void) {
     PTChainPillUpdate();
 }
 
-// 执行方案动作序列（防抖：序列执行中或距上次执行 < 防抖间隔都忽略）
-static void PTExecutePlan(NSString *name) {
+// 执行方案动作序列。
+// v1.0.66-fix4：排队续播语义——
+//   · 在飞动作期间又按同方案键 → 入队（gExecPending++），绝不打断在飞动作，播完一轮再续播下一轮；
+//   · 在飞动作期间按异方案键 → 上游 PTHandlePagerEvent 已直接无视，不会到这里；
+//   · 非在飞 → 正常启动（仍受防抖约束）。
+// 令牌 gExecToken 只在"全新启动"时递增，不再用于连击打断——连击靠队列串联，在飞手势不被砍。
+static void PTExecutePlan(NSString *name, BOOL chainContinue) {
     double now = PTNowC();
-    // v1.0.66-fix：连滑进行中（同方案、链未超时）→ 跳过“执行中吞单”与防抖，
-    // 让每次按键都能中断上一段在飞快势并立即续滑/提速。gExecToken++ 会令旧手势
-    // token 失配 → PTFakeSwipeAsync/PTFakeRecSwipeAsync 的 abortEnd() 把旧触摸 Ended，不粘手。
-    BOOL chaining = gChainEnabled && gChainPlan && [gChainPlan isEqualToString:name] &&
-                    (CFAbsoluteTimeGetCurrent() - gChainLastHitT) <= kChainStaleSec;
-    if (!chaining && (gExecRunning || (now - gLastExec < gDebounceMs / 1000.0))) {
-        PTDylibLog(@"[执行] 防抖：忽略 %@（执行中=%d，%.0fms 内已执行）", name, gExecRunning, gDebounceMs);
+    if (gExecRunning) {
+        // 在飞：本应只剩同方案连击（异方案已在 PTHandlePagerEvent 无视）。入队续播，不打断。
+        if ([gExecPlan isEqualToString:name]) {
+            gExecPending++;
+            PTDylibLog(@"[执行] 同方案连击入队「%@」→ 排队 %d（在飞动作播完后续播，不打断不覆盖）", name, gExecPending);
+            PTChainPillUpdate();
+            return;
+        }
+        // 防御兜底：异常态下在飞遇到非同方案，保险吞掉
+        PTDylibLog(@"[执行] 在飞非同方案「%@」被吞（异常兜底）", name);
+        return;
+    }
+    // 非在飞：普通防抖仍生效（避免单键抖动重复触发）
+    if (now - gLastExec < gDebounceMs / 1000.0) {
+        PTDylibLog(@"[执行] 防抖：忽略 %@（%.0fms 内已执行）", name, gDebounceMs);
         return;
     }
     gLastExec = now;
     NSDictionary *p = gPlans[name];
     NSArray *actions = p[@"actions"] ?: @[];
     if (!actions.count) { PTDylibLog(@"[执行] %@ 无动作，跳过", name); return; }
-    gExecToken++;
+    gExecToken++;   // 仅全新启动递增令牌（异常中止兜底用）
     int token = gExecToken;
     gIsInjecting = YES;
     gExecRunning = YES;
+    gExecPlan = name;       // v1.0.66-fix4：记录在飞方案，供续播/异方案判定
+    gExecPending = 0;
     PTDylibLog(@"[执行] 命中 %@，开始动作序列（%lu 条）", name, (unsigned long)actions.count);
     __block int idx = 0;
     __block void (^runNext)(void);
     runNext = ^(void) {
-        if (token != gExecToken) return;
-        if (idx >= (int)actions.count) { gIsInjecting = NO; gExecRunning = NO; PTDylibLog(@"[执行] %@ 序列完成", name); return; }
+        if (token != gExecToken) return;   // 令牌失配（异常中止兜底）→ 不再续播
+        if (idx >= (int)actions.count) {
+            // 本轮序列播完：有排队则续播，否则收尾
+            if (gExecPending > 0) {
+                gExecPending--;
+                idx = 0;
+                PTDylibLog(@"[执行] 连滑续播「%@」：剩余排队 %d", name, gExecPending);
+                runNext();
+                return;
+            }
+            gIsInjecting = NO;
+            gExecRunning = NO;
+            gExecPlan = nil;
+            PTDylibLog(@"[执行] %@ 序列完成（含续播）", name);
+            return;
+        }
         NSDictionary *a = actions[idx++];
         PTRunAction(a, token, runNext);
     };
@@ -1552,12 +1634,9 @@ void PTDylibSendEvent(id self, SEL _cmd, UIEvent *event) {
     if (event && (PTNowC() < gPagerWindowUntil || gSession.active)) {
         if (PTHandlePagerEvent(event)) return;
     }
-    // v1.0.66-fix2：连滑刹停改用「同方案连续命中间隔」(kChainStaleSec=1.2s) 判停，
-    // 不再绑死 0.4s 翻页器窗口——否则每次按键后窗口过期就 PTChainReset() 把整条链清零，
-    // 按键间隔稍大于 0.4s（单次滑动回放本身就 ~400ms+）就永远到不了 5 次，连滑根本触发不了。
-    // 间隔超时本就在 PTChainStartOrContinue 内部处理；此处只在「无在飞会话」时被动收尾，
-    // 让停止翻页后提速倍率与进度条自然归零，避免残留卡高位（表现为"划了没反应"）。
-    if (!gSession.active && gChainPlan && (CFAbsoluteTimeGetCurrent() - gChainLastHitT) > kChainStaleSec) PTChainReset();
+    // v1.0.66-fix4：在飞（含续播队列）期间不被动刹停连滑，否则续播中途倍率归零、pill 闪烁。
+    // 仅当既无在飞会话、又无在飞动作、且距上次命中 > 1.2s 时才收尾。
+    if (!gSession.active && !gExecRunning && gChainPlan && (CFAbsoluteTimeGetCurrent() - gChainLastHitT) > kChainStaleSec) PTChainReset();
     // 诊断：非注入触摸会话 Began 打一行 sender
     if (event) {
         for (UITouch *t in event.allTouches) {
