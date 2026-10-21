@@ -296,6 +296,8 @@ static void PTFakeRecSwipeAsync(NSArray *pts, int token, double rate, void (^don
 static void PTChainReset(void);
 static void PTChainPill(NSString *msg);
 static void PTChainStopAll(void);
+static void PTExecutePlan(NSString *name);
+static void PTExecutePlanRun(NSString *name);
 static NSMutableDictionary *gPlans = nil;      // name -> dict
 static BOOL gLearnActive = NO;
 static uint64_t gLearnedSenders[kMaxLearnedSenders];
@@ -748,8 +750,6 @@ typedef struct {
     int tapDx;
 } PagerFeature;
 
-static void PTExecutePlan(NSString *name);
-static void PTExecutePlanRun(NSString *name);
 static NSString *PTMatchPlan(PagerFeature f, uint64_t sender);
 
 typedef struct {
