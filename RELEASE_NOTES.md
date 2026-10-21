@@ -1,3 +1,56 @@
+# PageTurner v1.0.69
+
+> 版本号机制打磨（1.0.68 → 1.0.69）。在「版本单一真源」基础上修正三处细节；纯工程卫生、零功能改动、用户无感知。
+
+## ♻️ 改动
+
+| 文件 | 改动 |
+|------|------|
+| `scripts/sync_version.sh` | 版本号同步改为**按 `Info.plist` 的 `<key>` 锚定**，只改 `CFBundleShortVersionString` / `CFBundleVersion` 两处；避免将来新增任何 `X.Y.Z` 形式的 `<string>` 被误改；三处已一致则早退跳过写入 |
+| `Makefile` | 新增 `after-package::`：打包完成后 `git checkout -- control Preferences/Resources/Info.plist` 还原工作树，避免本地 `make package` 后 `git status` 出现脏文件、误提交 |
+| `control` / `Preferences/Resources/Info.plist` | 版本号 **1.0.68 → 1.0.69** |
+
+## 📦 下载与安装
+
+| 形态 | 文件 | 用法 |
+|------|------|------|
+| 越狱（Dopamine / roothide） | `PageTurner-1.0.69-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
+| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.69.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |
+
+---
+
+# PageTurner v1.0.68
+
+> 版本号单一真源 + CI 构建前一致性校验（1.0.67 → 1.0.68）。根治「control / Makefile / Info.plist 三处手填」漂移；纯工程卫生、零功能改动、用户无感知。
+
+## ✨ 新功能（无） / ♻️ 改动
+
+### 版本号单一真源
+- 发版只改 `Makefile` 的 `PACKAGE_VERSION` 一处；打包前 `before-package::` 钩子自动把另两处（`control` / `Info.plist`）同步成同一版本，彻底避免手滑导致三处不一致。
+- 新增 `scripts/sync_version.sh`（派生）与 `scripts/check_version.sh`（校验）。
+
+### CI 构建前版本一致性校验
+- `.github/workflows/build.yml` 在 Checkout 后、构建前新增一步「Verify version consistency」；三处版本号不一致则构建直接失败，把「版本漂移」挡在打包之前。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+|------|------|
+| `Makefile` | 新增 `PACKAGE_VERSION` 单一真源 + `before-package::` 自动同步钩子；版本号 **1.0.67 → 1.0.68** |
+| `control` / `Preferences/Resources/Info.plist` | 版本号 **1.0.67 → 1.0.68**（由 `PACKAGE_VERSION` 派生，提交态即一致） |
+| `.github/workflows/build.yml` | 新增构建前「Verify version consistency」步骤 |
+| `scripts/sync_version.sh`（新增） | 从 `PACKAGE_VERSION` 派生 `control` / `Info.plist` 版本号 |
+| `scripts/check_version.sh`（新增） | 校验三处版本号一致，否则 `exit 1` |
+
+## 📦 下载与安装
+
+| 形态 | 文件 | 用法 |
+|------|------|------|
+| 越狱（Dopamine / roothide） | `PageTurner-1.0.68-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
+| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.68.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |
+
+---
+
 # PageTurner v1.0.67
 
 > 连滑 pill 视觉重做 + 版本号正式升级（1.0.66 → 1.0.67）。绿底白字且深色模式自适应、蓄力期实时倒数、升档改 ⚡ 雷电样式；**提速模型仍保持 DVT 1:1 的 1/2/3 离散档，只换皮不改手感**。
