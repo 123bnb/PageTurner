@@ -171,13 +171,24 @@ PageTurner/
 | [v1.0.50](https://github.com/123bnb/PageTurner/releases/tag/v1.0.50) | 可视化窗口不再接管状态栏（windowLevel 降 Normal+1） |
 | [v1.0.53](https://github.com/123bnb/PageTurner/releases/tag/v1.0.53) | 手动动作回归：仅留滑动(手动)，改为设置页直接填参数 |
 | [v1.0.57](https://github.com/123bnb/PageTurner/releases/tag/v1.0.57) | 统一代码：单仓库双 target，一次构建同时产出越狱 .deb 与巨魔 .dylib；删除失效的注入探针 |
+| [v1.0.66](https://github.com/123bnb/PageTurner/releases/tag/v1.0.66) | 连滑 1:1 复刻 DVT 1.0.22：满 5 次进连滑、自动续滑、1→2→3 档变速、异方案刹停；v1.0.67 起 pill 绿底白字（深色模式自适应）|
 
-## 版本历史（全部 58 个版本）
+## 版本历史（全部 68 个版本）
 
 > 每个版本点版本号可看该版完整的「新增 / 修复 / 删除 / 改动」说明。
 
 | 版本 | 这一版做了什么 |
 | --- | --- |
+| [v1.0.67](https://github.com/123bnb/PageTurner/releases/tag/v1.0.67) | 连滑 pill 绿底白字（深色模式自适应）+ 蓄力实时倒数「连滑 N/5」+ 升档⚡样式「⚡连滑 ×N」；提速模型仍 DVT 1/2/3 档只换皮 |
+| [v1.0.66](https://github.com/123bnb/PageTurner/releases/tag/v1.0.66) | 连滑 1:1 复刻 DVT 1.0.22（变速+刹停+自动续滑）+ 一批体验修复（App 置顶/串色/延迟上限/坐标对齐/拖拽排序/重名 pid） |
+| [v1.0.65](https://github.com/123bnb/PageTurner/releases/tag/v1.0.65) | 巨魔 dylib 同样彻底不落盘日志 + 修复未勾选/关调试日志的 App 仍被建 jbroot 注入日志 |
+| [v1.0.64](https://github.com/123bnb/PageTurner/releases/tag/v1.0.64) | 修正绿点拖动坐标范围（可半出屏/不为负）+ 滑动选中 1/2 高亮提醒 |
+| [v1.0.63](https://github.com/123bnb/PageTurner/releases/tag/v1.0.63) | 修复新增映射三处体验——坐标居中标题栏/滑动全屏可做起点/任意处拖动圆点 |
+| [v1.0.62](https://github.com/123bnb/PageTurner/releases/tag/v1.0.62) | 统一四个新增映射页到 common/PTOverlayPage，修复 dylib 取消退回首页 |
+| [v1.0.61](https://github.com/123bnb/PageTurner/releases/tag/v1.0.61) | 修复 deb 测试区滑动(手动)像点击——补插值 + 60fps 帧驱动 |
+| [v1.0.60](https://github.com/123bnb/PageTurner/releases/tag/v1.0.60) | 修复日志重叠/手动滑动无轨迹/版本号样式，删除 dylib 配置来源 |
+| [v1.0.59](https://github.com/123bnb/PageTurner/releases/tag/v1.0.59) | 日志统一到共享 jbroot、调试日志改版，删除注入标记与诊断代码 |
+| [v1.0.58](https://github.com/123bnb/PageTurner/releases/tag/v1.0.58) | 日志通路诊断版：只诊断 App 与设置页如何共通日志 |
 | [v1.0.57](https://github.com/123bnb/PageTurner/releases/tag/v1.0.57) | 统一代码：单仓库双 target，一次构建同时产出越狱 .deb 与巨魔 .dylib；删除失效的注入探针 |
 | [v1.0.56](https://github.com/123bnb/PageTurner/releases/tag/v1.0.56) | 废代码清理 + 滑动(手动)合并为 1.0.55 的 DVT 式录制 |
 | [v1.0.55](https://github.com/123bnb/PageTurner/releases/tag/v1.0.55) | 滑动(手动)改 DVT 式（灰底无穿透）+ 统一轨迹基准 + 调试日志开关关即清空 |

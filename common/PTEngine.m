@@ -695,15 +695,18 @@ static void PTTestExecPlan(NSString *name) {
         }
         if (gSwipeBurstActive) {
             gSwipeBurstRate = (gSwipeBurstRate >= 3) ? 1 : gSwipeBurstRate + 1;
-            if      (gSwipeBurstRate == 1) PTChainPill(@"连滑一倍速");
-            else if (gSwipeBurstRate == 2) PTChainPill(@"连滑二倍速");
-            else                            PTChainPill(@"连滑三倍速");
+            // v1.0.67：与运行端一致——⚡雷电样式「⚡连滑 ×1/×2/×3」（选项 i：仍走 DVT 1/2/3 档）
+            PTChainPill([NSString stringWithFormat:@"⚡连滑 ×%ld", (long)gSwipeBurstRate]);
             return;
         }
         if (!gChainEnabled) return;
         gSwipeBurstCount++;
-        if (gSwipeBurstCount == kSwipeBurstThreshold - 1) PTChainPill(@"再按一次进入连滑");
-        else if (gSwipeBurstCount >= kSwipeBurstThreshold) { gSwipeBurstActive = YES; gSwipeBurstRate = 1; PTChainPill(@"已进入连滑"); }
+        if (gSwipeBurstCount < kSwipeBurstThreshold) {
+            // v1.0.67：蓄力期实时倒数「连滑 1/5 … 4/5」（选项 A，门槛保持 5）
+            PTChainPill([NSString stringWithFormat:@"连滑 %ld/%d", (long)gSwipeBurstCount, kSwipeBurstThreshold]);
+        } else {
+            gSwipeBurstActive = YES; gSwipeBurstRate = 1; PTChainPill(@"已进入连滑");
+        }
         return;
     }
     gSwipeBurstCount = gChainEnabled ? 1 : 0;
@@ -713,6 +716,8 @@ static void PTTestExecPlan(NSString *name) {
     double now = PTNowC();
     if (now - sLastTestExec < 0.3) { PTDylibLog(@"[测试] 防抖：忽略 %@", name); return; }
     sLastTestExec = now;
+    // v1.0.67：蓄力倒数从第 1 次命中即开始显示（连滑 1/5）；防抖忽略的不出 pill
+    if (gChainEnabled) PTChainPill([NSString stringWithFormat:@"连滑 1/%d", kSwipeBurstThreshold]);
     PTExecutePlan(name);   // 测试页走与运行端完全相同的回放路径，验证即所见
 }
 
@@ -881,16 +886,17 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
                     if (gSwipeBurstActive) {
                         // 连滑中按同方案 = 升档 1→2→3→1 循环，对下一段滑生效（DVT v1.0.22）
                         gSwipeBurstRate = (gSwipeBurstRate >= 3) ? 1 : gSwipeBurstRate + 1;
-                        if      (gSwipeBurstRate == 1) PTChainPill(@"连滑一倍速");
-                        else if (gSwipeBurstRate == 2) PTChainPill(@"连滑二倍速");
-                        else                            PTChainPill(@"连滑三倍速");
+                        // v1.0.67：⚡雷电样式「⚡连滑 ×1/×2/×3」（选项 i：提速模型仍走 DVT 1/2/3 离散档，只换皮）
+                        PTChainPill([NSString stringWithFormat:@"⚡连滑 ×%ld", (long)gSwipeBurstRate]);
                         return YES;
                     }
                     if (!gChainEnabled) return YES;   // 总开关关闭：窗口期按压静默忽略
                     // 普通窗口期：同方案累计，达阈值即进入连滑
                     gSwipeBurstCount++;
-                    if (gSwipeBurstCount == kSwipeBurstThreshold - 1) PTChainPill(@"再按一次进入连滑");
-                    else if (gSwipeBurstCount >= kSwipeBurstThreshold) {
+                    if (gSwipeBurstCount < kSwipeBurstThreshold) {
+                        // v1.0.67：蓄力期实时倒数「连滑 1/5 … 4/5」（选项 A，门槛保持 5）
+                        PTChainPill([NSString stringWithFormat:@"连滑 %ld/%d", (long)gSwipeBurstCount, kSwipeBurstThreshold]);
+                    } else {
                         gSwipeBurstActive = YES;
                         gSwipeBurstRate   = 1;
                         PTChainPill(@"已进入连滑");
@@ -902,6 +908,8 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
                 gSwipeBurstPlan      = plan;
                 gSwipeBurstRate      = 1;
                 gSwipeStopRequested  = NO;
+                // v1.0.67：蓄力倒数从第 1 次命中即开始显示（连滑 1/5）
+                if (gChainEnabled) PTChainPill([NSString stringWithFormat:@"连滑 1/%d", kSwipeBurstThreshold]);
                 PTDylibLog(@"[会话] 命中「%@」→ 起映射（原始滑动已整段吞掉）", plan);
                 PTExecutePlan(plan);
                 return YES;
@@ -1348,7 +1356,17 @@ static void PTRunAction(NSDictionary *a, int token, void (^next)(void)) {
 // v1.0.67：连滑（1:1 移植自 DVT 1.0.22）——顶部 pill + 刹停/清理 + 生命周期
 // ============================================================
 // 顶部小胶囊提示（DVT v1.0.17：文案参数化，2 秒自动消失）
+// v1.0.67：绿底白字。底色用动态Provider——深色模式下自动换更深的绿，
+//   白字在两种模式下都清晰可读（杜绝"背景字体糊成一片"；alpha 保证pill感又不挡内容）。
 static UILabel *gChainHint = nil;
+static UIColor *PTChainPillBG(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traits) {
+        if (traits.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            return [UIColor colorWithRed:0.10 green:0.50 blue:0.23 alpha:0.95];   // 深色模式：深绿，白字对比度高
+        }
+        return [UIColor colorWithRed:0.18 green:0.73 blue:0.31 alpha:0.90];       // 浅色模式：鲜绿
+    }];
+}
 static void PTChainPill(NSString *msg) {
     if (![NSThread isMainThread]) { dispatch_async(dispatch_get_main_queue(), ^{ PTChainPill(msg); }); return; }
     UIWindow *w = [UIApplication sharedApplication].keyWindow;
@@ -1357,10 +1375,10 @@ static void PTChainPill(NSString *msg) {
     CGFloat topInset = (w.safeAreaInsets.top > 0) ? w.safeAreaInsets.top : 20;
     UILabel *h = [[UILabel alloc] initWithFrame:CGRectMake(w.bounds.size.width/2 - 120, topInset + 44, 240, 30)];
     h.text = msg.length ? msg : @"请等待滑动完成";
-    h.textColor = [UIColor whiteColor];
+    h.textColor = [UIColor whiteColor];   // v1.0.67：绿底白字（底色随深色模式自适应，见 PTChainPillBG）
     h.textAlignment = NSTextAlignmentCenter;
-    h.font = [UIFont systemFontOfSize:13];
-    h.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.65];
+    h.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];   // v1.0.67：半粗体，绿底上更清晰
+    h.backgroundColor = PTChainPillBG();
     h.layer.cornerRadius = 15;
     h.layer.masksToBounds = YES;
     [w addSubview:h];
