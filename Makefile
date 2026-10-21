@@ -25,7 +25,7 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.67
+PACKAGE_VERSION := 1.0.68
 
 DEBUG = 0
 ARCHS = arm64 arm64e
@@ -58,3 +58,8 @@ before-package::
 	printf '{ Filter = { Bundles = ( "com.apple.UIKit"); }; }\n' > "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/PageTurner.plist"
 	mkdir -p "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences"
 	cp -f "layout/Library/PreferenceLoader/Preferences/PageTurner.plist" "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences/"
+
+# ---------- 版本号单一真源：从 PACKAGE_VERSION 自动派生 control / Info.plist ----------
+# 根治「三处手填」漂移：发版只改上面一行的 PACKAGE_VERSION，打包前自动同步其余两处。
+before-package::
+	bash ./scripts/sync_version.sh

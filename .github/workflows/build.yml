@@ -25,6 +25,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify version consistency (control / Info.plist / Makefile)
+        run: bash scripts/check_version.sh
+
       - name: Clone Theos (roothide fork)
         run: git clone --recursive --depth=1 https://github.com/roothide/theos.git "$THEOS"
 
