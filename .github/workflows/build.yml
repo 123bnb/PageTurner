@@ -98,9 +98,21 @@ jobs:
           DYLIB_RAW="${{ env.DYLIB_OUT }}"
           DYLIB="PageTurnerDylib_${TAG}.dylib"
           cp "$DYLIB_RAW" "$DYLIB"
-          # 发布说明来自仓库内 RELEASE_NOTES.md（详细写明本版做了什么）
+          # 发布说明只取本版章节：RELEASE_NOTES.md 是累积式 changelog（含旧版本记录），
+          # 只切到当前版本对应的「# PageTurner v<VERSION>」段，避免 Release 页面出现历史版本记录。
+          awk -v ver="v${VERSION}" '
+            /^# PageTurner v/ {
+              if (capture && found) exit;                 # 已输出本版段、遇到下一个版本头 → 结束
+              if ($0 ~ "# PageTurner " ver "$") { capture=1; found=1; print; next }
+              else { capture=0; next }                   # 其他版本头：跳过
+            }
+            capture { print }                             # 本版段正文（含各级子标题/表格）透传
+          ' RELEASE_NOTES.md > "notes-${VERSION}.md"
+          NOTES="notes-${VERSION}.md"
+          # 兜底：切出为空则用整篇（不应发生）
+          [ -s "$NOTES" ] || cp RELEASE_NOTES.md "$NOTES"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DEB" "$DYLIB" --clobber
           else
-            gh release create "$TAG" "$DEB" "$DYLIB" --title "PageTurner v${VERSION}" --notes-file RELEASE_NOTES.md
+            gh release create "$TAG" "$DEB" "$DYLIB" --title "PageTurner v${VERSION}" --notes-file "$NOTES"
           fi
