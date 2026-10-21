@@ -25,20 +25,22 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.69
+PACKAGE_VERSION := 1.0.70
 
 DEBUG = 0
 ARCHS = arm64 arm64e
+
+# v1.0.70：共享源文件列表 + 共享编译 flags 的单一真源（Makefile 与 CI 的 dylib 构建共用）
+include build/sources.mk
 
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = PageTurner
 
-PageTurner_FILES = Tweak.m \
-	common/PTEngine.m \
-	ptftouch/PTFakeMetaTouch.m ptftouch/UITouch-KIFAdditions.m \
-	ptftouch/UIEvent+KIFAdditions.m ptftouch/IOHIDEvent+KIF.m
-PageTurner_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function -Wno-arc-performSelector-leaks -Wno-arc-retain-cycles -Icommon -Iptftouch -include ptftouch/Compat.h
+# v1.0.70：共享部分来自 build/sources.mk；私有部分只有 Tweak.m
+# （Tweak.m 内含 MSHookMessageEx，dylib 侧无 substrate，绝不可进共享列表）
+PageTurner_FILES = Tweak.m $(SHARED_SOURCES)
+PageTurner_CFLAGS = $(SHARED_CFLAGS)
 PageTurner_FRAMEWORKS = Foundation UIKit IOKit
 PageTurner_LIBRARIES = substrate
 # 照抄 volumekeytapper：-Wl,-undefined,dynamic_lookup 允许 IOHIDEvent*/MSHookMessageEx

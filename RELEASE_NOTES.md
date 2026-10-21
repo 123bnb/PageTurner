@@ -1,3 +1,48 @@
+# PageTurner v1.0.70
+
+> 双形态治理（构建配置单一真源 + 两道 CI 安全网 + 删掉恒 NO 的死开关）。1.0.69 → 1.0.70，**零功能改动、零引擎行为改动**，用户无感知。
+
+## ♻️ 改动
+
+### 1. 共享源文件 + 共享编译 flags 抽成单一真源
+- 新增 `build/sources.mk`：`SHARED_SOURCES`（共享源文件）与 `SHARED_CFLAGS`（共享 flags）的唯一出处。
+- `Makefile`（deb / Theos）改为 `include build/sources.mk` 后派生 `PageTurner_FILES` / `PageTurner_CFLAGS`；
+  `.github/workflows/build.yml`（dylib / 裸 clang）改为用 `make -s -f build/sources.mk PRINT_CONFIG=1 print-sources|print-cflags` 读取。
+- **根治的隐患**：此前共享列表在两处手填，且**已经不一致**——deb 少了 `common/PTOverlayPage.m`，dylib 少了 `-Wno-arc-retain-cycles`，
+  两边 `-I` 也不一致。将来新增一个 `.m` 只改一处的话，另一个 target 会**静默少编译该文件**（最坏情况不是链接报错，而是丢功能）。
+
+### 2. CI 新增两道 dylib 安全网
+- **未定义符号审计**：dylib 用 `-Wl,-undefined,dynamic_lookup` 构建，链接期**不报**「找不到符号」，只有首次调用才崩。
+  新增步骤用 `nm -u` 审计，**一旦出现 substrate 类符号（`_MSHook*` 等）即 CI 失败**——TrollStore 环境没有 substrate 可提供这些符号。
+  （本次审计结果：**0 个** substrate 符号。共享引擎 `PTEngine.m` 本就没有 substrate 引用，`MSHookMessageEx` 只存在于 deb 私有的 `Tweak.m`。）
+- **arm64e 不再静默降级**：此前 `arm64+arm64e` 编译失败会静默退回仅 arm64，而 iOS 15/16 上大量 App 是 arm64e，
+  注入会失败却 CI 仍是绿的。新增步骤用 `lipo -info` 校验，**缺 arm64e 即 CI 失败**。
+
+### 3. 删除恒为 NO 的死开关 `PTDylibUsingDebConfig()`
+- 该函数恒 `return NO`，唯一调用点在 dylib 初始化的一行日志字符串里。它留成可翻转的布尔就是地雷：
+  哪天被改成 YES，dylib 会去读写 jbroot 全局配置——既写不进第三方沙盒（v1.0.58 已实证），又会污染 deb 用户的配置。
+- 处理：删除该函数及其 `extern` 声明，日志直接输出「独立配置」字面量。**行为完全一致**（原本恒输出该值）。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+|------|------|
+| `build/sources.mk`（新增） | 共享源文件列表 + 共享 CFLAGS 的单一真源 |
+| `Makefile` | include 单一真源；`PageTurner_FILES` / `PageTurner_CFLAGS` 改为从中派生；版本号 1.0.69 → 1.0.70 |
+| `.github/workflows/build.yml` | dylib 构建改从单一真源读取；新增「未定义符号审计」「arm64e 存在性校验」两步 |
+| `common/PTEngine.h` / `common/PTEngine.m` | 删除死开关 `PTDylibUsingDebConfig()` 的声明与定义 |
+| `targets/dylib/PTDylibMain.m` | 日志去掉死开关调用，改为「独立配置」字面量（输出不变） |
+| `control` / `Preferences/Resources/Info.plist` | 版本号 1.0.69 → 1.0.70 |
+
+## 📦 下载与安装
+
+| 形态 | 文件 | 用法 |
+|------|------|------|
+| 越狱（Dopamine / roothide） | `PageTurner-1.0.70-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
+| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.70.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |
+
+---
+
 # PageTurner v1.0.69
 
 > 版本号机制打磨（1.0.68 → 1.0.69）。在「版本单一真源」基础上修正三处细节；纯工程卫生、零功能改动、用户无感知。

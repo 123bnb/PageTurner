@@ -21,7 +21,6 @@
 // ---------- 配置（路径由 target 注入） ----------
 extern NSString *PTDylibCfgPath(void);
 extern NSString *PTJbrootRoot(void);       // v1.0.59：共享 jbroot 根路径（roothide），nil=未探测到
-extern BOOL PTDylibUsingDebConfig(void);   // YES=复用 deb 版配置；NO=独立配置
 extern NSMutableDictionary *PTDylibReadCfg(void);
 extern void PTDylibWriteCfg(NSDictionary *cfg);
 extern void PTSetCfgPath(NSString *p);       // v1.0.57：配置路径由 target 注入（roothide=/var/mobile，dylib=沙盒容器）
