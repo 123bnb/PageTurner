@@ -25,7 +25,7 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.68
+PACKAGE_VERSION := 1.0.69
 
 DEBUG = 0
 ARCHS = arm64 arm64e
@@ -63,3 +63,13 @@ before-package::
 # 根治「三处手填」漂移：发版只改上面一行的 PACKAGE_VERSION，打包前自动同步其余两处。
 before-package::
 	bash ./scripts/sync_version.sh
+
+# ---------- 还原工作树：打包产生的 control/Info.plist 改写不应留在 git 里 ----------
+# sync_version.sh 在 before-package 阶段会把仓库根 control / Info.plist 同步成
+# PACKAGE_VERSION（仅 deb 打包需要）。打包完成后这里把它们还原成提交态，避免本地
+# `make package` 后 git status 出现脏文件、误提交。CI 中 check_version.sh 已保证
+# 提交态三处一致，此处还原不影响产物（deb 已在打包阶段生成完毕）。
+after-package::
+	@if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+	  git checkout -- control Preferences/Resources/Info.plist 2>/dev/null || true; \
+	fi
