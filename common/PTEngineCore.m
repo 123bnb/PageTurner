@@ -277,6 +277,9 @@ BOOL gDebugDots = NO;   // v1.0.71：改非静态（外壳调试可视化读取�
 // v1.0.72：PTChainOnHit 为连滑命中判定统一入口（测试页/运行端共用，修两处各写一份导致的漂移）；
 //          PTExecutePlan 增加 force 参数（刚进连滑的那一击放行防抖，防"假连滑"）
 void PTChainReset(void);
+// v1.0.73：未命中按键（退出连滑 + 立刻停在飞动作）。定义在本文件后段，但前端
+// PTTestOnEnded（测试端未匹配分支）要先用到——缺此声明会隐式声明报警/报错。
+void PTChainMiss(void);
 static void PTChainPill(NSString *msg);
 static void PTChainStopAll(void);
 static void PTChainOnHit(NSString *plan, BOOL viaTest);
@@ -298,6 +301,7 @@ static NSString *gSwipeBurstPlan   = nil;  // 连滑归属方案（起滑时锁�
 static NSInteger gSwipeBurstRate   = 1;    // 连滑倍速档位 1/2/3（DVT v1.0.22：档位不记忆，进/退/刹停复位 1）
 static double    gSwipeBurstLastAt = 0;    // v1.0.72：最近一次同方案命中时间（蓄力时间窗判定；刹停/生命周期复位清零）
 static BOOL      gSwipeStopRequested = NO; // 刹停请求（异方案命中置位，中断在飞回放）
+static long      gChainBurstRounds = 0;    // v1.0.73：连滑后自动续滑的轮数（记录区聚合显示用；进入连滑时归零）
 // v1.0.67：执行态全局变量（供运行端/测试页/外壳 hook 共用，避免"使用先于定义"；连滑续播/刹停靠这些状态）
 // v1.0.71：改非静态——外壳 PTHandlePagerEvent/PTDylibGestureTick/PTReplayTrailAsync 与
 //          设置页 SImpSendEvent 跨文件读写（同进程内只有一个引擎镜像，见 PTEngineCore.h 注释）。
@@ -388,6 +392,7 @@ BOOL sTestArmed = NO;
 double sLastSampleAt = 0;
 UIView *sTestDot = nil;
 __weak id sTestLogSink = nil;
+static BOOL sTestAggActive = NO;   // v1.0.73：记录区最后一行是否为"聚合行"（连滑续滑进度行）
 uint64_t sCurSender = 0;
 double sWindowUntil = 0;
 BOOL sSessActive = NO;
@@ -641,6 +646,21 @@ static void PTTestTrailFinish(CGPoint pN, double hold) {
     });
 }
 
+// v1.0.73：测试页实时记录区写入。
+//   agg=YES → 原地改写最后一行（连滑续滑进度，同一行数字不断跳动）
+//   agg=NO  → 另起一行（关键事件：进入连滑 / 升档 / 刹停 / 命中 / 未命中）
+// 逐轮 append 会在数秒内刷爆记录区（点击类一轮约 80ms，5 秒就有 60+ 行），
+// 故续滑进度必须聚合到同一行；关键事件才配独占一行。
+static void PTTestLog(BOOL agg, NSString *s) {
+    if (!sTestLogSink) { sTestAggActive = NO; return; }   // 运行端无测试页 → 静默跳过
+    if (agg && sTestAggActive && [sTestLogSink respondsToSelector:@selector(updateLastLog:)]) {
+        [sTestLogSink updateLastLog:s];
+        return;
+    }
+    if ([sTestLogSink respondsToSelector:@selector(appendLog:)]) [sTestLogSink appendLog:s];
+    sTestAggActive = agg;   // agg=NO 表示聚合被关键事件打断，下次续滑要另起一行
+}
+
 // v1.0.71：测试页退出一键复位——armed/绿点/方向线/P 标记/尾巴/实时记录区一并清理，
 // 并作废在飞的尾巴淡出回调（令牌）。替代设置页/dylib 各自 viewDidDisappear 里
 // 直接摸 Core 静态可视化对象的旧写法（那些静态现已归 Core 所有）。
@@ -651,6 +671,7 @@ void PTTestReset(void) {
     if (sTestP) { [sTestP removeFromSuperview]; sTestP = nil; }
     sTestTrail = nil;
     sTestLogSink = nil;
+    sTestAggActive = NO;   // v1.0.73：记录区聚合行状态一并复位
     sTestTrailToken++;   // 作废上一段回放余留的淡出
     // v1.0.72：测试页退场 = 连滑链终结。连滑激活后是"自动无限续滑"，不会因为离开
     // 测试页而停——不清理的话 fake 触摸会继续打进设置界面。时间窗蓄力修复后快动作
@@ -856,6 +877,9 @@ void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender, int tapD
         if ([sTestLogSink respondsToSelector:@selector(drawTrailWithDirection:dist:phase:)]) {
             [sTestLogSink drawTrailWithDirection:dir dist:dist phase:phase];
         }
+        // v1.0.73：未命中 = 退出连滑 + 立刻停在飞动作（与运行端 PTHandlePagerEvent 共用 PTChainMiss，
+        // 旧实现此处什么都不做 → 测试页连滑中按到没录入的键仍继续连滑，与 App 内不一致）
+        PTChainMiss();
     }
 }
 
@@ -1172,6 +1196,23 @@ static void PTChainStopAll(void) {
     if (gExecRunning) gExecToken++;   // 中断在飞回放（PTFakeSwipeAsync/... 令牌失配 → 抬手收尾）
 }
 
+// v1.0.73：按键「未命中」（按的是没录入的按键）——退出连滑 **且** 立刻停掉在飞动作。
+// 语义分两层，缺一不可：
+//   ① 清连滑链（PTChainStopAll）→ 自动续滑不再继续；
+//   ② gExecToken++ → 在飞回放令牌失配，下一次回调即在最后位置抬手收尾并放弃，
+//      当前这一轮动作**立刻停**，而不是播完为止。
+// 连滑中触发时补 pill「已退出连滑」，与异方案刹停（PTChainOnHit）表现一致。
+// 运行端（PTEngine.m PTHandlePagerEvent）与测试端（PTTestOnEnded）共用本函数 → 两端不可能再漂移。
+void PTChainMiss(void) {
+    BOOL wasActive = gSwipeBurstActive;
+    PTChainStopAll();
+    if (!wasActive) return;                     // 非连滑：只停动作，无需提示
+    PTChainPill(@"已退出连滑");
+    if ([sTestLogSink respondsToSelector:@selector(appendLog:)]) {
+        [sTestLogSink appendLog:@"✗ 未命中按键 → 已退出连滑（动作已停）"];
+    }
+}
+
 // 实际执行方案动作序列（无防抖）。v1.0.67：DVT 式连滑——进连滑后收尾处自动调用本函数实现无缝续滑。
 static void PTExecutePlanRun(NSString *name) {
     NSDictionary *p = gPlans[name];
@@ -1197,6 +1238,12 @@ static void PTExecutePlanRun(NSString *name) {
             // v1.0.67：DVT 式自动续滑——连滑中且未刹停 → 立即重开同方案（无缝重复，无需再按键）
             if (gSwipeBurstActive && gChainEnabled && !gSwipeStopRequested) {
                 PTDylibLog(@"[连滑] 自动续滑「%@」（档位 %ld）", name, (long)gSwipeBurstRate);
+                // v1.0.73：自动续滑此前绕过"按键→匹配→记录"整条 UI 链路，达成连滑后记录区完全
+                // 静默——用户无从确认连滑是否真在跑、跑了几轮、当前几档。逐轮 append 会刷屏
+                // （点击类一轮约 80ms），故聚合为同一行原地改写。
+                gChainBurstRounds++;
+                PTTestLog(YES, [NSString stringWithFormat:@"⟳ 续滑中… 第 %ld 轮  档位 ×%ld",
+                    (long)gChainBurstRounds, (long)gSwipeBurstRate]);
                 PTExecutePlanRun(name);
             }
             return;
@@ -1231,7 +1278,11 @@ static BOOL PTChainChargePill(void) {
         if (!gSwipeBurstActive) {
             gSwipeBurstActive = YES;
             gSwipeBurstRate   = 1;
+            gChainBurstRounds = 0;   // v1.0.73：续滑轮数从头计（用户按的那 5 次不算续滑轮）
             PTChainPill(@"已进入连滑");
+            // v1.0.73：记录区留痕——此前「已进入连滑」只在顶部 pill 一闪而过，
+            // 返回即消失，事后在记录区查不到任何连滑痕迹。
+            PTTestLog(NO, @"★ 已进入连滑 —— 自动续滑接管，档位 ×1");
             return YES;
         }
         return NO;
@@ -1263,7 +1314,11 @@ static void PTChainOnHit(NSString *plan, BOOL viaTest) {
             gSwipeBurstLastAt = 0;                    // v1.0.72：时间窗清零，旧链不能跨刹停续接
             gSwipeStopRequested = YES; gExecToken++;  // 中断在飞回放（令牌失配 → 抬手收尾）
             PTDylibLog(viaTest ? @"[测试] 异方案「%@」→ 刹停「%@」" : @"[连滑] 异方案「%@」→ 刹停「%@」", plan, gSwipeBurstPlan);
-            if (wasActive) PTChainPill(@"已退出连滑");
+            if (wasActive) {
+                PTChainPill(@"已退出连滑");
+                // v1.0.73：记录区关键事件独占一行（并打断续滑聚合行）
+                PTTestLog(NO, [NSString stringWithFormat:@"✗ 刹停（异方案「%@」）→ 已退出连滑", plan]);
+            }
             return;
         }
         if (gSwipeBurstActive) {
@@ -1271,6 +1326,8 @@ static void PTChainOnHit(NSString *plan, BOOL viaTest) {
             gSwipeBurstRate = (gSwipeBurstRate >= 3) ? 1 : gSwipeBurstRate + 1;
             // v1.0.67：与运行端一致——⚡雷电样式「⚡连滑 ×1/×2/×3」（选项 i：仍走 DVT 1/2/3 档）
             PTChainPill([NSString stringWithFormat:@"⚡连滑 ×%ld", (long)gSwipeBurstRate]);
+            // v1.0.73：升档是档位变化的时刻，独占一行（升档后的续滑另起一行重新开始聚合）
+            PTTestLog(NO, [NSString stringWithFormat:@"⚡ 升档 → ×%ld", (long)gSwipeBurstRate]);
             return;
         }
         if (!gChainEnabled) return;   // 总开关关闭：窗口期按压静默忽略

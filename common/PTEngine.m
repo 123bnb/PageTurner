@@ -264,7 +264,8 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
                 PTChainHandleHit(plan);
                 return YES;
             }
-            PTChainReset();   // 未命中：放行重放轨迹（兜底清理连滑链）
+            // v1.0.73：未命中 = 退出连滑 + 立刻停在飞动作（旧为 PTChainReset，只清链、动作照常播完）
+            PTChainMiss();
             PTDylibLog(@"[会话] 未命中：sender=0x%llx phase=%d dir=%.1f dist=%.1f → 重放轨迹放行",
                 gCurSender, f.phase, f.direction, f.dist);
             PTReplayTrailAsync();
@@ -293,10 +294,20 @@ static void PTReplayTrailAsync(void) {
     NSMutableArray *mids = [NSMutableArray arrayWithCapacity:n];
     for (NSUInteger i = 1; i < n - 1; i++) [mids addObject:pts[i]];
 
+    // v1.0.73：保存旧值——重放与"在飞的方案回放"会并发（执行中按到没录入的键即走到这里），
+    // 旧实现结束时硬置 NO，会把仍在跑的方案回放的注入标记提前清掉。
+    BOOL prevInjecting = gIsInjecting;
     gIsInjecting = YES;
     gInFakeTouch = YES;
-    NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
+    // v1.0.73：动态分配 pointId（旧为硬编码 1）。方案回放（PTRunAction）也固定占用 touchAry[0]，
+    // 两个序列共用一个 UITouch 会互相串台 → 滑动诡异中断 / 手势错乱 / 偶发不抬手。
+    // getAvailablePointId 只把 phase==Ended/Stationary 的槽位当作空闲，故天然避开忙碌的 0 号槽。
+    NSInteger pid = [PTFakeMetaTouch fakeTouchId:0 AtPoint:from withTouchPhase:UITouchPhaseBegan];
     gInFakeTouch = NO;
+    if (pid <= 0) {   // 极端：pointId 全部被占用 → 放弃重放，恢复原状态（不留下脏标记）
+        gIsInjecting = prevInjecting;
+        return;
+    }
     // v1.0.18：按屏幕刷新节奏（~60Hz，16.6ms/点）逐点推进，密度接近真实手指，
     // 不再把整段滑动压缩进 ~120ms。宗旨不变：未命中时仍把原始轨迹还原给 App。
     static const double kReplayStepSec = 1.0 / 60.0;
@@ -307,7 +318,7 @@ static void PTReplayTrailAsync(void) {
             gInFakeTouch = YES;
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
             gInFakeTouch = NO;
-            gIsInjecting = NO;
+            gIsInjecting = prevInjecting;   // v1.0.73：恢复而非硬置 NO
             PTDylibLog(@"[重放] 未命中：原始轨迹已重放给 App（%lu 点）", (unsigned long)mids.count);
             return;
         }

@@ -124,10 +124,18 @@ extern void PTTestReset(void);      // v1.0.71：测试页退出一键复位（a
 // ---------- 连滑（Core 状态机；外壳命中判定后调用） ----------
 extern void PTChainHandleHit(NSString *plan);   // v1.0.71：运行端命中方案——连滑判定 + 起执行/续档/刹停
 extern void PTChainReset(void);                 // 刹停/未命中/关开关：清空连滑链
+// v1.0.73：按键未命中（没录入的按键）——退出连滑 **且** 立刻停掉在飞动作。
+// 与 PTChainReset 的区别：Reset 只清连滑状态、在飞动作照常播完；Miss 额外 gExecToken++
+// 让在飞回放令牌失配→抬手收尾→立即停止（连滑中时补出 pill「已退出连滑」）。
+// 运行端（PTHandlePagerEvent）与测试端（PTTestOnEnded）共用，杜绝两端漂移。
+extern void PTChainMiss(void);
 
 // 测试 sink 协议方法（sTestLogSink 为 id 类型，需编译器可见的声明才能调用）
 @interface NSObject (PTTestSink)
 - (void)appendLog:(NSString *)s;
+// v1.0.73：原地改写最后一行（连滑续滑轮数聚合用）。逐轮 append 会在数秒内刷爆记录区，
+// 故续滑进度走"同一行不断改写"，关键事件（进入连滑/升档/刹停）才另起一行。
+- (void)updateLastLog:(NSString *)s;
 - (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase;
 @end
 
