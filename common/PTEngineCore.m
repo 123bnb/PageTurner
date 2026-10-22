@@ -26,12 +26,9 @@
 #import <unistd.h>
 #import "ptftouch/PTFakeMetaTouch.h"
 #import "PTEngineCore.h"
-
-// 测试 sink 协议方法（sTestLogSink 为 id 类型，需编译器可见的声明才能调用）
-@interface NSObject (PTTestSink)
-- (void)appendLog:(NSString *)s;
-- (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase;
-@end
+// 注：测试 sink 的 NSObject(PTTestSink) category 声明在 PTEngineCore.h（本文件 import 即可见），
+// 此处不得重复定义——同一 TU 内重复定义 category 是编译错误
+// （-Werror,-Wobjc-duplicate-category-definition，v1.0.71 CI 实锤）。
 
 // ============================================================
 // 常量（数值型统一宏在 PTEngineCore.h；此处只留本文件私有字符串）
@@ -276,7 +273,8 @@ static double gConfigMtime = 0;
 static double gDebounceMs = 300;
 BOOL gDebugDots = NO;   // v1.0.71：改非静态（外壳调试可视化读取；原 static 仅引擎内部用）
 // v1.0.67：连滑辅助（1:1 移植自 DVT 1.0.22）——前向声明，供 PTDylibLoadConfig / PTTestExecPlan / PTChainHandleHit 调用
-static void PTChainReset(void);
+// v1.0.71：PTChainReset 在 PTEngineCore.h 是 extern 公开 API（设置页/外壳都要调），前向声明必须非 static
+void PTChainReset(void);
 static void PTChainPill(NSString *msg);
 static void PTChainStopAll(void);
 static void PTExecutePlan(NSString *name);
