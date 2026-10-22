@@ -1,29 +1,52 @@
 # ============================================================
-# 共享构建配置 —— 单一真源（v1.0.70）
+# 共享构建配置 —— 单一真源（v1.0.70 建立；本版起三目标化）
 # ============================================================
-# 背景：此前「共享源文件列表」在两处手填 ——
+# 背景：此前「共享源文件列表」在多处手填 ——
 #   · Makefile 的 PageTurner_FILES（deb / Theos）
 #   · .github/workflows/build.yml 里的 SRCS（dylib / 裸 clang）
-#   于是未来加一个 .m，只改一处的话，另一个 target 会**静默少编译一个文件**
-#   （最坏情况不是链接报错，而是丢功能）。共享 CFLAGS 同理：此前两边已不一致
-#   （dylib 少 -Wno-arc-retain-cycles，deb 缺 -I. 等）。
+#   · Preferences/Makefile 的 PageTurner_FILES + 第三份手抄 CFLAGS
+#     （已漂移：缺 -fobjc-abi-version=2、缺仓库根 -I；review 第三轮的实锤）
+#   于是加一个 .m 只改一处，另外两个 target 会**静默少编译一个文件**
+#   （最坏不是链接报错，而是丢功能）；CFLAGS 漂移同理。
 #
-# 解法：抽到本文件，两个消费者都从这里读：
-#   · Makefile : include build/sources.mk
-#   · build.yml: make -s -f build/sources.mk PRINT_CONFIG=1 print-sources
-#                make -s -f build/sources.mk PRINT_CONFIG=1 print-cflags
+# 解法：本文件按「文件 → 被哪些目标使用」建模，三个消费者都从这里读：
+#   · 根 Makefile : include build/sources.mk                  （deb）
+#   · Preferences : PTROOT := .. ; include $(PTROOT)/build/sources.mk
+#   · build.yml   : make -s -f build/sources.mk PRINT_CONFIG=1 print-*
 #   （PRINT_CONFIG=1 守卫保证 print-* 目标不污染主 Makefile 的 default goal）
 #
-# 原则：这里**只放两个 target 真正共用**的部分；各 target 私有文件仍在各自位置声明
-#   · deb 私有  : Tweak.m（内含 MSHookMessageEx；dylib 侧无 substrate，不可共用）
-#   · dylib 私有: common/PTOverlayPage.m + targets/dylib/{PTDylibMain,PTDylibUI}.m
+# 路径一律「仓库根相对」书写。PTROOT 处理跨目录 include 的前缀与 -I：
+#   · 仓库根消费者（根 Makefile / build.yml）  PTROOT = .  （默认值）
+#   · Preferences/Makefile（在子目录里）       PTROOT = ..
+# 列表本身不带前缀，print-* 输出与 git ls-files 严格对齐（供 CI 源码覆盖审计）。
+#
+# 文件分组（按使用者）：
+#   PTSRC_KIF     ptftouch 四件（fake touch / KIF 事件注入）       三目标全要
+#   PTSRC_ENGINE  common/PTEngine.m（引擎外壳：hook 装配/运行拦截/调试可视化）  deb + dylib
+#   PTSRC_OVERLAY common/PTOverlayPage.m（点击/双击/滑动统一模板页）   dylib + Preferences
+#   PTSRC_DEB     Tweak.m（deb 私有：MSHookMessageEx/ellekit 装配）   deb
+#   PTSRC_DYLIB   targets/dylib/*.m（dylib 私有：入口/菜单/关于页）   dylib
+#   PTSRC_PREFS   Preferences/RootListController.m（设置页）          Preferences
+PTROOT ?= .
 
-SHARED_SOURCES := \
-	common/PTEngine.m \
+PTSRC_KIF := \
 	ptftouch/PTFakeMetaTouch.m \
 	ptftouch/UITouch-KIFAdditions.m \
 	ptftouch/UIEvent+KIFAdditions.m \
 	ptftouch/IOHIDEvent+KIF.m
+
+PTSRC_ENGINE := common/PTEngine.m
+PTSRC_OVERLAY := common/PTOverlayPage.m
+
+PTSRC_DEB := Tweak.m
+PTSRC_DYLIB := \
+	targets/dylib/PTDylibMain.m \
+	targets/dylib/PTDylibUI.m
+PTSRC_PREFS := Preferences/RootListController.m
+
+PTSRC_ALL_DEB := $(PTSRC_KIF) $(PTSRC_ENGINE) $(PTSRC_DEB)
+PTSRC_ALL_DYLIB := $(PTSRC_KIF) $(PTSRC_ENGINE) $(PTSRC_OVERLAY) $(PTSRC_DYLIB)
+PTSRC_ALL_PREFS := $(PTSRC_KIF) $(PTSRC_OVERLAY) $(PTSRC_PREFS)
 
 SHARED_CFLAGS := \
 	-fobjc-arc \
@@ -33,15 +56,21 @@ SHARED_CFLAGS := \
 	-Wno-unused-function \
 	-Wno-arc-performSelector-leaks \
 	-Wno-arc-retain-cycles \
-	-I. \
-	-Icommon \
-	-Iptftouch \
-	-include ptftouch/Compat.h
+	-I$(PTROOT) \
+	-I$(PTROOT)/common \
+	-I$(PTROOT)/ptftouch \
+	-include $(PTROOT)/ptftouch/Compat.h
 
 ifeq ($(PRINT_CONFIG),1)
-.PHONY: print-sources print-cflags
-print-sources:
-	@echo $(SHARED_SOURCES)
+.PHONY: print-cflags print-deb-sources print-dylib-sources print-prefs-sources print-all-sources
 print-cflags:
 	@echo $(SHARED_CFLAGS)
+print-deb-sources:
+	@echo $(PTSRC_ALL_DEB)
+print-dylib-sources:
+	@echo $(PTSRC_ALL_DYLIB)
+print-prefs-sources:
+	@echo $(PTSRC_ALL_PREFS)
+print-all-sources:
+	@echo $(sort $(PTSRC_ALL_DEB) $(PTSRC_ALL_DYLIB) $(PTSRC_ALL_PREFS))
 endif

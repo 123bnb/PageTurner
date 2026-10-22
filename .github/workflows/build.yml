@@ -34,6 +34,25 @@ jobs:
       - name: Verify version consistency (control / Info.plist / Makefile / PTVersion.h)
         run: bash scripts/check_version.sh
 
+      # ---------- 源码覆盖审计：每个 tracked .m 都必须登记进某个目标组合 ----------
+      # build/sources.mk 是三目标文件列表的单一真源；漏登记 = 该文件被静默漏编译
+      # （不报链接错、直接丢功能）。用 git ls-files 与 print-all-sources 对账，漏一个即失败。
+      - name: Audit source coverage (every tracked .m registered in sources.mk)
+        run: |
+          git ls-files '*.m' | sort > /tmp/tracked_m.txt
+          make -s -f build/sources.mk PRINT_CONFIG=1 print-all-sources | tr ' ' '\n' | sort -u > /tmp/registered_m.txt
+          echo "===== tracked .m ($(wc -l < /tmp/tracked_m.txt) 个) ====="
+          cat /tmp/tracked_m.txt
+          echo "===== registered .m ($(wc -l < /tmp/registered_m.txt) 个) ====="
+          cat /tmp/registered_m.txt
+          MISSING=$(comm -23 /tmp/tracked_m.txt /tmp/registered_m.txt || true)
+          if [ -n "${MISSING}" ]; then
+            echo "::error::以下 .m 未登记进 build/sources.mk 任何目标组合（会被静默漏编译）："
+            echo "${MISSING}"
+            exit 1
+          fi
+          echo "OK: 所有 tracked .m 均已登记"
+
       - name: Clone Theos (roothide fork)
         run: git clone --recursive --depth=1 https://github.com/roothide/theos.git "$THEOS"
 
@@ -64,14 +83,12 @@ jobs:
         run: |
           SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
           mkdir -p out
-          # v1.0.70：共享源文件列表 + 共享编译 flags 从 build/sources.mk 单一真源读取，
-          # 不再在此手填（此前与 Makefile 的 PageTurner_FILES 两处维护，且已不一致）。
-          SHARED_SRCS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-sources)
+          # dylib 目标源文件列表 + 共享编译 flags 全部从 build/sources.mk 单一真源读取。
+          # 此前此处手拼「SHARED_SRCS + PTOverlayPage.m + dylib 薄壳」，与根 Makefile 两处维护。
+          SRCS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-dylib-sources)
           SHARED_CFLAGS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-cflags)
-          echo "共享源文件: ${SHARED_SRCS}"
+          echo "dylib 源文件: ${SRCS}"
           echo "共享 flags : ${SHARED_CFLAGS}"
-          # dylib 私有：统一模板 common/PTOverlayPage.m + dylib 薄壳 targets/dylib/*
-          SRCS="${SHARED_SRCS} common/PTOverlayPage.m targets/dylib/PTDylibMain.m targets/dylib/PTDylibUI.m"
           # 打 tag(v*) 用 tag 名，普通 push 用 dev-<短sha>
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then VER="${GITHUB_REF_NAME}"; else VER="dev-${GITHUB_SHA:0:7}"; fi
           OUT="out/PageTurnerDylib_${VER}.dylib"

@@ -37,9 +37,9 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = PageTurner
 
-# v1.0.70：共享部分来自 build/sources.mk；私有部分只有 Tweak.m
-# （Tweak.m 内含 MSHookMessageEx，dylib 侧无 substrate，绝不可进共享列表）
-PageTurner_FILES = Tweak.m $(SHARED_SOURCES)
+# 目标文件列表 = build/sources.mk 的 PTSRC_ALL_DEB（KIF + 引擎 PTEngine + Tweak.m）
+# 此前这里手写 `Tweak.m $(SHARED_SOURCES)`，与 build.yml / Preferences/Makefile 三处各自维护。
+PageTurner_FILES = $(PTSRC_ALL_DEB)
 PageTurner_CFLAGS = $(SHARED_CFLAGS)
 PageTurner_FRAMEWORKS = Foundation UIKit IOKit
 PageTurner_LIBRARIES = substrate
