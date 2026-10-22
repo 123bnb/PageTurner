@@ -27,7 +27,7 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.71
+PACKAGE_VERSION := 1.0.72
 
 DEBUG = 0
 ARCHS = arm64 arm64e
