@@ -20,6 +20,7 @@
 #include <float.h>
 #import "ptftouch/PTFakeMetaTouch.h"
 #import "PTEngine.h"
+#import "PTVersion.h"   // 版本横幅宏（scripts/gen_ptversion.sh 生成，勿手改）
 #import "PTOverlayPage.h"   // v1.0.62：点击/双击/滑动/滑动(手动) 统一模板（与 deb 共用）
 
 // 配置读写 / 日志 / 工具统一走 core 实现
@@ -169,7 +170,7 @@ static const double kConverge = 60.0;
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)s {
     if (s == 1) {
-        return @"PageTurnerDylib v1.0.60\n独立版 · 注入即生效（无总开关）：把 PageTurnerDylib.dylib 用巨魔注入器注入任意 App，双指长按弹出本菜单。";
+        return [NSString stringWithFormat:@"%@\n独立版 · 注入即生效（无总开关）：把 PageTurnerDylib.dylib 用巨魔注入器注入任意 App，双指长按弹出本菜单。", PT_VERSION_STRING];
     }
     return nil;
 }

@@ -12,6 +12,7 @@
 //         早该删）；多候选路径日志冗余收敛为单路径。
 // ============================================================
 #import "PTEngine.h"
+#import "PTVersion.h"   // 版本横幅宏（scripts/gen_ptversion.sh 生成，勿手改）
 #import <dlfcn.h>
 #import <stdio.h>
 #import <mach-o/dyld.h>   // _dyld_image_count / _dyld_get_image_name（jbroot 探测）
@@ -102,7 +103,7 @@ static void PTInit() {
         if (fileLog) PTSetLogPath(PTLogPathFor(bundleID));
 
         PTDylibLog(@"==================================================");
-        PTDylibLog(@"PageTurner v1.0.66 已注入 %@ (pid=%d) isPrefs=%d 写文件=%@",
+        PTDylibLog(@"%@ 已注入 %@ (pid=%d) isPrefs=%d 写文件=%@", PT_VERSION_STRING,
               bundleID, getpid(), gIsPreferences, fileLog ? PTLogPathFor(bundleID) : @"(关闭·仅内存)");
         PTDylibLog(@"配置路径=%@ 总开关=%d 生效App数=%lu 防抖=%.0fms 方案数=%lu",
               PTGlobalPlistPath(), masterEnabled, (unsigned long)enabledApps.count,

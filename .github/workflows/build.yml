@@ -25,7 +25,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify version consistency (control / Info.plist / Makefile)
+      # PTVersion.h 是 .gitignore 生成物（版本横幅宏真源），编译前必须存在：
+      # deb 走 make（before-all 会生成），巨魔 dylib 走裸 clang 不过 make 钩子，
+      # 故这里在 checkout 后统一生成一次，两个构建都受益。
+      - name: Generate PTVersion.h (from PACKAGE_VERSION)
+        run: bash scripts/gen_ptversion.sh
+
+      - name: Verify version consistency (control / Info.plist / Makefile / PTVersion.h)
         run: bash scripts/check_version.sh
 
       - name: Clone Theos (roothide fork)

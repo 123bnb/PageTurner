@@ -1,0 +1,5 @@
+// 生成物（同步脚本/CI 产出，勿提交）
+common/PTVersion.h
+packages/
+.theos/
+out/

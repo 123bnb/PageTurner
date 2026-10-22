@@ -66,6 +66,15 @@ before-package::
 before-package::
 	bash ./scripts/sync_version.sh
 
+# ---------- 编译期横幅头：任何 make 调用前幂等生成 ----------
+# PTVersion.h 是 .gitignore 生成物，全新 checkout 里不存在；Tweak.m 等源码 import 它，
+# 必须早于编译。挂 before-all（plain make / make package 都会先跑）；只生成头文件、
+# 不碰 tracked 的 control/Info.plist（那是 before-package 的职责）。
+# CI 另外在 checkout 后直接调 scripts/gen_ptversion.sh——巨魔 dylib 走裸 clang 构建，
+# 不过 make 钩子，编译前头文件必须已在。
+before-all::
+	bash ./scripts/gen_ptversion.sh
+
 # ---------- 还原工作树：打包产生的 control/Info.plist 改写不应留在 git 里 ----------
 # sync_version.sh 在 before-package 阶段会把仓库根 control / Info.plist 同步成
 # PACKAGE_VERSION（仅 deb 打包需要）。打包完成后这里把它们还原成提交态，避免本地

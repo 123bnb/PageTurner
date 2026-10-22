@@ -1,5 +1,5 @@
 // ============================================================
-// PTDylibMain.m —— PageTurnerDylib 入口（v1.0.20）
+// PTDylibMain.m —— PageTurnerDylib 入口
 //
 // 注入即生效：constructor → 主队列安装 hook。
 // v1.0.12：不再用手势识别器（会被 App 手势仲裁抢）——双指长按改由
@@ -11,6 +11,7 @@
 
 #import <UIKit/UIKit.h>
 #import "PTEngine.h"
+#import "PTVersion.h"   // 版本横幅宏（scripts/gen_ptversion.sh 生成，勿手改）
 
 // 主菜单类在 PTDylibUI.m 实现
 @interface PTDylibMenuVC : UITableViewController
@@ -100,7 +101,7 @@ static void PTDylibInit(void) {
                 // jbroot 写，等于给每个被注入的 App 留一份没有任何代码会读的垃圾文件。
                 PTDylibInstallHooks();
                 PTDylibLog(@"==================================================");
-                PTDylibLog(@"PageTurnerDylib v1.0.65 已注入 %@ (pid=%d) 配置来源=%@ 文件日志=(关闭·仅内存)",
+                PTDylibLog(@"%@ 已注入 %@ (pid=%d) 配置来源=%@ 文件日志=(关闭·仅内存)", PT_VERSION_STRING,
                     bid, getpid(), @"独立配置");
                 PTDylibLog(@"配置路径=%@ 防抖=%.0fms 方案数=%lu",
                     PTDylibCfgPath(),
