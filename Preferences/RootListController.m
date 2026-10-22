@@ -486,11 +486,25 @@ static void SImpAddEvent(id self, SEL _cmd, void *event) {
 
 static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     @try {
-        // v1.0.71：gTestInjecting 删除——Core 的动作执行统一置 gInFakeTouch/gIsInjecting，
-        // 注入/执行期间的触摸一律放行（语义与旧 gTestInjecting 等价）。
+        // v1.0.71：gTestInjecting 删除——Core 的动作执行统一置 gInFakeTouch/gIsInjecting。
+        // v1.0.72（修实测 Bug 1）：注入/执行期不再无条件放行 + return，与运行端
+        //   PTEngine.m:417-438 对齐——执行期遇到"不在假触摸池里的真实翻页器触摸"（用户又按了
+        //   按键）时不 return，继续走下方采集分支，让这次按键进入连滑累计窗口。旧版无条件
+        //   return 导致测试区执行中按键被吞：连滑计数永远停在 1，提示"连滑 1/5"却一次只有
+        //   一个动作，必须等上一个完成才能再按（与 App 实地表现不一致）。
         if (gInFakeTouch || gIsInjecting) {
-            ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
-            return;
+            BOOL realPagerDuringInject = NO;
+            if (gIsInjecting && !gInFakeTouch && event &&
+                [event respondsToSelector:@selector(allTouches)]) {
+                for (UITouch *t in event.allTouches) {
+                    if (![PTFakeMetaTouch isPoolTouch:t]) { realPagerDuringInject = YES; break; }
+                }
+            }
+            if (!realPagerDuringInject) {
+                ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
+                return;
+            }
+            // realPagerDuringInject=YES → 不 return，继续走到下方采集分支
         }
         if ((sCollectArmed || sTestArmed) && event && PTNowC() < sWindowUntil) {
             NSSet *touches = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
@@ -622,7 +636,10 @@ static void SCollectHook(void) {
             detail:nil cell:PSSwitchCell edit:nil];
         [chain setProperty:@"chainEnabled" forKey:@"key"];
         [chain setProperty:@YES forKey:@"default"];
-        [chain setProperty:@"同一方案连续翻页自动提速（满 5 次进入连滑，倍率最高 2x）；换成其他方案或没命中即刹停。顶部会显示连滑进度/倍率。注：连续按键间隔需小于 1.2s 才累计，超过即视为新链重新蓄力。" forKey:@"staticText"];
+        // v1.0.72：文案对齐实现——① 倍率最高 3x（旧文案写 2x，代码自 v1.0.66 起就是 1→2→3 循环）；
+        //   ② 顶部提示只在最后两档（4/5、已进入连滑）与升档/刹停时出现，前 3 次静默（按得快≠要连滑）；
+        //   ③ 1.2s 时间窗本版真正落地（旧版窗口="回放中"，点击等快动作永远蓄不满，连滑只对滑动类生效）。
+        [chain setProperty:@"同一方案连续翻页自动提速（满 5 次进入连滑，倍率最高 3x，连滑中再按同方案循环升档）；换成其他方案或没命中即刹停。顶部提示只在最后两档（4/5、已进入连滑）与升档/刹停时出现。注：连续按键间隔需小于 1.2s 才累计，超过即视为新链重新蓄力。" forKey:@"staticText"];
         [specs addObject:chain];
 
         [specs addObject:[PSSpecifier groupSpecifierWithName:@"调试"]];
