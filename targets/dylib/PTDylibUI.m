@@ -1618,6 +1618,18 @@ static void *PTParamValueKey = &PTParamValueKey;
     [self.logView scrollRangeToVisible:r];
 }
 
+// v1.0.73：原地改写最后一行——连滑续滑进度聚合显示用（逐轮 append 会刷爆记录区）
+- (void)updateLastLog:(NSString *)s {
+    if (!self.logView) return;
+    NSString *cur = self.logView.text;
+    if (!cur.length) { self.logView.text = s; return; }
+    NSRange nl = [cur rangeOfString:@"\n" options:NSBackwardsSearch];
+    NSString *head = (nl.location == NSNotFound) ? @"" : [cur substringToIndex:nl.location + 1];
+    self.logView.text = [head stringByAppendingString:s];
+    NSRange r = NSMakeRange(self.logView.text.length - 1, 1);
+    [self.logView scrollRangeToVisible:r];
+}
+
 - (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase {
     [self.trailLayer removeFromSuperlayer];
     [self.trailDot removeFromSuperview];

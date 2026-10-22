@@ -2478,6 +2478,19 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
     [self.logView scrollRangeToVisible:r];
 }
 
+// v1.0.73：原地改写最后一行——连滑续滑进度聚合显示用。
+// 逐轮 append 会在数秒内刷爆记录区（点击类一轮约 80ms），故续滑进度复用同一行不断改写。
+- (void)updateLastLog:(NSString *)s {
+    if (!self.logView) return;
+    NSString *cur = self.logView.text;
+    if (!cur.length) { self.logView.text = s; return; }
+    NSRange nl = [cur rangeOfString:@"\n" options:NSBackwardsSearch];
+    NSString *head = (nl.location == NSNotFound) ? @"" : [cur substringToIndex:nl.location + 1];
+    self.logView.text = [head stringByAppendingString:s];
+    NSRange r = NSMakeRange(self.logView.text.length - 1, 1);
+    [self.logView scrollRangeToVisible:r];
+}
+
 // v1.0.29：调试可视化同款轨迹——起点绿点 + 方向线 + 终点 P 标记（点击只有 P 标记）
 - (void)drawTrailWithDirection:(double)dir dist:(double)dist phase:(int)phase {
     [self.trailLayer removeFromSuperlayer];
