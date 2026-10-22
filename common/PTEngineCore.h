@@ -43,6 +43,7 @@
 #define kLearnMax 15                             // 学习上限
 #define kConverge 60.0                           // 位移收敛阈值
 #define kSwipeBurstThreshold 5                   // 同方案连续命中达此值 → 进入连滑
+#define kSwipeBurstWindowSec 1.2                 // v1.0.72：蓄力时间窗——同方案 1.2s 内的命中都累计（旧版窗口="回放中"，点击等快动作 80~230ms 就播完，第二次按键到来时计数已复位，永远蓄不满）
 
 // ---------- 配置 ----------
 extern NSString *PTDylibCfgPath(void);
