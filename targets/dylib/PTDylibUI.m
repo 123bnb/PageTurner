@@ -111,13 +111,9 @@
 @end
 
 // ---------- 常量 ----------
-static const double kDirTol = 15.0;
-static const double kDistSlack = 30.0;
-static const double kTapDistSlack = 0.15;
-static const double kTapDxThresh = 0.05;
-static const int kLearnMin = 5;
-static const int kLearnMax = 15;
-static const double kConverge = 60.0;
+// v1.0.71：本文件原有的 7 份常量副本已删——统一用 common/PTEngineCore.h 的宏
+//（kDirTolerance/kDistSlack/kTapDistSlack/kTapDxThresh/kLearnMin/kLearnMax/kConverge，
+//  经 PTEngine.h re-export 可见）；PTLearnVC 判定用的 kLearnMin/kLearnMax 数值不变。
 
 // ============================================================
 // 主菜单（双指长按弹出）
@@ -1609,9 +1605,9 @@ static void *PTParamValueKey = &PTParamValueKey;
 
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
-    sTestArmed = NO;
-    sTestDot = nil;
-    sTestLogSink = nil;
+    // v1.0.71：改调 Core 的 PTTestReset——比旧实现多清 sTestLine/sTestP/sTestTrail 并
+    // 作废尾巴淡出令牌（旧实现在 dylib 侧会漏留方向线/P 标记）
+    PTTestReset();
 }
 
 - (void)appendLog:(NSString *)s {

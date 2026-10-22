@@ -1,5 +1,5 @@
 # ============================================================
-# 共享构建配置 —— 单一真源（v1.0.70 建立；本版起三目标化）
+# 共享构建配置 —— 单一真源（v1.0.70 建立；v1.0.71 起三目标化）
 # ============================================================
 # 背景：此前「共享源文件列表」在多处手填 ——
 #   · Makefile 的 PageTurner_FILES（deb / Theos）
@@ -22,11 +22,14 @@
 #
 # 文件分组（按使用者）：
 #   PTSRC_KIF     ptftouch 四件（fake touch / KIF 事件注入）       三目标全要
+#   PTSRC_CORE    common/PTEngineCore.m（引擎核心：配置/匹配/学习样本/测试回放/连滑/动作执行/日志） 三目标全要
 #   PTSRC_ENGINE  common/PTEngine.m（引擎外壳：hook 装配/运行拦截/调试可视化）  deb + dylib
 #   PTSRC_OVERLAY common/PTOverlayPage.m（点击/双击/滑动统一模板页）   dylib + Preferences
 #   PTSRC_DEB     Tweak.m（deb 私有：MSHookMessageEx/ellekit 装配）   deb
 #   PTSRC_DYLIB   targets/dylib/*.m（dylib 私有：入口/菜单/关于页）   dylib
 #   PTSRC_PREFS   Preferences/RootListController.m（设置页）          Preferences
+# 目标组合 = 组相并。v1.0.71 起 Preferences 也链 PTSRC_CORE（消除设置页 ~950 行重复实现），
+# 但不链 PTSRC_ENGINE（外壳的 hook 装配是 deb/dylib 专属；设置页进程有自己的 hook）。
 PTROOT ?= .
 
 PTSRC_KIF := \
@@ -35,6 +38,7 @@ PTSRC_KIF := \
 	ptftouch/UIEvent+KIFAdditions.m \
 	ptftouch/IOHIDEvent+KIF.m
 
+PTSRC_CORE := common/PTEngineCore.m
 PTSRC_ENGINE := common/PTEngine.m
 PTSRC_OVERLAY := common/PTOverlayPage.m
 
@@ -44,9 +48,9 @@ PTSRC_DYLIB := \
 	targets/dylib/PTDylibUI.m
 PTSRC_PREFS := Preferences/RootListController.m
 
-PTSRC_ALL_DEB := $(PTSRC_KIF) $(PTSRC_ENGINE) $(PTSRC_DEB)
-PTSRC_ALL_DYLIB := $(PTSRC_KIF) $(PTSRC_ENGINE) $(PTSRC_OVERLAY) $(PTSRC_DYLIB)
-PTSRC_ALL_PREFS := $(PTSRC_KIF) $(PTSRC_OVERLAY) $(PTSRC_PREFS)
+PTSRC_ALL_DEB := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_ENGINE) $(PTSRC_DEB)
+PTSRC_ALL_DYLIB := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_ENGINE) $(PTSRC_OVERLAY) $(PTSRC_DYLIB)
+PTSRC_ALL_PREFS := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_OVERLAY) $(PTSRC_PREFS)
 
 SHARED_CFLAGS := \
 	-fobjc-arc \

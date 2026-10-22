@@ -1,7 +1,9 @@
 # PageTurner v1.0.57 —— 统一代码（roothide / deb + 巨魔 dylib 双形态，功能不变，删除注入探针）
-# 架构：单一运行端引擎 common/PTEngine.m 被两个 target 共用：
+# 架构：引擎核心 common/PTEngineCore.m（配置/匹配/样本/测试/连滑/动作/日志）三个 target 共用；
+#       外壳 common/PTEngine.m（hook 装配/运行拦截/可视化/录制/菜单）只被 deb+dylib 链接：
 #       · roothide deb（Tweak.m 薄壳，MSHookMessageEx 装 hook，设置页总开关+指定App生效）
 #       · 巨魔 dylib（targets/dylib/，method_setImplementation 自 hook，应用内双指长按菜单）
+#       · Preferences（RootListController + Core，不链外壳；进程内自 hook 采集）
 # 事件/动作/匹配 全部共用，差异仅「配置路径 / 总开关门控 / hook 安装方式」，通过 PTSet* 注入。
 # 事件：hook UIApplication -sendEvent:（UIEvent 层，UITouch 真实坐标）
 #       + _UIUpdateHIDDigitizerInput -addEvent:（IOHIDEvent 层，sender 判来源/学习）
@@ -25,7 +27,7 @@
 #   → 新增调试可视化：TrollCM 触摸轨迹（绿点+轨迹线+翻页器 P 标记），设置页「调试可视化」开关
 TARGET := iphone:clang:16.5:15.0
 THEOS_PACKAGE_SCHEME := roothide
-PACKAGE_VERSION := 1.0.70
+PACKAGE_VERSION := 1.0.71
 
 DEBUG = 0
 ARCHS = arm64 arm64e
@@ -37,7 +39,8 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = PageTurner
 
-# 目标文件列表 = build/sources.mk 的 PTSRC_ALL_DEB（KIF + 引擎 PTEngine + Tweak.m）
+# v1.0.71：deb 目标文件列表 = build/sources.mk 的 PTSRC_ALL_DEB
+#          （KIF + 引擎核心 PTEngineCore + 引擎外壳 PTEngine + Tweak.m）。
 # 此前这里手写 `Tweak.m $(SHARED_SOURCES)`，与 build.yml / Preferences/Makefile 三处各自维护。
 PageTurner_FILES = $(PTSRC_ALL_DEB)
 PageTurner_CFLAGS = $(SHARED_CFLAGS)

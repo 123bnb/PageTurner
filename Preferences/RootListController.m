@@ -1,5 +1,32 @@
 // ============================================================
-// RootListController.m —— PageTurner 设置页（v1.0.56）
+// RootListController.m —— PageTurner 设置页
+//
+// v1.0.71（引擎核心化，删除 ~950 行重复实现；review 第三轮实锤的漂移修复）：
+//   本文件此前不链引擎，把引擎约 950 行逻辑（配置/匹配/学习样本/测试回放/数学工具）
+//   又写了一遍，且已双向漂移。现改为链接 common/PTEngineCore.m（三目标共享同一份核心），
+//   删除全部重复实现，行为以引擎侧为准。删除清单与去向：
+//     · 常量 7 份（kDirTol/kDistSlack/kTapDistSlack/kTapDxThresh/kLearnMin/kLearnMax/
+//       kConverge）        → PTEngineCore.h 的宏（kDirTolerance 等，三目标同值）
+//     · PTJbrootRootC      → Core 的 PTJbrootRoot()
+//     · PTNowC             → Core 的 PTNowC()
+//     · SLog 机制全家      → Core 的 PTDylibLog/PTDylibLogClearLines/PTSetLogPath/
+//       （SLogRefreshCfg/SLogTrimFile）  PTSetFileLogEnabled；SLog 降级为宏转发
+//     · SAppendSample      → Core 的 PTSampleAppend（经 PTSetCfgWriter 双写）
+//     · PTSetLearningLocal → Core 的 PTDylibSetLearningLocal
+//     · 会话/执行态静态    → Core 的 extern（sCurSender/sWindowUntil/sCollectArmed/
+//       （sCurSender/sSess*/sTest* 等）  sSess*/sTestArmed/sTestDot/sTestLogSink…）
+//     · gTestInjecting     → 删（Core 执行统一置 gInFakeTouch/gIsInjecting）
+//     · 测试全家           → Core 的 PTTestMatchFeature/PTTestShowDot/PTTestTap/
+//       （匹配/可视化/回放/执行/结算）  PTTestRecSwipeAsync/PTTestRunAction/
+//                             PTTestExecPlan/PTTestOnEnded（引擎版）
+//     · 数学四件           → Core 的 PTDirName/PTActionText/PTDuplicate/PTStable/
+//       （PTDirName/PTActionText/PTDuplicate/PTStable）  PTFeaturesOfPlan
+//     · IOKit dlsym 自解析 → Core 的 PTDylibInitIOKit（pGetType/pGetSender）
+//   修复的漂移（设置页旧实现 vs 引擎）：① 采集窗口 0.05s→0.30s；② tap 判定 30.0 字面量
+//   →kTapDistThreshold；③ 测试区无连滑刹停/无倍速/无取消 → 与运行端同一状态机；
+//   ④ PTTestVC 退场漏 sTestTrailToken++ → PTTestReset 一站式复位。
+//   预期行为变化（用户已确认接受）：设置页测试区现在与运行端完全同行为——连滑蓄力
+//   倒数、升档、刹停、防抖、执行中放行都按引擎口径。
 //
 // v1.0.56（废代码清理 + 滑动(手动)录制合并，与运行端同步）：
 //   1. 删除 tapManual/doubleTapManual 废案全链路（测试分支/列表显示/类型转换）——实测仅
@@ -142,8 +169,10 @@
 //   - 本页 NSTimer 轮询 0.3s：读走样本（清空已读）→ 判定稳定/上限/去重 → 更新 UI
 //   - 稳定 → 弹命名框 → feature（sender+相位+方向+位移区间）写入方案
 //
-// 注意：设置页 bundle 不调用注入 dylib 的符号（dyld two-level 会崩），
-//       全部 plist 读写在本文件自实现（PTRead/PTWrite）
+// 注意（v1.0.71 更新）：设置页 bundle 不调用**注入 dylib** 的符号（dyld two-level 会崩），
+//       但引擎核心 PTEngineCore.m 是编译进 bundle 的（build/sources.mk 的 PTSRC_CORE），
+//       同进程内直接共享；plist 读写仍走本文件的 PTRead/PTWrite（现包 Core 的
+//       PTDylibReadCfg/PTWriteCfgTo，并注入为 Core 的配置写入器，见文件尾构造函数）。
 // ============================================================
 
 #import <Preferences/PSListController.h>
@@ -159,6 +188,7 @@
 #include <float.h>
 #include <stdarg.h>
 #import "PTFakeMetaTouch.h"
+#import "PTEngineCore.h"   // v1.0.71：引擎核心（配置/匹配/样本/测试回放/连滑/工具）——删除本文件 ~950 行重复实现
 #import "PTOverlayPage.h"   // v1.0.62：点击/双击/滑动/滑动(手动) 统一模板（与 dylib 共用）
 
 @interface PSViewController (Private)
@@ -277,40 +307,10 @@
 
 // ---------- 工具 ----------
 static NSString *PT_PREFS = @"/var/mobile/Library/Preferences/com.yourname.pageturner.plist";
-static const double kDirTol = 15.0;     // 方向容差
-static const double kDistSlack = 30.0;  // 位移匹配裕度
-// v1.0.36：点击位移区间容差 / 方向判定阈值（区分 0.4/0.7 这类微小位移点击键）
-static const double kTapDistSlack = 0.15;
-static const double kTapDxThresh = 0.05;
-static const int kLearnMin = 5;         // 下限
-static const int kLearnMax = 15;        // 上限
-static const double kConverge = 60.0;   // 位移收敛
-
-// v1.0.25 根因修复：设置页之前只写普通路径 /var/mobile/Library/Preferences/...，
-// 第三方 App 沙盒读该路径会被系统重定向到 App 自己的容器 → 永远读不到
-// （探针显示"文件不可读"）。现在照抄注入端 Tweak.xm 的 PTJbrootRoot 逻辑，
-// 从本 dylib 镜像提取 .jbroot-XXX 根，把配置同时写入 jbroot 真实偏好路径 +
-// 普通路径兜底，App 侧 PTGlobalPlistPath 多候选读取必有一处命中。
-static NSString *PTJbrootRootC(void) {
-    static NSString *root = nil;
-    static dispatch_once_t on;
-    dispatch_once(&on, ^{
-        uint32_t n = _dyld_image_count();
-        for (uint32_t i = 0; i < n; i++) {
-            const char *img = _dyld_get_image_name(i);
-            if (!img) continue;
-            NSString *p = [NSString stringWithUTF8String:img];
-            NSRange r = [p rangeOfString:@"/.jbroot-"];
-            if (r.location == NSNotFound) continue;
-            NSRange after = NSMakeRange(NSMaxRange(r), p.length - NSMaxRange(r));
-            NSRange slash = [p rangeOfString:@"/" options:0 range:after];
-            NSUInteger end = (slash.location != NSNotFound) ? slash.location : p.length;
-            root = [p substringToIndex:end];
-            break;
-        }
-    });
-    return root;
-}
+// v1.0.71：方向容差/位移裕度/学习上下限/收敛阈值等常量已统一为 common/PTEngineCore.h 的宏
+// （kDirTolerance/kDistSlack/kTapDistSlack/kTapDxThresh/kLearnMin/kLearnMax/kConverge/…），
+// 三个编译目标共用同一份数值，杜绝设置页与引擎各抄一份再漂移。
+// jbroot 根路径探测同理：PTJbrootRootC 已删除，改用 Core 的 PTJbrootRoot()。
 
 // v1.0.66-fix：方案 pid 辅助（必须在 PTRead 之前定义，PTRead 会调用 PTPlanId 做惰性补发）
 static NSString *PTPlanId(NSDictionary *p) {
@@ -331,9 +331,10 @@ static NSInteger PTPlanIndexById(NSMutableArray *plans, NSString *pid) {
 
 static void PTWrite(NSDictionary *cfg);   // 前向声明（PTRead 惰性补发 pid 落盘时要用）
 
+// v1.0.71：读取改包 Core 的 PTDylibReadCfg（同一路径 PT_PREFS，由构造函数 PTSetCfgPath 注入），
+// pid 惰性补发的业务逻辑保留在本层（设置页私有）。
 static NSMutableDictionary *PTRead(void) {
-    NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:PT_PREFS];
-    if (!d) d = [NSMutableDictionary dictionary];
+    NSMutableDictionary *d = PTDylibReadCfg();
     // v1.0.66-fix：方案唯一身份 pid（防止重名时编辑/删除串名）。
     // 旧版方案无 pid → 首次读取时按"name#序号"惰性补发唯一 pid 并落盘；新方案创建时必带 pid。
     NSArray *plans = d[@"plans"];
@@ -360,61 +361,43 @@ static NSMutableDictionary *PTRead(void) {
     return d;
 }
 
+// v1.0.71：双写（jbroot 真实偏好路径 App 侧读得到 + 普通路径兜底自己读）——逐路径调
+// Core 的 PTWriteCfgTo（序列化+原子写单一实现）；本函数同时经 PTSetCfgWriter 注入给
+// Core，于是 Core 内部所有配置写入（学习样本/学习开关）在设置进程同样双写。
 static void PTWrite(NSDictionary *cfg) {
-    NSData *data = [NSPropertyListSerialization dataWithPropertyList:cfg
-        format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
-    if (!data) return;
-    // 候选写入位置：jbroot 真实偏好路径（App 侧读得到）优先 + 普通路径兜底
     NSMutableArray *targets = [NSMutableArray array];
-    NSString *jb = PTJbrootRootC();
+    NSString *jb = PTJbrootRoot();
     if (jb.length) {
         [targets addObject:[jb stringByAppendingPathComponent:
             [@"var/mobile/Library/Preferences" stringByAppendingPathComponent:@"com.yourname.pageturner.plist"]]];
     }
     [targets addObject:PT_PREFS];
-    for (NSString *p in targets) {
-        NSString *tmp = [p stringByAppendingString:@".tmp"];
-        [data writeToFile:tmp atomically:YES];
-        [[NSFileManager defaultManager] removeItemAtPath:p error:nil];
-        [[NSFileManager defaultManager] moveItemAtPath:tmp toPath:p error:nil];
-    }
+    for (NSString *p in targets) PTWriteCfgTo(p, cfg);
 }
 
-static void PTSetLearningLocal(BOOL on) {
-    NSMutableDictionary *cfg = PTRead();
-    cfg[@"learning"] = @{ @"active": @(on) };
-    if (on) cfg[@"learningSamples"] = @[];
-    PTWrite(cfg);
-}
+// PTSetLearningLocal 已删（v1.0.71）：Core 提供 PTDylibSetLearningLocal（同语义，
+// 且经 PTWriteCfg→注入的 PTWrite 双写）；调用点已改名。
 
 // ---------- 学习收集（bundle 内自 hook，不依赖 tweak 注入 Preferences 进程）----------
 // 根因：roothide 空 Filter 不注入系统 App（Preferences），tweak 收集链路失效。
 // bundle 必然被 PreferenceLoader 加载进 Preferences 进程，在这里自己 hook 事件收集样本。
-static double PTNowC(void) {
-    struct timeval tv; gettimeofday(&tv, NULL);
-    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
-}
+// PTNowC 已删（v1.0.71）：Core 提供同名 extern 函数。
 
-// ---------- 日志系统（v1.0.17 加：内存+文件双写；v1.0.42：受调试日志开关控制）----------
-static NSMutableArray *sLogLines = nil;      // 内存日志（日志页直接显示；v1.0.59 起循环保留最近 500 条）
-static NSString *sLogPath = nil;             // 文件日志实际路径（nil=全部不可写）
-static double sLogCfgMtime = -1;             // v1.0.42：配置 mtime 缓存（开关改动即时生效）
-static BOOL sLogEnabled = YES;               // v1.0.42：受 debugLogEnabled 控制
-static void SLogRefreshCfg(void) {
-    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:PT_PREFS error:nil];
-    double mtime = attrs ? [attrs.fileModificationDate timeIntervalSince1970] : 0;
-    if (mtime == sLogCfgMtime) return;
-    sLogCfgMtime = mtime;
-    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:PT_PREFS];
-    sLogEnabled = (cfg[@"debugLogEnabled"] == nil) ? YES : [cfg[@"debugLogEnabled"] boolValue];
-}
+// ---------- 日志系统 ----------
+// v1.0.71：内存+文件日志机制整体移交 Core（PTDylibLog / PTDylibLogLines /
+// PTDylibLogClearLines / PTSetLogPath / PTSetFileLogEnabled），SLog 降级为宏转发，
+// 全部既有调用点一行不用改。与旧实现的差异：行首时间格式由「年月日 时分秒」统一为
+// 引擎侧一致的「时分秒.毫秒」（同一天内诊断无影响）；「候选路径全部不可写」的告警
+// 行改由构造函数 PTPrefsEngineInit 探测路径后打一条。
+#define SLog(fmt, ...) PTDylibLog(fmt, ##__VA_ARGS__)
+
 // 设置页自己的日志写到「共享 jbroot 的 Documents」（PageTurner.log，不带 bundleID）。
 // 注意：与 App 侧同目录只是为了清理时一处搞定，不代表设置页要读别人的文件——
 // 各 App 的 PageTurner-<bid>.log 只有「勾选生效」的 App 才会写，且由 buildLogItems 按 enabledApps 枚举。
 static NSString *SLogProbePath(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray *cands = [NSMutableArray array];
-    NSString *jb = PTJbrootRootC();
+    NSString *jb = PTJbrootRoot();
     if (jb.length) [cands addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents"]];
     [cands addObject:@"/var/mobile/Documents"];
     NSString *doc = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
@@ -431,10 +414,10 @@ static NSString *SLogProbePath(void) {
 // v1.0.59：清空全部日志（内存 + 所有 PageTurner*.log 文件）；调试日志开关关闭时调用
 static void PTClearAllLogs(void) {
     @try {
-        [sLogLines removeAllObjects];
+        PTDylibLogClearLines();   // v1.0.71：内存日志归 Core 管（旧实现 [sLogLines removeAllObjects]）
         NSFileManager *fm = NSFileManager.defaultManager;
         NSMutableArray *dirs = [NSMutableArray array];
-        NSString *jb = PTJbrootRootC();
+        NSString *jb = PTJbrootRoot();
         if (jb.length) [dirs addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents"]];
         [dirs addObject:@"/var/mobile/Documents"];
         for (NSString *dir in dirs) {
@@ -445,473 +428,46 @@ static void PTClearAllLogs(void) {
                 }
             }
         }
-        sLogPath = nil;   // 下次重新探测
+        // sLogPath = nil（下次重新探测）已删：Core 的 sLogFile 由 PTSetLogPath 注入后不再变
     } @catch (NSException *e) {}
 }
-// 文件日志循环保留最近 500 行（删最旧，保留尾部 500 行；v1.0.42 时曾为 1000，v1.0.59 起与内存统一为 500）
-static void SLogTrimFile(NSString *path) {
-    @try {
-        NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
-        if (!content) return;
-        NSArray *lines = [content componentsSeparatedByString:@"\n"];
-        if (lines.count > 500) {
-            NSArray *keep = [lines subarrayWithRange:NSMakeRange(lines.count - 500, 500)];
-            [[keep componentsJoinedByString:@"\n"] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        }
-    } @catch (NSException *e) {}
-}
-static void SLog(NSString *fmt, ...) {
-    SLogRefreshCfg();
-    if (!sLogEnabled) return;   // v1.0.42：日志开关关=内存/文件都不记
-    if (!sLogLines) sLogLines = [NSMutableArray array];
-    va_list ap; va_start(ap, fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
-    struct timeval tv; gettimeofday(&tv, NULL);
-    time_t sec = tv.tv_sec; struct tm tmv; localtime_r(&sec, &tmv);
-    char tbuf[64]; strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tmv);
-    NSString *line = [NSString stringWithFormat:@"%s.%03d %@", tbuf, (int)(tv.tv_usec/1000), msg];
-    if (sLogLines.count >= 500) [sLogLines removeObjectsInRange:NSMakeRange(0, 250)];   // v1.0.59：500 条循环
-    [sLogLines addObject:line];
-    if (!sLogPath) sLogPath = SLogProbePath();
-    if (sLogPath) {
-        static int sFileLines = 0;   // 文件行数计数（>500 循环，与上方 SLogTrimFile 一致）
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:sLogPath];
-        if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; sFileLines++; } @catch (NSException *e) {} }
-        if (sFileLines > 500) { SLogTrimFile(sLogPath); sFileLines = 500; }
-    } else {
-        static BOOL sWarned = NO;
-        if (!sWarned) { sWarned = YES; [sLogLines addObject:@"[SLog] ⚠️ 所有候选路径都不可写（仅内存日志）"]; }
-    }
-}
+// SLogTrimFile / SLogRefreshCfg / SLog 本体已删（v1.0.71）：Core 的 PTDylibTrimLogFile
+// （500 行循环，数值一致）/ PTDylibLogRefreshCfg（mtime 缓存）/ PTDylibLog 为同一实现。
 
-typedef uint32_t (*IOHIDEventGetType_t)(void *);
-typedef uint64_t (*IOHIDEventGetSenderID_t)(void *);
-static IOHIDEventGetType_t sGetType = NULL;
-static IOHIDEventGetSenderID_t sGetSender = NULL;
-static uint64_t sCurSender = 0;
-static double sWindowUntil = 0;
+// v1.0.71：IOKit sender 读取符号（sGetType/sGetSender → Core 的 pGetType/pGetSender）、
+// 会话/执行态全局（sCurSender/sWindowUntil/sCollectArmed/sSess*/sLastSampleAt/sTestArmed/
+// sTestDot/sTestLogSink/sTestLine/sTestP/sTestTrail/sTestTrailToken/sLastTestExec）、
+// SAppendSample（→Core 的 PTSampleAppend）、PTFeaturesOfPlan 全部移交 Core——
+// 此前设置页与引擎各持一份、只靠配置文件间接同步，屡次双向漂移；现在同进程共享一份状态。
+// gTestInjecting 删除：Core 的动作执行统一置 gInFakeTouch/gIsInjecting（PTEngineCore.h），
+// 注入放行判据改用二者（见 SImpSendEvent）。
 static BOOL sHooked = NO;
-static BOOL sCollectArmed = NO;      // 学习页打开时置 YES
-static BOOL sSessActive = NO;
-static double sSessDist = 0, sSessFirstDir = 0;
-static BOOL sSessHasMove = NO;
-static CGPoint sSessLast = {0, 0};
-static CGPoint sSessStart = {0, 0};   // v1.0.36：会话起点（算点击位移方向符号）
-static double sLastSampleAt = 0;     // 最近一次样本时间（学习页诊断用）
 static IMP gOrigAddEvent = NULL;
 static IMP gOrigSendEvent = NULL;
-
-static void SAppendSample(int phase, double dir, double dist, int tapDx) {
-    NSMutableDictionary *cfg = PTRead();
-    if (![cfg[@"learning"][@"active"] boolValue]) return;
-    NSMutableArray *samples = [NSMutableArray arrayWithArray:cfg[@"learningSamples"] ?: @[]];
-    [samples addObject:@{
-        @"sender": [NSString stringWithFormat:@"0x%llx", sCurSender],
-        @"phase": @(phase), @"direction": @(dir), @"dist": @(dist),
-        @"tapDx": @(tapDx),   // v1.0.36：点击位移方向符号（+1/-1/0）
-    }];
-    cfg[@"learningSamples"] = samples;
-    PTWrite(cfg);
-    SLog(@"sample: sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d (总数%lu)", sCurSender, phase, dir, dist, tapDx, (unsigned long)samples.count);
-    sLastSampleAt = PTNowC();
-}
 
 // ============================================================
 // 测试模式（v1.0.19 加）：方案页 → 测试区 → 大白屏测试页
 // 在设置 App 内闭环验证"录特征 → 匹配 → 执行动作 → 点触可视化"。
 // 设置 App 里翻页器方向键走 UITouch 会话通道（与学习端同口径），
 // 匹配用完整特征（sender+phase+方向±15°+dist 区间），
-// 执行 = PTFakeMetaTouch 注入 + 大绿点显示注入位置（VolumeKeyTapper 式可视化）。
+// 执行 = PTFakeMetaTouch 注入 + 大绿点可视化注入位置（VolumeKeyTapper 式可视化）。
 // 成功即证明执行链路 OK，无需去目标 App 实测。
+//
+// v1.0.71：测试匹配/可视化/回放/执行/结算全家移交 Core（PTTestMatchFeature/
+// PTTestShowDot/PTTestDrawTrailHead/PTTestTrailFinish/PTTestTap/PTTestRecSwipeAsync/
+// PTTestRunAction/PTTestExecPlan/PTTestOnEnded）——均为引擎版实现，行为以引擎侧为准
+// （修复旧设置页版无连滑刹停/无倍速/采集窗口 0.05s 过短等漂移）。
 // ============================================================
-static BOOL sTestArmed = NO;          // 测试页打开时置 YES
-static BOOL gTestInjecting = NO;      // 注入保护（防执行触摸再被本 hook 处理）
-static UIView *sTestDot = nil;        // 测试页绿点视图（起点绿点）
-static CAShapeLayer *sTestLine = nil; // v1.0.66(#3)：方向线
-static UIView *sTestP = nil;          // v1.0.66(#3)：终点 P 标记
-static NSMutableArray *sTestTrail = nil; // v1.0.66-fix：滑动(手动)回放尾巴轨迹点（起点→…→当前）
-static int sTestTrailToken = 0;       // v1.0.66-fix：尾巴淡出令牌（防止上一段回放的余留淡出误清当前轨迹）
-static double sLastTestExec = 0;      // 测试防抖
-static __weak PTTestVC *sTestLogSink = nil;   // v1.0.28：测试页实时记录区（页面销毁即失效）
-
-// v1.0.34：方案特征集合（新格式 features[] 数组；兼容旧格式单条 feature）
-static NSArray *PTFeaturesOfPlan(NSDictionary *p) {
-    if (p[@"features"]) return p[@"features"];
-    if (p[@"feature"]) return @[p[@"feature"]];
-    return @[];
-}
-
-// 匹配（复制 Tweak.xm PTMatchPlan：sender + phase + 方向±15° + dist 区间）
-// v1.0.36：点击也启用位移匹配（tapDx 方向符号 + dist 区间小容差）
-static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t sender, int tapDx) {
-    NSString *best = nil; double bestScore = DBL_MAX;
-    for (NSDictionary *p in (PTRead()[@"plans"] ?: @[])) {
-        for (NSDictionary *ft in PTFeaturesOfPlan(p)) {
-            if (ft[@"sender"]) {
-                unsigned long long s = 0;
-                NSScanner *sc = [NSScanner scannerWithString:ft[@"sender"]];
-                if (![sc scanHexLongLong:&s] || s != sender) continue;
-            }
-            if ([ft[@"phase"] intValue] != phase) continue;
-            double pd = [ft[@"direction"] doubleValue];
-            double d = fabs(fabs(dir - pd)); if (d > 180) d = 360 - d;
-            if (d > 15.0) continue;
-            double lo = 0, hi = 0;
-            if (phase == 1) {
-                lo = [ft[@"distMin"] doubleValue];
-                hi = [ft[@"distMax"] doubleValue];
-                if (dist < lo - 30.0 || dist > hi + 30.0) continue;
-            } else {
-                if (ft[@"tapDx"]) {
-                    if (tapDx != [ft[@"tapDx"] intValue]) continue;
-                }
-                if (ft[@"distMin"]) {
-                    lo = [ft[@"distMin"] doubleValue];
-                    hi = [ft[@"distMax"] doubleValue];
-                    if (dist < lo - kTapDistSlack || dist > hi + kTapDistSlack) continue;
-                }
-            }
-            double score = d + (phase == 1 ? fabs(dist - (lo + hi) / 2.0) / 100.0 : 0);
-            if (score < bestScore) { bestScore = score; best = p[@"name"]; }
-        }
-    }
-    return best;
-}
-
-// v1.0.66-fix：懒建 sTestLine / sTestP 覆盖层（供 PTTestShowDot 与滑动尾巴渲染共用）
-static void PTTestEnsureOverlay(void) {
-    if (!sTestDot || !sTestDot.superview) return;
-    UIView *parent = sTestDot.superview;
-    if (!sTestLine) {
-        sTestLine = [CAShapeLayer layer];
-        sTestLine.strokeColor = [UIColor systemGreenColor].CGColor;
-        sTestLine.fillColor = [UIColor clearColor].CGColor;
-        sTestLine.lineWidth = 3; sTestLine.lineCap = kCALineCapRound;
-        sTestLine.lineJoin = kCALineJoinRound;
-        [parent.layer addSublayer:sTestLine];
-    }
-    if (!sTestP) {
-        sTestP = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 36, 36)];
-        sTestP.layer.cornerRadius = 18;
-        sTestP.backgroundColor = [UIColor systemGreenColor];
-        sTestP.userInteractionEnabled = NO; sTestP.hidden = YES;
-        UILabel *pl = [[UILabel alloc] initWithFrame:sTestP.bounds];
-        pl.text = @"P"; pl.textAlignment = NSTextAlignmentCenter;
-        pl.font = [UIFont boldSystemFontOfSize:18]; pl.textColor = [UIColor whiteColor];
-        [sTestP addSubview:pl];
-        [parent addSubview:sTestP];
-    }
-}
-
-// v1.0.66(#3)：轨迹可视化统一成「调试可视化同款」——起点绿点 + 方向线 + 终点 P 标记（真实坐标）。
-// 此前只画一个移动绿点（无方向线/无 P），与引擎回放回调(drawTrailWithDirection)样式不一致；现统一。
-// 注：本函数画「单段手势」（tap / 直线 swipe），from→to 是一条直线；滑动(手动)的连续尾巴见 PTTestDrawTrailHead。
-static void PTTestShowDot(CGPoint from, CGPoint to, BOOL animate, double dur) {
-    if (!sTestDot) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        PTTestEnsureOverlay();
-        if (!sTestDot.superview) return;
-        // 起点绿点
-        sTestDot.hidden = NO; sTestDot.alpha = 0.9; sTestDot.center = from;
-        // 终点 P + 方向线（from→to）
-        sTestP.hidden = NO; sTestP.alpha = 0.95; sTestP.center = to;
-        CGMutablePathRef path = CGPathCreateMutable();
-        CGPathMoveToPoint(path, NULL, from.x, from.y);
-        CGPathAddLineToPoint(path, NULL, to.x, to.y);
-        sTestLine.path = path; CGPathRelease(path);
-        // 渐隐收尾：swipe 按其时长保留，tap 短暂保留
-        double hold = animate ? MAX(dur, 0.3) : 0.0;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((hold + 0.4) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            sTestDot.alpha = 0; sTestDot.hidden = YES;
-            sTestP.alpha = 0; sTestP.hidden = YES; sTestLine.path = nil;
-        });
-    });
-}
-
-// v1.0.66-fix：滑动(手动)回放逐帧把当前点追加进「尾巴」折线（起点→…→当前）并渲染，绿点移到当前、P 隐藏。
-// 此前每帧 PTTestShowDot(cur,cur) 把方向线画成零长（不可见）+ P 标记跟着跳动，看着像"点击连成"，没有连续尾巴。
-static void PTTestDrawTrailHead(CGPoint cur) {
-    if (!sTestDot) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        PTTestEnsureOverlay();
-        if (!sTestDot.superview) return;
-        if (!sTestTrail) sTestTrail = [NSMutableArray array];
-        [sTestTrail addObject:[NSValue valueWithCGPoint:cur]];
-        CGMutablePathRef path = CGPathCreateMutable();
-        BOOL first = YES;
-        for (NSValue *v in sTestTrail) {
-            CGPoint pt = [v CGPointValue];
-            if (first) { CGPathMoveToPoint(path, NULL, pt.x, pt.y); first = NO; }
-            else CGPathAddLineToPoint(path, NULL, pt.x, pt.y);
-        }
-        sTestLine.path = path; CGPathRelease(path);
-        sTestDot.hidden = NO; sTestDot.alpha = 0.9; sTestDot.center = cur;
-        if (sTestP) sTestP.hidden = YES;
-    });
-}
-
-// v1.0.66-fix：滑动(手动)回放结束——终点显示 P，整条尾巴保留 hold 时长后淡出（用令牌防串场）
-static void PTTestTrailFinish(CGPoint pN, double hold) {
-    if (!sTestDot) return;
-    int myToken = sTestTrailToken;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        PTTestEnsureOverlay();
-        if (!sTestDot.superview) return;
-        if (sTestP) { sTestP.hidden = NO; sTestP.alpha = 0.95; sTestP.center = pN; }
-        double h = MAX(hold, 0.3);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((h + 0.4) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (myToken != sTestTrailToken) return;   // 已有新回放开始，不要误清当前轨迹
-            sTestDot.alpha = 0; sTestDot.hidden = YES;
-            if (sTestP) { sTestP.alpha = 0; sTestP.hidden = YES; }
-            sTestLine.path = nil;
-            sTestTrail = nil;
-        });
-    });
-}
-
-// 点触注入（复制 Tweak.xm：PTFakeMetaTouch，KIF 合成触摸，与 volumekeytapper 同源）
-static void PTTestTap(CGPoint p, BOOL doubleTap) {
-    UIWindow *w = [UIApplication sharedApplication].keyWindow;
-    if (!w) return;
-    PTTestShowDot(p, p, NO, 0);
-    NSInteger pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
-    usleep(30000);
-    [PTFakeMetaTouch fakeTouchId:pid AtPoint:p withTouchPhase:UITouchPhaseEnded];
-    if (doubleTap) {
-        usleep(120000);
-        PTTestShowDot(p, p, NO, 0);
-        NSInteger pid2 = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
-        usleep(30000);
-        [PTFakeMetaTouch fakeTouchId:pid2 AtPoint:p withTouchPhase:UITouchPhaseEnded];
-    }
-}
-
-// v1.0.52：滑动(手动)测试区回放——按录制轨迹逐点注入（保持时间间隔，最短 8ms 防风暴）
-// v1.0.61：录制轨迹插值（与引擎 PTRecSwipeInterp 一致）——按目标时间在录制点之间线性插值。
-// 此前设置页没有插值、直接把录制点当触摸事件发，点少时只有 Began+Ended，退化成「点击」。
-static CGPoint PTTestRecSwipeInterp(NSArray *xs, NSArray *ys, NSArray *ts, double targetT) {
-    NSUInteger m = [ts count];
-    if (m == 0) return CGPointZero;
-    double tA = [ts[0] doubleValue], tB = [ts[m - 1] doubleValue];
-    if (targetT <= tA) return CGPointMake([xs[0] doubleValue], [ys[0] doubleValue]);
-    if (targetT >= tB) return CGPointMake([xs[m - 1] doubleValue], [ys[m - 1] doubleValue]);
-    NSUInteger lo = 0, hi = m - 1;
-    while (hi - lo > 1) {
-        NSUInteger mid = (lo + hi) / 2;
-        if ([ts[mid] doubleValue] <= targetT) lo = mid; else hi = mid;
-    }
-    double ta = [ts[lo] doubleValue], tb = [ts[hi] doubleValue];
-    double fa = [xs[lo] doubleValue], fb = [xs[hi] doubleValue];
-    double ga = [ys[lo] doubleValue], gb = [ys[hi] doubleValue];
-    double f = (tb - ta) > 1e-6 ? (targetT - ta) / (tb - ta) : 0.0;
-    return CGPointMake(fa + (fb - fa) * f, ga + (gb - ga) * f);
-}
-
-static void PTTestRecSwipeAsync(NSArray *pts, void (^done)(void)) {
-    if (pts.count < 2) {
-        // 不足两点无法插值：退化为一次短按（避免什么都不做）
-        if (pts.count == 1) {
-            CGPoint p = CGPointMake([pts[0][@"x"] doubleValue], [pts[0][@"y"] doubleValue]);
-            NSInteger tid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:p withTouchPhase:UITouchPhaseBegan];
-            PTTestShowDot(p, p, NO, 0);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                [PTFakeMetaTouch fakeTouchId:tid AtPoint:p withTouchPhase:UITouchPhaseEnded];
-                if (done) done();
-            });
-        } else if (done) done();
-        return;
-    }
-    // 预解析 @{x,y,t}（避免每帧反复解包）
-    NSMutableArray *xs = [NSMutableArray array], *ys = [NSMutableArray array], *ts = [NSMutableArray array];
-    for (NSDictionary *p in pts) {
-        [xs addObject:@([p[@"x"] doubleValue])];
-        [ys addObject:@([p[@"y"] doubleValue])];
-        [ts addObject:@([p[@"t"] doubleValue])];
-    }
-    double t0 = [ts[0] doubleValue];
-    double totalMs = [ts[ts.count - 1] doubleValue] - t0;
-    if (totalMs <= 0) totalMs = 200;    // 录制时间异常 → 给默认时长，避免瞬间完成
-    if (totalMs < 50) totalMs = 50;   // 下限与引擎画轨迹一致（录制时长异常短时的兜底，避免退化成点击）
-
-    CGPoint p0 = CGPointMake([xs[0] doubleValue], [ys[0] doubleValue]);
-    CGPoint pN = CGPointMake([xs[ts.count - 1] doubleValue], [ys[ts.count - 1] doubleValue]);
-    sTestTrailToken++;   // v1.0.66-fix：新一段回放开始，作废上一段余留的淡出
-    sTestTrail = [NSMutableArray array];
-    PTTestDrawTrailHead(p0);   // 起点绿点 + 空尾巴（p0 自身即第一点）
-
-    // v1.0.61：与引擎 PTFakeRecSwipeAsync 对齐——60fps 逐帧插值回放，位置连续 → 真正的拖动
-    // v1.0.66-fix：逐帧把当前点追加进尾巴折线（PTTestDrawTrailHead），形成连续尾巴轨迹，而非零长方向线
-    __block NSInteger pid = -1;
-    __block BOOL ended = NO;
-    __block CFAbsoluteTime startT = CFAbsoluteTimeGetCurrent();
-    __block void (^tick)(void);
-    tick = ^(void) {
-        if (ended) return;
-        double elapsedMs = (CFAbsoluteTimeGetCurrent() - startT) * 1000.0;
-        CGPoint cur = PTTestRecSwipeInterp(xs, ys, ts, t0 + elapsedMs);
-        if (pid < 0) pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:cur withTouchPhase:UITouchPhaseBegan];
-        else         [PTFakeMetaTouch fakeTouchId:pid AtPoint:cur withTouchPhase:UITouchPhaseMoved];
-        PTTestDrawTrailHead(cur);   // 逐帧追加尾巴（起点→…→当前）
-        if (elapsedMs >= totalMs) {
-            [PTFakeMetaTouch fakeTouchId:pid AtPoint:pN withTouchPhase:UITouchPhaseEnded];
-            ended = YES;
-            PTTestTrailFinish(pN, totalMs / 1000.0);   // 终点 P + 尾巴保留后淡出
-            if (done) done();
-            return;
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)),
-                       dispatch_get_main_queue(), tick);
-    };
-    tick();
-}
-
-// v1.0.48：音量动作类型已整体删除（第三方 App 进程无激活音频会话，读真实音量全部
-// 接口返回假值，v1.0.44-47 四次实测后止损）——测试区音量函数一并删除。
-
-// 执行单条动作 → 完成后 next()（复制 Tweak.xm PTRunAction 逻辑）
-static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
-    NSString *type = a[@"type"];
-    if ([type isEqualToString:@"tap"]) {
-        CGPoint p = CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]);
-        PTTestTap(p, NO);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"doubleTap"]) {
-        CGPoint p = CGPointMake([a[@"x"] doubleValue], [a[@"y"] doubleValue]);
-        PTTestTap(p, YES);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else if ([type isEqualToString:@"swipe"]) {
-        CGPoint from = CGPointMake([a[@"x1"] doubleValue], [a[@"y1"] doubleValue]);
-        CGPoint to = CGPointMake([a[@"x2"] doubleValue], [a[@"y2"] doubleValue]);
-        // v1.0.33：修测试区速度 bug——旧代码把 speed 当毫秒时长（固定 1 秒，与距离无关，
-        // 短距离比运行端慢数倍）；现在与运行端统一：时长 = 距离/速度
-        // v1.0.43：默认 1000pt/s 与运行端一致（旧动作缺 speed 字段兜底 1000）
-        double speed = [a[@"speed"] doubleValue] ?: 1000;
-        double distT = hypot(to.x - from.x, to.y - from.y);
-        double durMs = (distT / MAX(speed, 1.0)) * 1000.0;
-        if (durMs < 50) durMs = 50;
-        // v1.0.37：按下停留/弹起停留 与运行端统一（可调）
-        // v1.0.40：时间插值（速度均匀）+ 静止衰减（每帧发位置不变 Moved，velocity 归零防惯性）
-        // v1.0.41：固定 16ms 帧（60fps）+ Began 延迟 40ms + 防惯性开关（删回滑），与运行端一致
-        int holdMs = [a[@"holdMs"] intValue] ?: 20;
-        int liftMs = [a[@"liftMs"] intValue] ?: 0;
-        BOOL noInertia = a[@"noInertia"] ? [a[@"noInertia"] boolValue] : YES;   // 缺省开
-        PTTestShowDot(from, to, YES, durMs / 1000.0);
-        double durSec = MAX(durMs / 1000.0, 0.001);
-        __block NSInteger pid = -1;
-        __block void (^stillAt)(CGPoint, int);
-        stillAt = ^(CGPoint pos, int ms) {
-            __block int n = MAX(ms, 0) / 16;
-            __block void (^still)(void);
-            still = ^(void) {
-                if (n <= 0) {
-                    [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseEnded];
-                    if (next) next();
-                    return;
-                }
-                n--;
-                [PTFakeMetaTouch fakeTouchId:pid AtPoint:pos withTouchPhase:UITouchPhaseMoved];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), still);
-            };
-            still();
-        };
-        __block CFAbsoluteTime t0;
-        __block void (^step)(void);
-        step = ^(void) {
-            double t = MIN((CFAbsoluteTimeGetCurrent() - t0) / durSec, 1.0);
-            if (t >= 1.0) {
-                if (noInertia) {
-                    // v1.0.40 防惯性：终点每帧不动（静止衰减），持续 max(liftMs,300) 再 Ended
-                    stillAt(to, MAX(liftMs, 300));
-                } else {
-                    // v1.0.41 关防惯性：干净利落——停 liftMs（不发事件）→ 直接弹起
-                    if (liftMs > 0) {
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                            [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
-                            if (next) next();
-                        });
-                    } else {
-                        [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
-                        if (next) next();
-                    }
-                }
-                return;
-            }
-            CGPoint pp = CGPointMake(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
-            [PTFakeMetaTouch fakeTouchId:pid AtPoint:pp withTouchPhase:UITouchPhaseMoved];
-            // v1.0.41：固定 16ms 一帧（60fps 采样）
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), step);
-        };
-        // v1.0.41：Began 延迟 40ms（与运行端一致，避免旧复位掐死新触摸）
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(40 * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-            pid = [PTFakeMetaTouch fakeTouchId:1 AtPoint:from withTouchPhase:UITouchPhaseBegan];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((holdMs + 20) * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                t0 = CFAbsoluteTimeGetCurrent();
-                step();
-            });
-        });
-    } else if ([type isEqualToString:@"recSwipe"]) {
-        // v1.0.52：测试区支持滑动(手动)回放——此前缺分支被 else 跳过，注入轨迹看不到
-        PTTestRecSwipeAsync(a[@"pts"], next);
-    } else if ([type isEqualToString:@"delay"]) {
-        double ms = [a[@"ms"] doubleValue] ?: 100;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ms / 1000.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), next);
-    } else {
-        // v1.0.48：音量+/音量-/静音切换已删除，旧配置里的这些动作在此跳过
-        if (next) next();
-    }
-}
-
-// 顺序执行方案动作序列（测试防抖 300ms；v1.0.43：执行中同样忽略，与运行端防抖严谨化一致）
-static void PTTestExecPlan(NSString *name) {
-    double now = PTNowC();
-    if (gTestInjecting || now - sLastTestExec < 0.3) { SLog(@"[测试] 防抖：忽略 %@", name); return; }
-    sLastTestExec = now;
-    NSDictionary *plan = nil;
-    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:name]) { plan = p; break; }
-    if (!plan) return;
-    NSArray *actions = plan[@"actions"] ?: @[];
-    if (!actions.count) { SLog(@"[测试] %@ 无动作，跳过", name); return; }
-    SLog(@"[测试] 命中「%@」，执行 %lu 条动作", name, (unsigned long)actions.count);
-    gTestInjecting = YES;
-    __block int idx = 0;
-    __block void (^runNext)(void);
-    runNext = ^(void) {
-        if (idx >= (int)actions.count) { gTestInjecting = NO; SLog(@"[测试] %@ 序列完成", name); return; }
-        NSDictionary *a = actions[idx++];
-        PTTestRunAction(a, runNext);
-    };
-    runNext();
-}
-
-// 测试模式：Ended 结算 → 匹配 → 执行
-// v1.0.36：加 tapDx（点击位移方向符号）
-static void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender, int tapDx) {
-    NSString *plan = PTTestMatchFeature(phase, dir, dist, sender, tapDx);
-    if (plan) {
-        SLog(@"[测试] 特征匹配 → 方案「%@」", plan);
-        PTTestExecPlan(plan);
-        NSDictionary *pp = nil;
-        for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:plan]) { pp = p; break; }
-        // v1.0.33：命中日志加特征细节（sender/相位/方向/位移），与未命中格式一致
-        [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作（sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d）",
-            plan, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0), sender, phase, dir, dist, tapDx]];
-        // v1.0.43：命中 → 原始轨迹已被"吞掉"，不再画翻页器原始轨迹（只显示注入点触）
-    } else {
-        SLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d（特征需先录制）", sender, phase, dir, dist, tapDx);
-        [sTestLogSink appendLog:[NSString stringWithFormat:@"✗ 未命中（放行）：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d",
-            sender, phase, dir, dist, tapDx]];
-        // v1.0.43：未命中/放行 → 画翻页器原始轨迹（App 实际会收到它，属于该显示的轨迹）
-        [sTestLogSink drawTrailWithDirection:dir dist:dist phase:phase];
-    }
-}
 
 static void SImpAddEvent(id self, SEL _cmd, void *event) {
     @try {
-        if (sGetType && sGetSender && event) {
-            uint32_t type = sGetType(event);
+        // v1.0.71：IOKit 符号解析移交 Core（PTDylibInitIOKit → pGetType/pGetSender）；
+        // 同时按 mtime 刷新 Core 配置缓存——测试执行走 Core 的 gPlans（见 PTTestExecPlan）。
+        PTDylibLoadConfig(NO);
+        if (pGetType && pGetSender && event) {
+            uint32_t type = pGetType(event);
             if (type == 11) {
-                uint64_t sender = sGetSender(event);
+                uint64_t sender = pGetSender(event);
                 // [日志观察] sender 变化才打（心跳同 sender 不打，防刷屏）
                 static uint64_t sLastLoggedSender = 0;
                 if (sender != sLastLoggedSender) {
@@ -919,7 +475,9 @@ static void SImpAddEvent(id self, SEL _cmd, void *event) {
                     SLog(@"addEvent: type=11 sender=0x%llx armed=%d", sender, sCollectArmed);
                 }
                 sCurSender = sender;
-                if (sCollectArmed || sTestArmed) sWindowUntil = PTNowC() + 0.05;
+                // v1.0.71：采集窗口 0.05s → kCollectWindowSec(0.30s)，与引擎侧对齐
+                // （旧值过短，系统繁忙时丢样本，"特征已稳定"迟迟达不到——漂移修复）
+                if (sCollectArmed || sTestArmed) sWindowUntil = PTNowC() + kCollectWindowSec;
             }
         }
     } @catch (NSException *e) {}
@@ -928,14 +486,16 @@ static void SImpAddEvent(id self, SEL _cmd, void *event) {
 
 static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
     @try {
-        if (gTestInjecting) {
+        // v1.0.71：gTestInjecting 删除——Core 的动作执行统一置 gInFakeTouch/gIsInjecting，
+        // 注入/执行期间的触摸一律放行（语义与旧 gTestInjecting 等价）。
+        if (gInFakeTouch || gIsInjecting) {
             ((void (*)(id, SEL, UIEvent *))gOrigSendEvent)(self, _cmd, event);
             return;
         }
         if ((sCollectArmed || sTestArmed) && event && PTNowC() < sWindowUntil) {
             NSSet *touches = [event respondsToSelector:@selector(allTouches)] ? event.allTouches : nil;
             UITouch *t = [touches anyObject];
-            if (t && sGetSender) {
+            if (t && pGetSender) {
                 CGPoint p = t.window ? [t locationInView:t.window] : [t locationInView:t.view];
                 // [日志观察] 窗口内 UITouch 事件（量小，逐条打）
                 SLog(@"sendEvent: phase=%ld pos=(%.1f,%.1f) sender=0x%llx sessActive=%d",
@@ -965,7 +525,8 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                     case UITouchPhaseEnded: {
                         if (sSessActive) {
                             sSessActive = NO;
-                            int phase = (sSessDist < 30.0) ? 0 : 1;
+                            // v1.0.71：30.0 字面量 → kTapDistThreshold（Core 宏，与引擎同值）
+                            int phase = (sSessDist < kTapDistThreshold) ? 0 : 1;
                             double dir = sSessHasMove ? sSessFirstDir : 0;
                             // v1.0.36：点击位移方向符号（x 分量，起点→终点）
                             int tapDx = 0;
@@ -975,7 +536,7 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
                             }
                             SLog(@"end: dist=%.1f dir=%.1f hasMove=%d → phase=%d tapDx=%d", sSessDist, sSessFirstDir, sSessHasMove, phase, tapDx);
                             if (sTestArmed) PTTestOnEnded(phase, dir, sSessDist, sCurSender, tapDx);
-                            else SAppendSample(phase, dir, sSessDist, tapDx);
+                            else PTSampleAppend(phase, dir, sSessDist, tapDx);   // v1.0.71：SAppendSample → Core
                         }
                         break;
                     }
@@ -991,11 +552,9 @@ static void SImpSendEvent(id self, SEL _cmd, UIEvent *event) {
 static void SCollectHook(void) {
     if (sHooked) return;
     @autoreleasepool {
-        void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
-        if (iokit) {
-            sGetType = (IOHIDEventGetType_t)dlsym(iokit, "IOHIDEventGetType");
-            sGetSender = (IOHIDEventGetSenderID_t)dlsym(iokit, "IOHIDEventGetSenderID");
-        }
+        // v1.0.71：dlopen/dlsym 自行解析 IOKit 符号 → 统一调 Core 的 PTDylibInitIOKit
+        //（dispatch_once 守护，符号落到 Core 的 pGetType/pGetSender）
+        PTDylibInitIOKit();
         Class addCls = NSClassFromString(@"_UIUpdateHIDDigitizerInput");
         SEL addSel = sel_registerName("addEvent:");
         Method am = addCls ? class_getInstanceMethod(addCls, addSel) : NULL;
@@ -1006,91 +565,16 @@ static void SCollectHook(void) {
         Method sm = appCls ? class_getInstanceMethod(appCls, sendSel) : NULL;
         if (sm) { gOrigSendEvent = method_getImplementation(sm); method_setImplementation(sm, (IMP)SImpSendEvent); }
 
-        sHooked = (gOrigAddEvent != NULL && gOrigSendEvent != NULL && sGetType != NULL && sGetSender != NULL);
-        SLog(@"collect: sHooked=%d addEvent=%d sendEvent=%d getType=%d getSender=%d", sHooked, gOrigAddEvent!=NULL, gOrigSendEvent!=NULL, sGetType!=NULL, sGetSender!=NULL);
+        sHooked = (gOrigAddEvent != NULL && gOrigSendEvent != NULL && pGetType != NULL && pGetSender != NULL);
+        SLog(@"collect: sHooked=%d addEvent=%d sendEvent=%d getType=%d getSender=%d", sHooked, gOrigAddEvent!=NULL, gOrigSendEvent!=NULL, pGetType!=NULL, pGetSender!=NULL);
     }
 }
 
-static NSString *PTDirName(double dir) {
-    if (dir >= 45 && dir <= 135) return @"下";
-    if (dir > 135 || dir < -135) return @"左";
-    if (dir >= -135 && dir < -45) return @"上";
-    return @"右";
-}
 
-static NSString *PTActionText(NSDictionary *a) {
-    NSString *t = a[@"type"];
-    if ([t isEqualToString:@"tap"]) return [NSString stringWithFormat:@"点击(%d, %d)", (int)[a[@"x"] doubleValue], (int)[a[@"y"] doubleValue]];
-    if ([t isEqualToString:@"doubleTap"]) return [NSString stringWithFormat:@"双击(%d, %d)", (int)[a[@"x"] doubleValue], (int)[a[@"y"] doubleValue]];
-    if ([t isEqualToString:@"swipe"]) return [NSString stringWithFormat:@"滑动 (%d,%d)→(%d,%d)", (int)[a[@"x1"] doubleValue], (int)[a[@"y1"] doubleValue], (int)[a[@"x2"] doubleValue], (int)[a[@"y2"] doubleValue]];
-    if ([t isEqualToString:@"delay"]) return [NSString stringWithFormat:@"延迟 %.0fms", [a[@"ms"] doubleValue]];
-    if ([t isEqualToString:@"recSwipe"]) return [NSString stringWithFormat:@"滑动(手动) %lu点", (unsigned long)[a[@"pts"] count]];
-    if ([t isEqualToString:@"tapManual"] || [t isEqualToString:@"doubleTapManual"])
-        return @"已删除的手动动作";   // 点击(手动)/双击(手动) 废案已删，旧配置显示提示
-    if ([t isEqualToString:@"volumeUp"] || [t isEqualToString:@"volumeDown"] || [t isEqualToString:@"muteToggle"])
-        return [NSString stringWithFormat:@"%@（已移除）", t];   // v1.0.48：音量动作已删除，旧配置显示提示
-    return t;
-}
+// v1.0.71：PTDirName / PTActionText / PTDuplicate / PTStable 已删——Core 提供同名
+// extern 实现（原引擎版），设置页 UI 调用点一行不用改；数值口径（kDirTolerance/
+// kDistSlack/kTapDistSlack/kLearnMin/kLearnMax/kConverge）与引擎完全一致。
 
-// 与已有特征去重（v1.0.34：遍历方案所有特征）：同 sender + 同相位 + 方向接近 + 位移接近 → 返回方案名
-// v1.0.36：点击也检查 tapDx（位移方向符号）+ dist 区间（小容差）
-static NSString *PTDuplicate(NSDictionary *s, NSArray *plans) {
-    NSString *snd = s[@"sender"];
-    int phase = [s[@"phase"] intValue];
-    double dir = [s[@"direction"] doubleValue];
-    double dist = [s[@"dist"] doubleValue];
-    int tapDx = [s[@"tapDx"] intValue];
-    for (NSDictionary *p in plans) {
-        for (NSDictionary *ft in PTFeaturesOfPlan(p)) {
-            if (![ft[@"sender"] isEqualToString:snd]) continue;
-            if ([ft[@"phase"] intValue] != phase) continue;
-            double pd = [ft[@"direction"] doubleValue];
-            double d = fabs(fabs(dir - pd)); if (d > 180) d = 360 - d;
-            if (d > kDirTol) continue;
-            if (phase == 1) {
-                double lo = [ft[@"distMin"] doubleValue], hi = [ft[@"distMax"] doubleValue];
-                if (dist < lo - kDistSlack || dist > hi + kDistSlack) continue;
-            } else {
-                // v1.0.36：点击去重——方向符号不同不算重复；位移区间小容差
-                if (ft[@"tapDx"] && tapDx != [ft[@"tapDx"] intValue]) continue;
-                if (ft[@"distMin"]) {
-                    double lo = [ft[@"distMin"] doubleValue], hi = [ft[@"distMax"] doubleValue];
-                    if (dist < lo - kTapDistSlack || dist > hi + kTapDistSlack) continue;
-                }
-            }
-            return p[@"name"];
-        }
-    }
-    return nil;
-}
-
-// 稳定判定：最近 kLearnMin 个同 sender 样本方向一致 + 位移收敛
-static BOOL PTStable(NSArray *mem, NSString *sender) {
-    NSMutableArray *same = [NSMutableArray array];
-    for (NSDictionary *s in mem) if ([s[@"sender"] isEqualToString:sender]) [same addObject:s];
-    if (same.count < kLearnMin) return NO;
-    NSInteger n = same.count;
-    double dir = [same[n-1][@"direction"] doubleValue];
-    for (NSInteger i = n - kLearnMin; i < n; i++) {
-        double d = [same[i][@"direction"] doubleValue];
-        double diff = fabs(fabs(dir - d)); if (diff > 180) diff = 360 - diff;
-        if (diff > kDirTol) return NO;
-    }
-    if ([same[n-1][@"phase"] intValue] == 1) {
-        double lo = DBL_MAX, hi = 0;
-        for (NSInteger i = n - kLearnMin; i < n; i++) {
-            double v = [same[i][@"dist"] doubleValue];
-            if (v < lo) lo = v;
-            if (v > hi) hi = v;
-        }
-        if (hi - lo > kConverge) return NO;
-    }
-    return YES;
-}
-
-// ============================================================
-// 主设置页
-// ============================================================
 @implementation RootListController
 
 - (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
@@ -2132,7 +1616,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.view addSubview:self.logView];
     [self appendLog:@"等待按键… 识别结果实时显示在这里"];
 
-    PTSetLearningLocal(YES);
+    PTDylibSetLearningLocal(YES);
     sCollectArmed = YES;
     sLastSampleAt = PTNowC();
     SCollectHook();
@@ -2145,7 +1629,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [self.timer invalidate];
     self.timer = nil;
     sCollectArmed = NO;
-    PTSetLearningLocal(NO);
+    PTDylibSetLearningLocal(NO);
 }
 
 - (void)back {
@@ -2396,7 +1880,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     [nplans addObject:@{@"name": name, @"features": @[ft], @"actions": @[]}];
     cfg[@"plans"] = nplans;
     PTWrite(cfg);
-    PTSetLearningLocal(NO);
+    PTDylibSetLearningLocal(NO);
     [self appendLog:[NSString stringWithFormat:@"已保存「%@」（名字可在方案页点方案名修改）", name]];
     // 回记录与映射列表（清掉学习页；列表 viewWillAppear 自动刷新，立刻看到新方案）
     NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
@@ -2432,7 +1916,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (!done) { [self.navigationController popViewControllerAnimated:YES]; return; }
     cfg[@"plans"] = plans;
     PTWrite(cfg);
-    PTSetLearningLocal(NO);
+    PTDylibSetLearningLocal(NO);
     // 数一下该方案现在的特征数（写日志用，按 pid 取该方案）
     NSDictionary *saved = PTPlanById(plans, self.planId);
     NSUInteger total = PTFeaturesOfPlan(saved).count;
@@ -2475,7 +1959,7 @@ static BOOL PTStable(NSArray *mem, NSString *sender) {
     if (!done) { [self.navigationController popViewControllerAnimated:YES]; return; }
     cfg[@"plans"] = plans;
     PTWrite(cfg);
-    PTSetLearningLocal(NO);
+    PTDylibSetLearningLocal(NO);
     [self appendLog:@"已替换特征，回方案页"];
     // 回方案页
     NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
@@ -2781,7 +2265,7 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
 - (NSArray *)buildLogItems {
     NSMutableArray *arr = [NSMutableArray array];
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *jb = PTJbrootRootC();
+    NSString *jb = PTJbrootRoot();
     NSMutableArray *dirs = [NSMutableArray array];
     if (jb.length) [dirs addObject:[jb stringByAppendingPathComponent:@"var/mobile/Documents"]];
     [dirs addObject:@"/var/mobile/Documents"];
@@ -2963,12 +2447,9 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
 
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
-    sTestArmed = NO;
-    sTestDot = nil;
-    if (sTestLine) { [sTestLine removeFromSuperlayer]; sTestLine = nil; }
-    if (sTestP) { [sTestP removeFromSuperview]; sTestP = nil; }
-    sTestTrail = nil;
-    sTestLogSink = nil;   // 返回即消失，测试记录不保留
+    // v1.0.71：改调 Core 的 PTTestReset（armed/绿点/方向线/P/尾巴/记录区/令牌 一站式复位；
+    // 旧实现漏了 sTestTrailToken++，上一段回放余留的淡出会误清新轨迹）
+    PTTestReset();
 }
 
 // v1.0.28：实时记录区追加一行并滚动到底部
@@ -3026,3 +2507,32 @@ static void *PTParamValueKey = &PTParamValueKey;     // UIButton -> 预设数值
 }
 @end
 
+// ============================================================
+// 构造函数（v1.0.71：Core 注入 + 设置进程差异化配置）
+// ============================================================
+// bundle 被 PreferenceLoader 加载进 Preferences 进程时执行：
+//   ① PTSetCfgPath(PT_PREFS)：Core 的配置路径指向设置页主配置（与 PTRead/PTWrite 同一文件）；
+//   ② PTSetCfgWriter(PTWrite)：Core 内部所有配置写入（学习样本/学习开关）改为设置页的
+//      双写语义（jbroot 真实路径 + 普通路径兜底）——App 侧才读得到；
+//   ③ PTSetLogPath + PTSetFileLogEnabled(YES)：设置页日志落盘（PageTurner.log），
+//      内存+文件双写；注入镜像（Tweak.m 的 PTInit）在 Preferences 进程不再碰这两项
+//      （v1.0.71 已把它的 PTSetFileLogEnabled/PTSetLogPath 移入非 Preferences 分支，
+//      防两个构造函数竞态覆盖）；
+//   ④ PTDylibLoadConfig(YES)：种子 Core 的配置缓存（gPlans 等）——测试执行
+//      （PTTestExecPlan → PTExecutePlan）读的是它，后续由 SImpAddEvent 按 mtime 刷新。
+__attribute__((constructor))
+static void PTPrefsEngineInit(void) {
+    @autoreleasepool {
+        PTSetCfgPath(PT_PREFS);
+        PTSetCfgWriter(PTWrite);
+        NSString *lp = SLogProbePath();
+        if (lp) {
+            PTSetLogPath(lp);
+            PTSetFileLogEnabled(YES);
+        } else {
+            PTDylibLog(@"[SLog] ⚠️ 所有候选路径都不可写（仅内存日志）");
+        }
+        PTDylibLoadConfig(YES);
+        PTDylibLog(@"[prefs] Core 就绪：cfg=%@ writer=双写 log=%@", PT_PREFS, lp ?: @"(仅内存)");
+    }
+}

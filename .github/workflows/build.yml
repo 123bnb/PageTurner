@@ -83,7 +83,7 @@ jobs:
         run: |
           SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
           mkdir -p out
-          # dylib 目标源文件列表 + 共享编译 flags 全部从 build/sources.mk 单一真源读取。
+          # v1.0.71：dylib 目标源文件列表 + 共享编译 flags 全部从 build/sources.mk 单一真源读取。
           # 此前此处手拼「SHARED_SRCS + PTOverlayPage.m + dylib 薄壳」，与根 Makefile 两处维护。
           SRCS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-dylib-sources)
           SHARED_CFLAGS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-cflags)

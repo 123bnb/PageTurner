@@ -1,5 +1,5 @@
 // ============================================================
-// Tweak.m —— PageTurner v1.0.57（roothide / deb 薄壳入口）
+// Tweak.m —— PageTurner（roothide / deb 薄壳入口）
 //
 // 统一工程：运行端引擎在 common/PTEngine.m（roothide 与 dylib 共用同一份）。
 // 本文件只负责 roothide 特有部分，绝不重复引擎逻辑：
@@ -99,8 +99,10 @@ static void PTInit() {
         // 还有两点：① 总开关关闭时整体停用，也不该再留日志；
         //         ② 调试日志总开关关闭时 PTDylibLog 会直接返回，任何 App 都不会建文件。
         BOOL fileLog = masterEnabled && [enabledApps containsObject:bundleID];
-        PTSetFileLogEnabled(fileLog);
-        if (fileLog) PTSetLogPath(PTLogPathFor(bundleID));
+        // v1.0.71：PTSetFileLogEnabled/PTSetLogPath 下移至下方 else 分支再调用——
+        // 本构造函数在「设置」进程也会执行（注入镜像），若在此处调用，一旦排在设置页 bundle
+        // 构造函数之后，就会用 PTSetFileLogEnabled(NO) 覆盖 RootListController 注入的共享
+        // 日志配置（见 PTPrefsEngineInit），导致设置页日志文件静默失效。
 
         PTDylibLog(@"==================================================");
         PTDylibLog(@"%@ 已注入 %@ (pid=%d) isPrefs=%d 写文件=%@", PT_VERSION_STRING,
@@ -114,6 +116,9 @@ static void PTInit() {
             // 学习收集由设置页 bundle 负责；本进程旁路（不装 hook，也不写日志文件，见上方 fileLog 规则）
             PTDylibLog(@"Preferences 进程旁路：学习收集由设置页 bundle 负责");
         } else {
+            // v1.0.71：文件日志总开关 + 路径只在本分支设置（Preferences 进程不碰，见上方说明）
+            PTSetFileLogEnabled(fileLog);
+            if (fileLog) PTSetLogPath(PTLogPathFor(bundleID));
             PTSetInterceptEnabled(intercept);
             if (intercept) {
                 IMP origAdd = NULL, origSend = NULL;

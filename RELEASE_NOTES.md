@@ -1,3 +1,79 @@
+# PageTurner v1.0.71
+
+> 引擎核心抽取 `PTEngineCore`（deb / dylib / Preferences 三目标链接）+ 版本横幅宏化 + 构建配置三目标化。1.0.70 → 1.0.71。设置页删除 **~490 行**重复实现（3028 → 2538 行），修复 4 处已漂移 bug；**用户可感知的变化集中在设置页「测试本方案」测试区**（与运行端行为对齐，详见文末「行为变化」）。
+
+## ♻️ 改动
+
+### 1. 版本号宏化：编译期横幅单一真源
+- 新增 `common/PTVersion.h`（**`.gitignore` 生成物，勿手改/勿提交**）：`#define PT_VERSION_STRING @"1.0.71"`，由 `scripts/gen_ptversion.sh` 从 `Makefile` 的 `PACKAGE_VERSION` 自动生成。
+- `Makefile` 新增 `before-all::` 钩子：任何 make 调用（含 `make package`）前幂等生成头文件；CI 在 Checkout 后直接调 `scripts/gen_ptversion.sh`——巨魔 dylib 走裸 clang、不过 make 钩子，编译前头文件必须已在。
+- 三处源码硬编码横幅统一改为 `PT_VERSION_STRING`。**此前三处版本号互不相同且全部落后于实际版本**：`Tweak.m` 写死 v1.0.66、`PTDylibMain.m` 写死 v1.0.65、`PTDylibUI.m` 写死 v1.0.60。
+- `scripts/check_version.sh` 升级为「**四处一致**」校验（control / Info.plist / Makefile / PTVersion.h），并新增**源码层硬编码横幅扫描**——任何 `.m` 里出现 `@"PageTurner...vX.Y.Z"` 字面量即 CI 失败，横幅漂移从此不可能再发生。
+- `scripts/sync_version.sh` 将 PTVersion.h 的生成委托给 `gen_ptversion.sh`（单一实现，避免两处漂移）。
+
+### 2. 构建配置三目标化：`build/sources.mk` 升级
+- 从「两份共享列表」（v1.0.70 的 `SHARED_SOURCES`/`SHARED_CFLAGS`）升级为**按使用者分组的文件 → 目标组合**模型：
+  `PTSRC_KIF` / `PTSRC_ENGINE` / `PTSRC_OVERLAY` / `PTSRC_DEB` / `PTSRC_DYLIB` / `PTSRC_PREFS` 六组，相组成 `PTSRC_ALL_DEB` / `PTSRC_ALL_DYLIB` / `PTSRC_ALL_PREFS` 三个目标组合。
+- **`Preferences/Makefile` 首次纳入单一真源**（`PTROOT := ..` + `include`）：此前设置页是**第三处手抄**文件列表与 flags，且已漂移——缺 `-fobjc-abi-version=2`、缺仓库根 `-I`，与 deb / dylib 的 flags 不一致。
+- CI 新增「**源码覆盖审计**」：`git ls-files '*.m'` 与 `print-all-sources` 严格对账，**漏登记一个 `.m` 即构建失败**——根治「新增文件只改一处、另一个 target 静默少编译」的隐患（最坏不是链接报错，而是丢功能）。
+- dylib 构建改从 `print-dylib-sources` 读取（原来手拼「共享 + PTOverlayPage + dylib 薄壳」）。
+
+### 3. 引擎核心抽取：`PTEngineCore`（设置页 −490 行重复实现）
+- 新增 `common/PTEngineCore.{h,m}`（~1278 行）：**配置读写 / jbroot 探测 / IOKit 特征匹配 / 学习样本 / 测试回放 / 连滑状态机 / 动作执行 / 日志** + 会话/执行态全局。三个目标（deb / dylib / Preferences）**全部链接**。
+- `common/PTEngine.{h,m}` 瘦身为**外壳薄壳**（hook 装配 / 运行拦截会话 / 调试可视化 / 录制 / 双指菜单，仅 deb + dylib 链），**1702 → 559 行**。
+- `Preferences/RootListController.m` 删除 7 份常量副本、配置读写副本、IOKit 副本、测试全家、数学四件等**全部重复实现**，改调 Core  API：**3028 → 2538 行**。
+- 跨层依赖三种解法：
+  - **弱引用**：`PTDebugDestroyOverlay` 用 `__attribute__((weak_import))`——Preferences 只链 Core 时为 NULL，调用前判空；
+  - **写入器钩子**：`PTSetCfgWriter(PTWrite)`——设置进程双写 jbroot + 普通路径，Core 不感知外壳差异；
+  - **函数抽取**：`PTChainHandleHit` 从 `PTHandlePagerEvent` 抽出——测试页与运行端**共用同一套连滑状态机**。
+- 双镜像隔离：Preferences 进程中「注入的 dylib（Tweak.m + Core）」与「PreferenceLoader bundle（RootListController + Core）」各持一份 Core 静态状态，只通过配置文件通信。
+
+### 4. 修复 4 处已漂移 bug / 隐患
+- **设置页日志文件静默失效（真 bug）**：`Tweak.m` 的 `PTInit` 构造函数在 Preferences 进程也会跑，且**晚于** bundle 的 `PTPrefsEngineInit`——原来它在构造函数里无条件 `PTSetFileLogEnabled(fileLog)`，会把设置页注入的共享日志配置覆盖成 NO。修复：fileLog 设置移入「非 Preferences」分支，Preferences 进程只打旁路日志、不碰共享日志配置。
+- **采集窗口不一致**：设置页 SImpAddEvent 硬编码 `0.05`，运行端为 `kCollectWindowSec = 0.30`——同一按键在两侧采样窗口差 6 倍。统一为 Core 宏。
+- **常量两份命名漂移**：设置页旧名 `kDirTol` vs 引擎 `kDirTolerance`（及 kLearnMin/kLearnMax/kConverge 等 7 份副本）——统一为 Core 宏；`kMaxLearnedSenders` 必须为宏（C 中 `static const int` 做数组尺寸会退化成 VLA）。
+- **dylib 测试页退场漏清**：旧实现只清 3 个状态，漏清方向线 / P 标记 / 尾巴淡出令牌——改调 Core 的 `PTTestReset()`（多清 `sTestLine`/`sTestP`/`sTestTrail` 并作废尾巴令牌）。
+- 另补齐一处「调用早于定义」缺前向声明（`PTTestRunAction` → `PTFakeRecSwipeAsync`）。
+
+## ⚠️ 行为变化（设置页测试区，属预期修复）
+
+> 以下变化**只影响设置页「测试本方案」与调试日志的呈现**，运行端（deb 注入 / 巨魔 dylib）行为不变。原因是设置页此前的测试/日志是**另一套简化实现**，与运行端早已漂移；本次统一到 Core 后两者严格一致——「测试即所见」正是本项目的设计约定。
+
+1. **测试区与运行端完全同行为**：连滑蓄力实时倒数（`连滑 N/5`）、升档（`⚡连滑 ×N`）、刹停、防抖、执行中放行——此前设置页测试区不走连滑状态机，这些一律不生效。
+2. **采集窗口 0.05s → 0.30s**：设置页学习采集的采样窗口与运行端对齐（`kCollectWindowSec`）。
+3. **设置页日志行首时间格式**：由「年月日 时分秒」统一为引擎侧「时分秒.毫秒」——设置页日志查看器与 App 运行日志现在同格式。
+4. **dylib 测试页退场更干净**：退场新增清理方向线 / P 标记 / 尾巴（旧实现漏清，会留下残影）。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+|------|------|
+| `common/PTEngineCore.h` / `common/PTEngineCore.m`（新增） | 引擎核心：配置/jbroot/IOKit/匹配/样本/测试回放/连滑/动作执行/日志 + 会话执行态全局；三目标全链 |
+| `common/PTEngine.h` / `common/PTEngine.m` | 删全部 Core 内容，瘦身为外壳薄壳（1702 → 559 行）；保留 hook 装配/会话/可视化/录制/菜单 |
+| `Preferences/RootListController.m` | 删 ~490 行重复实现（3028 → 2538 行）改调 Core；新增 `PTPrefsEngineInit` 构造函数（cfg 路径/写入器/日志/Core 就绪） |
+| `Tweak.m` | 横幅改 `PT_VERSION_STRING`；fileLog 设置移入非 Preferences 分支（修设置页日志静默失效） |
+| `targets/dylib/PTDylibUI.m` | 删 7 份常量副本；横幅改宏；测试页退场改调 `PTTestReset()` |
+| `targets/dylib/PTDylibMain.m` | 横幅改 `PT_VERSION_STRING`；删入口注释里写死的版本号 |
+| `build/sources.mk` | 三目标分组模型 + PTROOT + print-* 目标；新增 `PTSRC_CORE` 并纳入三个目标组合 |
+| `Makefile` | `before-all::` 生成 PTVersion.h；`PageTurner_FILES` 改 `$(PTSRC_ALL_DEB)`；架构注释三目标化；版本 1.0.70 → 1.0.71 |
+| `Preferences/Makefile` | 源文件/flags 改从仓库根 `build/sources.mk` 读取（纳入单一真源） |
+| `.github/workflows/build.yml` | Checkout 后生成 PTVersion.h；新增「源码覆盖审计」步；dylib 构建读 `print-dylib-sources` |
+| `scripts/gen_ptversion.sh`（新增） | 从 PACKAGE_VERSION 生成 PTVersion.h（CI / before-all 共用） |
+| `scripts/check_version.sh` | 四处一致 + 源码层硬编码横幅扫描 |
+| `scripts/sync_version.sh` | PTVersion.h 生成委托 `gen_ptversion.sh` |
+| `.gitignore`（新增） | 收录生成物 `common/PTVersion.h` 等 |
+| `control` / `Preferences/Resources/Info.plist` | 版本号 1.0.70 → 1.0.71 |
+| `README.md` | 版本历史补 v1.0.71 |
+
+## 📦 下载与安装
+
+| 形态 | 文件 | 用法 |
+|------|------|------|
+| 越狱（Dopamine / roothide） | `PageTurner-1.0.71-roothide.deb` | 安装后**注销**，系统设置 → PageTurner |
+| 巨魔（TrollStore / TrollFools） | `PageTurnerDylib_v1.0.71.dylib` | 注入目标 App，**注入即生效**，App 内**双指长按**（两指同时按住 0.5 秒）弹菜单 |
+
+---
+
 # PageTurner v1.0.70
 
 > 双形态治理（构建配置单一真源 + 两道 CI 安全网 + 删掉恒 NO 的死开关）。1.0.69 → 1.0.70，**零功能改动、零引擎行为改动**，用户无感知。

@@ -173,12 +173,13 @@ PageTurner/
 | [v1.0.57](https://github.com/123bnb/PageTurner/releases/tag/v1.0.57) | 统一代码：单仓库双 target，一次构建同时产出越狱 .deb 与巨魔 .dylib；删除失效的注入探针 |
 | [v1.0.66](https://github.com/123bnb/PageTurner/releases/tag/v1.0.66) | 连滑 1:1 复刻 DVT 1.0.22：满 5 次进连滑、自动续滑、1→2→3 档变速、异方案刹停；v1.0.67 起 pill 绿底白字（深色模式自适应）|
 
-## 版本历史（全部 71 个版本）
+## 版本历史（全部 72 个版本）
 
 > 每个版本点版本号可看该版完整的「新增 / 修复 / 删除 / 改动」说明。
 
 | 版本 | 这一版做了什么 |
 | --- | --- |
+| [v1.0.71](https://github.com/123bnb/PageTurner/releases/tag/v1.0.71) | 引擎核心抽取 PTEngineCore 三目标（deb/dylib/Preferences）链接、设置页删 ~490 行重复实现、版本横幅宏化 PT_VERSION_STRING、构建配置三目标化+CI 源码覆盖审计；设置页测试区与运行端行为对齐（详见发布说明「行为变化」） |
 | [v1.0.70](https://github.com/123bnb/PageTurner/releases/tag/v1.0.70) | 双形态构建治理：共享源文件+flags 抽单一真源、CI 新增 dylib 未定义符号审计与 arm64e 响亮校验、删除恒 NO 死开关；零功能改动 |
 | [v1.0.69](https://github.com/123bnb/PageTurner/releases/tag/v1.0.69) | 版本号机制打磨：Info.plist 按 key 锚定同步 + 早退守卫 + 打包后还原工作树；根治三处手填漂移，零功能改动 |
 | [v1.0.68](https://github.com/123bnb/PageTurner/releases/tag/v1.0.68) | 版本号单一真源（Makefile PACKAGE_VERSION 派生 control/Info.plist）+ CI 构建前一致性校验，根治版本漂移；零功能改动 |
