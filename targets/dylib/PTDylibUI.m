@@ -27,7 +27,10 @@
 #import "PTVersion.h"   // 版本横幅宏（scripts/gen_ptversion.sh 生成，勿手改）
 #import "PTOverlayPage.h"   // v1.0.62：点击/双击/滑动/滑动(手动) 统一模板（与 deb 共用）
 #import "PTUICommon.h"      // v1.0.77：共享 UI 伞标题（导航/日志源/共享页助手/per-target 函数声明）
+#import "PTUIDebounceVC.h"  // v1.0.77：菜单 → 防抖页
+#import "PTUIPlansVC.h"     // v1.0.77：菜单 → 方案列表页
 #import "PTUIPlanVC.h"      // v1.0.77：覆盖页关闭后按 pid 刷新栈里的方案页
+#import "PTUIDebugLogVC.h"  // v1.0.77：菜单 → 调试日志列表页
 
 // v1.0.77：配置读写统一走 Core 的 UI 入口——
 //   · 读：PTUIReadCfg（含 pid 惰性补发；旧本文件 PTUIRead 与 Core 逐字重复，已删）
