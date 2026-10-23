@@ -173,12 +173,13 @@ PageTurner/
 | [v1.0.57](https://github.com/123bnb/PageTurner/releases/tag/v1.0.57) | 统一代码：单仓库双 target，一次构建同时产出越狱 .deb 与巨魔 .dylib；删除失效的注入探针 |
 | [v1.0.66](https://github.com/123bnb/PageTurner/releases/tag/v1.0.66) | 连滑 1:1 复刻 DVT 1.0.22：满 5 次进连滑、自动续滑、1→2→3 档变速、异方案刹停；v1.0.67 起 pill 绿底白字（深色模式自适应）|
 
-## 版本历史（全部 76 个版本）
+## 版本历史（全部 77 个版本）
 
 > 每个版本点版本号可看该版完整的「新增 / 修复 / 删除 / 改动」说明。
 
 | 版本 | 这一版做了什么 |
 | --- | --- |
+| [v1.0.76](https://github.com/123bnb/PageTurner/releases/tag/v1.0.76) | 修复「滑动中被未识别动作打断 → 粘手卡死」：假触摸池分配不再把在飞触摸（Stationary）当空闲槽位（根因——打断时重放抢槽致原触摸永不受 Ended、App 内粘手、后续手势重心降速至无法滑动、点击点不中）；被替换的在飞触摸先补发 Ended 实现升级后自愈；gIsInjecting 改引用计数（修打断后永久卡 YES 导致双指菜单失灵）；打断路径动作链双回调修复 |
 | [v1.0.75](https://github.com/123bnb/PageTurner/releases/tag/v1.0.75) | 巨魔 dylib UI 完整 pid 化（同名方案 bug 最后一环）：读配置即惰性补发 pid（与设置页/引擎三端同规则），方案列表/方案页/特征/学习/动作参数五页全量按 pid 定位，删除与改名不再误伤同名者，新建方案带 UUID pid |
 | [v1.0.74](https://github.com/123bnb/PageTurner/releases/tag/v1.0.74) | 引擎执行层方案 pid 贯通（修复同名方案 bug 最后一环）：gPlans 改 pid 索引、匹配/连滑/执行全链路按 pid、旧配置三端一致规则惰性补发并落盘、执行层 pid 失联强制刷新兜底；设置页 UI 层 v1.0.66-fix 已修，巨魔 UI 层见 v1.0.75 |
 | [v1.0.73](https://github.com/123bnb/PageTurner/releases/tag/v1.0.73) | 测试页记录区连滑可见化（续滑进度聚合一行原地刷新，不刷屏；进入连滑/升档/刹停留痕）；未命中按键统一为「退出连滑 + 立刻停在飞动作」（PTChainMiss 两端共用，旧测试页连滑继续）；修未命中重放与在飞回放互相踩踏（gIsInjecting 抢写、touchId 撞车） |

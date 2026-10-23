@@ -1,3 +1,68 @@
+# PageTurner v1.0.76
+
+> 修复「滑动中被未识别动作打断 → 粘手卡死」bug：滑行途中按到没录入方案的按键（未命中）时，在飞快动作有概率**永久卡在半路上**（轨迹不消失），之后再按同一方案**滑动速度逐次减半直至无法滑动**，其他方案的点击也**有轨迹但点不中**。根因是假触摸池的槽位分配把「在飞」触摸当成了空闲槽位。
+
+## ♻️ 改动
+
+### 1. 根因：假触摸池槽位分配把在飞触摸当空闲（`ptftouch/PTFakeMetaTouch.m`）
+
+故障链（未识别按键 B 打断在飞滑动 A 时触发）：
+
+1. A 滑行中，其假触摸固定在 `touchAry[0]`（pointId 1），每次注入后被置为
+   `UITouchPhaseStationary`（`fakeTouchId` 尾部，注入间隙的常态相位）。
+2. B 未命中 → `PTChainMiss` 停动作 + `PTReplayTrailAsync` 把 B 的原始轨迹重放给 App，
+   重放需要动态分配 pointId（`fakeTouchId:0` → `getAvailablePointId`）。
+3. **旧代码的 `getAvailablePointId` 把 `Ended` **或** `Stationary` 的槽位都当空闲**——
+   而 Stationary 恰恰是 A 的在飞相位 → 重放有 **1/50 概率**抢走 0 号槽，
+   `fakeTouchId:` 的 Began 分支把 A 的 `UITouch` 对象**就地替换**成新对象。
+4. A 的令牌失配回调（≤16ms 后）在 0 号槽发 Ended——**终结的是重放的触摸，不是 A 的**；
+   A 的原触摸对象从此**永远收不到 Ended** → App 里粘住一根手指（卡在半路上、轨迹不消失）。
+5. 之后每次新手势都往这堆粘住的手指上再叠一根：多指手势按**重心**仲裁时
+   有效速度 ≈ 1/N（第一次重试 ≈ 1/2，逐次恶化直至不动），点击落在缠乱的手势状态里点不中。
+
+**修复**：`getAvailablePointId` 只把 `phase == UITouchPhaseEnded`（真正空闲）的槽位
+纳入候选。在飞触摸（Stationary）从此不可能被抢，打断路径不再泄漏手指。
+
+### 2. 自愈：被替换的在飞触摸先补发 Ended（`ptftouch/PTFakeMetaTouch.m`）
+
+`fakeTouchId:` 的 Began 分支替换槽位前，若发现旧触摸仍是 Stationary（异常泄漏残留），
+**先给它补发一个 Ended** 再替换——App 里已粘住的手指随升级后第一次注入自动清掉，
+无需杀 App 重启。正常序列里 Begin 前的旧触摸必然已是 Ended，本分支只对泄漏残留生效。
+
+### 3. `gIsInjecting` 改引用计数（`common/PTEngineCore.m` / `common/PTEngine.m`）
+
+B 打断 A 时「重放」与「在飞回放」是两条并发时间线（重放在旧链令牌失差之前就起来了）。
+旧的布尔直接置位互相踩踏：重放 save 的 `prevInjecting=YES` 被旧链中止时硬置 `NO` 覆盖，
+重放结束又 `restore YES` → **`gIsInjecting` 永久卡 YES**（双指长按菜单检测从此失灵、
+hook 恒走注入分支）。
+
+改为 `PTInjectBegin()` / `PTInjectEnd()` 引用计数成对进出，归零才清零；
+`gIsInjecting` 仍是对外面孔，hook / 设置页读取方零改动。
+
+### 4. 打断路径动作链双回调（`common/PTEngineCore.m`）
+
+`PTFakeSwipeAsync` 三处令牌失配分支（still / step / liftMs）写成
+`abortEnd(); if (done) done();`——而 `abortEnd` 内部已回调 `done`，
+一次打断让动作链**双跑一步**。删掉外层冗余调用，`abortEnd` 作为单一回调出口。
+
+## ⚠️ 行为变化（属预期修复）
+
+1. **滑动途中按未录入按键不再粘手**：在飞快动作被干净中止（最后位置抬手），
+   不留下收不到 Ended 的幽灵手指。
+2. **打断后重按原方案恢复全速**（旧版逐次减半直至无法滑动）。
+3. **打断后其他方案的点击恢复正常**（旧版有轨迹但点不中）。
+4. 已中招的设备升级后**无需杀 App**：第一次注入即自愈清掉粘住的手指。
+5. B 打断 A 后双指长按菜单恢复可用（旧版 `gIsInjecting` 卡 YES 后失灵）。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `ptftouch/PTFakeMetaTouch.m` | `getAvailablePointId` 只认 Ended 为空闲（根因修复）；Began 分支替换 Stationary 槽位前给旧触摸补发 Ended（自愈） |
+| `common/PTEngineCore.m` | 新增 `PTInjectBegin/PTInjectEnd` 引用计数；`PTExecutePlanRun` 进出改计数；`PTFakeSwipeAsync` 三处令牌失差删冗余双回调 |
+| `common/PTEngineCore.h` | 声明 `PTInjectBegin/PTInjectEnd` |
+| `common/PTEngine.m` | `PTReplayTrailAsync` 改计数进出（替 save/restore）；修正 `getAvailablePointId` 语义注释 |
+
 # PageTurner v1.0.75
 
 > 巨魔 dylib UI 完整 pid 化——「同名方案」bug 的最后一环。v1.0.74 已把 pid 贯通到引擎执行层（gPlans 按 pid 索引），但巨魔 dylib 的设置 UI 仍全文件按 **name** 匹配方案：两个方案同名时，**删除一个把两个都删掉**、**改名把两个都改名**、**加动作/加特征写进另一个同名方案**——与设置页 v1.0.66-fix 修复前同款 bug。本版把巨魔 UI 的方案定位全量改到 pid（引擎已就绪，本版是纯 UI 层改动）。
