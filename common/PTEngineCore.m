@@ -314,6 +314,16 @@ BOOL gInFakeTouch = NO;
 int gExecToken = 0;
 static double gLastExec = 0;
 
+// v1.0.76：注入态改引用计数。「方案回放」与「未命中轨迹重放」可并发——未识别按键
+// 打断在飞快动作时，重放在旧链中止之前就起来了（PTChainMiss → PTReplayTrailAsync
+// 与在飞链的令牌失差是两条时间线）。旧的双 BOOL 直接置位互相踩踏：
+//   重放 save 的 prevInjecting=YES → 旧链中止时硬置 NO → 重放结束又 restore YES
+//   → gIsInjecting 永久卡 YES（双指长按菜单检测死亡、hook 恒走注入分支）。
+// 计数进出成对，归零才真正清零；读取方仍看 gIsInjecting 本身，接口不变。
+static int gInjectDepth = 0;
+void PTInjectBegin(void) { gInjectDepth++; gIsInjecting = YES; }
+void PTInjectEnd(void)   { if (gInjectDepth > 0) gInjectDepth--; if (gInjectDepth == 0) gIsInjecting = NO; }
+
 void PTDylibLoadConfig(BOOL force) {
     // v1.0.67：连滑生命周期——进程内注册一次退后台通知，断连滑+中断在飞回放（DVT v1.0.22 对应行为）
     static dispatch_once_t once;
@@ -1008,7 +1018,8 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
         __block int n = MAX(ms, 0) / 16;
         __block void (^still)(void);
         still = ^(void) {
-            if (token != gExecToken) { abortEnd(); if (done) done(); return; }
+            // v1.0.76：abortEnd 内部已回调 done，旧代码外层再调一次 = 动作链双跑
+            if (token != gExecToken) { abortEnd(); return; }
             if (n <= 0) { doEnd(); return; }
             n--;
             lastP = pos;
@@ -1022,17 +1033,19 @@ static void PTFakeSwipeAsync(CGPoint from, CGPoint to, double durationMs, int ho
     __block CFAbsoluteTime t0;
     __block void (^step)(void);
     step = ^(void) {
-        if (token != gExecToken) { abortEnd(); if (done) done(); return; }
+        // v1.0.76：abortEnd 内部已回调 done，旧代码外层再调一次 = 动作链双跑
+        if (token != gExecToken) { abortEnd(); return; }
         double t = MIN((CFAbsoluteTimeGetCurrent() - t0) / durSec, 1.0);
         if (t >= 1.0) {
             if (noInertia) {
                 stillAt(to, MAX(liftMs, 300));
             } else {
                 if (liftMs > 0) {
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
-                        if (token != gExecToken) { abortEnd(); if (done) done(); return; }
-                        doEnd();
-                    });
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(liftMs * NSEC_PER_SEC / 1000)), dispatch_get_main_queue(), ^{
+                            // v1.0.76：abortEnd 内部已回调 done，旧代码外层再调一次 = 动作链双跑
+                            if (token != gExecToken) { abortEnd(); return; }
+                            doEnd();
+                        });
                 } else {
                     doEnd();
                 }
@@ -1306,19 +1319,19 @@ static void PTExecutePlanRun(NSString *planId) {
     if (!actions.count) { PTDylibLog(@"[执行] %@ 无动作，跳过", pname); return; }
     gExecToken++;   // 全新启动递增令牌（刹停/异常中止时令在飞手势令牌失配 → 抬手收尾）
     int token = gExecToken;
-    gIsInjecting = YES;
+    PTInjectBegin();   // v1.0.76：引用计数进入（旧为 gIsInjecting = YES）
     gExecRunning = YES;
     PTDylibLog(@"[执行] 命中 %@，开始动作序列（%lu 条，档位 %ld）", pname, (unsigned long)actions.count, (long)gSwipeBurstRate);
     __block int idx = 0;
     __block void (^runNext)(void);
     runNext = ^(void) {
         if (token != gExecToken) {   // 令牌失配（刹停/异常中止）→ 不再续播，复位在飞标记
-            gIsInjecting = NO;
+            PTInjectEnd();   // v1.0.76：引用计数退出（旧为 gIsInjecting = NO）
             gExecRunning = NO;
             return;
         }
         if (idx >= (int)actions.count) {
-            gIsInjecting = NO;
+            PTInjectEnd();   // v1.0.76：引用计数退出（旧为 gIsInjecting = NO）
             gExecRunning = NO;
             PTDylibLog(@"[执行] %@ 序列完成", pname);
             // v1.0.67：DVT 式自动续滑——连滑中且未刹停 → 立即重开同方案（无缝重复，无需再按键）

@@ -296,18 +296,18 @@ static void PTReplayTrailAsync(void) {
     NSMutableArray *mids = [NSMutableArray arrayWithCapacity:n];
     for (NSUInteger i = 1; i < n - 1; i++) [mids addObject:pts[i]];
 
-    // v1.0.73：保存旧值——重放与"在飞的方案回放"会并发（执行中按到没录入的键即走到这里），
-    // 旧实现结束时硬置 NO，会把仍在跑的方案回放的注入标记提前清掉。
-    BOOL prevInjecting = gIsInjecting;
-    gIsInjecting = YES;
+    // v1.0.76：引用计数进出（旧为 save/restore prevInjecting——与在飞方案回放中止时的
+    // 硬置 NO 互相踩踏：重放结束时会把旧链的 YES 恢复回来 → gIsInjecting 永久卡住）。
+    PTInjectBegin();
     gInFakeTouch = YES;
     // v1.0.73：动态分配 pointId（旧为硬编码 1）。方案回放（PTRunAction）也固定占用 touchAry[0]，
     // 两个序列共用一个 UITouch 会互相串台 → 滑动诡异中断 / 手势错乱 / 偶发不抬手。
-    // getAvailablePointId 只把 phase==Ended/Stationary 的槽位当作空闲，故天然避开忙碌的 0 号槽。
+    // v1.0.76：getAvailablePointId 只把 phase==Ended 的槽位当作空闲——Stationary 正是在飞
+    // 触摸每次注入后的相位，旧代码把它算空闲才会真·抢到忙碌的 0 号槽（粘手 bug 根因）。
     NSInteger pid = [PTFakeMetaTouch fakeTouchId:0 AtPoint:from withTouchPhase:UITouchPhaseBegan];
     gInFakeTouch = NO;
     if (pid <= 0) {   // 极端：pointId 全部被占用 → 放弃重放，恢复原状态（不留下脏标记）
-        gIsInjecting = prevInjecting;
+        PTInjectEnd();
         return;
     }
     // v1.0.18：按屏幕刷新节奏（~60Hz，16.6ms/点）逐点推进，密度接近真实手指，
@@ -320,7 +320,7 @@ static void PTReplayTrailAsync(void) {
             gInFakeTouch = YES;
             [PTFakeMetaTouch fakeTouchId:pid AtPoint:to withTouchPhase:UITouchPhaseEnded];
             gInFakeTouch = NO;
-            gIsInjecting = prevInjecting;   // v1.0.73：恢复而非硬置 NO
+            PTInjectEnd();   // v1.0.76：引用计数退出（旧为 gIsInjecting = prevInjecting 恢复）
             PTDylibLog(@"[重放] 未命中：原始轨迹已重放给 App（%lu 点）", (unsigned long)mids.count);
             return;
         }

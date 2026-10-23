@@ -97,6 +97,11 @@ extern BOOL gInFakeTouch;      // 假触摸注入中（hook 放行判据）
 extern int gExecToken;         // 执行令牌（失配=被打断，抬手收尾）
 extern BOOL gDebugDots;        // 调试可视化开关（配置项）
 
+// v1.0.76：注入态引用计数进出（方案回放与未命中重放可并发，成对调用）。
+// gIsInjecting 仍是对外面孔——计数归零才清零，读取方无需改。
+extern void PTInjectBegin(void);
+extern void PTInjectEnd(void);
+
 // ---------- 工具 ----------
 extern double PTNowC(void);
 extern NSString *PTDirName(double dir);
