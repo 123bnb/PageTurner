@@ -282,12 +282,15 @@ void PTChainReset(void);
 void PTChainMiss(void);
 static void PTChainPill(NSString *msg);
 static void PTChainStopAll(void);
-static void PTChainOnHit(NSString *plan, BOOL viaTest);
-static void PTExecutePlan(NSString *name, BOOL force);
-static void PTExecutePlanRun(NSString *name);
+// v1.0.74：plan → planId（方案 pid）。引擎 gPlans 按 pid 索引，重名方案是两条
+// 独立记录——按 name 走会互相覆盖/串台（详见 PTPlanPid 注释）。
+static void PTChainOnHit(NSString *planId, BOOL viaTest);
+static void PTExecutePlan(NSString *planId, BOOL force);
+static void PTExecutePlanRun(NSString *planId);
 // v1.0.71：测试区 PTTestRunAction 的 recSwipe 分支调用（定义在后方「动作执行」区）
 static void PTFakeRecSwipeAsync(NSArray *pts, int token, double rate, void (^done)(void));
-static NSMutableDictionary *gPlans = nil;      // name -> dict
+// v1.0.74：pid -> dict（旧为 name -> dict：重名方案后写覆盖前一个、改名即失联）
+static NSMutableDictionary *gPlans = nil;
 static BOOL gLearnActive = NO;
 static uint64_t gLearnedSenders[kMaxLearnedSenders];
 static int gLearnedSenderCount = 0;
@@ -297,7 +300,7 @@ static int gLearnedSenderCount = 0;
 static BOOL gChainEnabled = YES;      // 连滑总开关（设置项 chainEnabled；默认开）
 static NSInteger gSwipeBurstCount  = 0;    // 当前窗口内同方案累计命中（含起滑那一次）
 static BOOL      gSwipeBurstActive = NO;   // 是否连滑中
-static NSString *gSwipeBurstPlan   = nil;  // 连滑归属方案（起滑时锁定，连滑只能是该方案）
+static NSString *gSwipeBurstPlan   = nil;  // 连滑归属方案（起滑时锁定，连滑只能是该方案；v1.0.74 起存 pid）
 static NSInteger gSwipeBurstRate   = 1;    // 连滑倍速档位 1/2/3（DVT v1.0.22：档位不记忆，进/退/刹停复位 1）
 static double    gSwipeBurstLastAt = 0;    // v1.0.72：最近一次同方案命中时间（蓄力时间窗判定；刹停/生命周期复位清零）
 static BOOL      gSwipeStopRequested = NO; // 刹停请求（异方案命中置位，中断在飞回放）
@@ -339,9 +342,39 @@ void PTDylibLoadConfig(BOOL force) {
     if (prevChainEnabled && !gChainEnabled) PTChainReset();
     gPlans = [NSMutableDictionary dictionary];
     gLearnedSenderCount = 0;
-    for (NSDictionary *pl in gConfig[@"plans"] ?: @[]) {
-        if (!pl[@"name"]) continue;
-        gPlans[pl[@"name"]] = pl;
+    // v1.0.74：pid 贯通——gPlans 由 name 索引改 pid 索引。旧配置无 pid → 惰性补发
+    // 「name#下标」并落盘（规则与设置页 v1.0.66-fix / dylib UI v1.0.75 完全一致，
+    // 三端对同一份配置补出同一批 pid）。写盘只发生一次：落盘后下次读取即带 pid，
+    // needPid=NO 不再写，mtime 不会因此反复变化。
+    NSArray *plansArr = gConfig[@"plans"] ?: @[];
+    BOOL needPid = NO;
+    for (NSUInteger i = 0; i < plansArr.count; i++) {
+        NSDictionary *pl = plansArr[i];
+        if (![pl isKindOfClass:[NSDictionary class]] || !pl[@"name"]) continue;
+        id pidField = pl[@"pid"];
+        if (![pidField isKindOfClass:[NSString class]] || !pidField.length) { needPid = YES; break; }
+    }
+    if (needPid) {
+        NSMutableArray *out = [NSMutableArray array];
+        for (NSUInteger i = 0; i < plansArr.count; i++) {
+            id pl = plansArr[i];
+            if ([pl isKindOfClass:[NSDictionary class]] && pl[@"name"]) {
+                NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:pl];
+                id pf = np[@"pid"];
+                if (![pf isKindOfClass:[NSString class]] || !pf.length) np[@"pid"] = PTPlanPid(np, (NSInteger)i);
+                pl = np;
+            }
+            [out addObject:pl];
+        }
+        plansArr = out;
+        gConfig[@"plans"] = out;
+        PTWriteCfg(gConfig);   // 落盘唯一 pid（三端下次读即带 pid）
+        PTDylibLog(@"[配置] 方案 pid 惰性补发完成（%lu 条）", (unsigned long)out.count);
+    }
+    for (NSUInteger i = 0; i < plansArr.count; i++) {
+        NSDictionary *pl = plansArr[i];
+        if (![pl isKindOfClass:[NSDictionary class]] || !pl[@"name"]) continue;
+        gPlans[PTPlanPid(pl, (NSInteger)i)] = pl;
         NSArray *fts = pl[@"features"] ?: (pl[@"feature"] ? @[pl[@"feature"]] : @[]);
         for (NSDictionary *ft in fts) {
             if (ft[@"sender"]) {
@@ -424,6 +457,27 @@ void PTSampleAppend(int phase, double dir, double dist, int tapDx) {
 // ============================================================
 // 工具（UI 层复用）
 // ============================================================
+
+// v1.0.74：方案唯一身份 pid（头文件注释详述背景）。三端补发规则一致：
+//   设置页 PTRead（v1.0.66-fix）/ 引擎 PTDylibLoadConfig / dylib UI（v1.0.75）
+// 对同一份配置补出同一批 pid → 跨进程、跨版本不会漂移。
+NSString *PTPlanPid(NSDictionary *p, NSInteger idx) {
+    NSString *pid = p[@"pid"];
+    if ([pid isKindOfClass:[NSString class]] && pid.length) return pid;
+    NSString *nm = p[@"name"];
+    if (![nm isKindOfClass:[NSString class]] || !nm.length) nm = @"plan";
+    return [NSString stringWithFormat:@"%@#%ld", nm, (long)idx];
+}
+
+// v1.0.74：pid → 显示名（日志 / pill / 记录区）。gPlans 改 pid 索引后，原本直接
+// 格式化 name 的位置全部经本函数取回；查不到返回 pid 本身（永不 nil，避免 %@ 崩）。
+NSString *PTPlanNameForId(NSString *planId) {
+    if (!planId) return @"（无方案）";
+    NSDictionary *p = gPlans[planId];
+    NSString *n = p[@"name"];
+    return ([n isKindOfClass:[NSString class]] && n.length) ? n : planId;
+}
+
 NSArray *PTFeaturesOfPlan(NSDictionary *p) {
     if (p[@"features"]) return p[@"features"];
     if (p[@"feature"]) return @[p[@"feature"]];
@@ -502,11 +556,13 @@ BOOL PTStable(NSArray *mem, NSString *sender) {
 }
 
 // 匹配：sender + 相位 + 方向±15° + 位移区间 → 唯一方案（运行端；测试端用 PTTestMatchFeature）
+// v1.0.74：返回值由 name 改为方案 pid——gPlans 按 pid 索引（重名方案是两条独立记录，
+// 共用一个 name 键会互相覆盖），调用方（PTEngine.m）原样传给 PTChainHandleHit。
 NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
-    NSString *best = nil;
+    NSString *bestId = nil;
     double bestScore = DBL_MAX;
-    for (NSString *name in gPlans) {
-        NSDictionary *p = gPlans[name];
+    for (NSString *pid in gPlans) {
+        NSDictionary *p = gPlans[pid];
         NSArray *fts = p[@"features"] ?: (p[@"feature"] ? @[p[@"feature"]] : @[]);
         for (NSDictionary *ft in fts) {
             if (ft[@"sender"]) {
@@ -534,10 +590,10 @@ NSString *PTMatchPlan(PagerFeature f, uint64_t sender) {
                 }
             }
             double score = d + (f.phase == 1 ? fabs(f.dist - (lo + hi) / 2.0) / 100.0 : 0);
-            if (score < bestScore) { bestScore = score; best = name; }
+            if (score < bestScore) { bestScore = score; bestId = pid; }
         }
     }
-    return best;
+    return bestId;
 }
 
 BOOL PTIsLearnedSender(uint64_t s) {
@@ -682,9 +738,15 @@ void PTTestReset(void) {
 // ============================================================
 // 测试模式（大白屏 + 绿点可视化 + 执行链路验证）
 // ============================================================
+// v1.0.74：返回值由 name 改为方案 pid。本函数刻意读实时配置（不经 gPlans 缓存）——
+// 录完特征立刻测试时 mtime 刷新可能还没发生；pid 用 PTPlanPid 惰性生成（与引擎
+// 补发同规则），执行层 PTExecutePlanRun 对查不到的 pid 有强制刷新兜底（见其注释）。
 static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t sender, int tapDx) {
-    NSString *best = nil; double bestScore = DBL_MAX;
-    for (NSDictionary *p in (PTDylibReadCfg()[@"plans"] ?: @[])) {
+    NSString *bestId = nil; double bestScore = DBL_MAX;
+    NSArray *plans = PTDylibReadCfg()[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < plans.count; i++) {
+        NSDictionary *p = plans[i];
+        if (![p isKindOfClass:[NSDictionary class]]) continue;
         for (NSDictionary *ft in PTFeaturesOfPlan(p)) {
             if (ft[@"sender"]) {
                 unsigned long long s = 0;
@@ -711,10 +773,10 @@ static NSString *PTTestMatchFeature(int phase, double dir, double dist, uint64_t
                 }
             }
             double score = d + (phase == 1 ? fabs(dist - (lo + hi) / 2.0) / 100.0 : 0);
-            if (score < bestScore) { bestScore = score; best = p[@"name"]; }
+            if (score < bestScore) { bestScore = score; bestId = PTPlanPid(p, (NSInteger)i); }
         }
     }
-    return best;
+    return bestId;
 }
 
 static void PTTestTap(CGPoint p, BOOL doubleTap) {
@@ -852,21 +914,31 @@ static void PTTestRunAction(NSDictionary *a, void (^next)(void)) {
 //   · v1.0.71：设置页侧旧版无连滑逻辑（靠抽 PTChainHandleHit 对齐）；
 //   · v1.0.72：蓄力窗口只认"回放中"，测试区执行期按键又被 hook 无条件吞掉（Bug 1），
 //     连滑计数永远停在 1——提示"连滑 1/5"却一次只有一个动作。
-static void PTTestExecPlan(NSString *name) {
-    PTChainOnHit(name, YES);   // viaTest=YES：额外过测试页 0.3s 防抖（sLastTestExec）
+// v1.0.74：入参 name → planId（方案 pid，PTTestMatchFeature 的返回值）。
+static void PTTestExecPlan(NSString *planId) {
+    PTChainOnHit(planId, YES);   // viaTest=YES：额外过测试页 0.3s 防抖（sLastTestExec）
 }
 
 // 测试模式：Ended 结算 → 匹配 → 执行
 void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender, int tapDx) {
-    NSString *plan = PTTestMatchFeature(phase, dir, dist, sender, tapDx);
-    if (plan) {
-        PTDylibLog(@"[测试] 特征匹配 → 方案「%@」", plan);
-        PTTestExecPlan(plan);
-        NSDictionary *pp = nil;
-        for (NSDictionary *p in PTDylibReadCfg()[@"plans"] ?: @[]) if ([p[@"name"] isEqualToString:plan]) { pp = p; break; }
+    NSString *planId = PTTestMatchFeature(phase, dir, dist, sender, tapDx);
+    if (planId) {
+        NSString *pname = PTPlanNameForId(planId);
+        PTDylibLog(@"[测试] 特征匹配 → 方案「%@」", pname);
+        PTTestExecPlan(planId);
+        // v1.0.74：按 pid 数动作条数（旧为按 name——重名时数到的是另一条记录）。
+        // gPlans 查不到再退回实时配置（测试链路读实时 cfg，缓存可能未刷新）。
+        NSDictionary *pp = gPlans[planId];
+        if (!pp) {
+            NSArray *plans = PTDylibReadCfg()[@"plans"] ?: @[];
+            for (NSUInteger i = 0; i < plans.count; i++) {
+                NSDictionary *p = plans[i];
+                if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:planId]) { pp = p; break; }
+            }
+        }
         if ([sTestLogSink respondsToSelector:@selector(appendLog:)]) {
             [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作（sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d）",
-                plan, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0), sender, phase, dir, dist, tapDx]];
+                pname, (unsigned long)(pp[@"actions"] ? [pp[@"actions"] count] : 0), sender, phase, dir, dist, tapDx]];
         }
     } else {
         PTDylibLog(@"[测试] 未匹配：sender=0x%llx phase=%d dir=%.1f dist=%.1f tapDx=%d（特征需先录制）", sender, phase, dir, dist, tapDx);
@@ -1176,7 +1248,8 @@ static void PTChainPill(NSString *msg) {
 
 // 刹停/未命中/关开关：清空连滑链（DVT：异方案/退后台/无轨迹时调用；PageTurner 未命中也兜底清理）
 void PTChainReset(void) {
-    if (gSwipeBurstPlan) PTDylibLog(@"[连滑] 刹停：链「%@」结束（计数 %ld 档位%ld）", gSwipeBurstPlan, (long)gSwipeBurstCount, (long)gSwipeBurstRate);
+    // v1.0.74：gSwipeBurstPlan 存的是 pid，日志显示名经 PTPlanNameForId 取回
+    if (gSwipeBurstPlan) PTDylibLog(@"[连滑] 刹停：链「%@」结束（计数 %ld 档位%ld）", PTPlanNameForId(gSwipeBurstPlan), (long)gSwipeBurstCount, (long)gSwipeBurstRate);
     gSwipeBurstActive = NO;
     gSwipeBurstCount = 0;
     gSwipeBurstRate  = 1;
@@ -1214,15 +1287,24 @@ void PTChainMiss(void) {
 }
 
 // 实际执行方案动作序列（无防抖）。v1.0.67：DVT 式连滑——进连滑后收尾处自动调用本函数实现无缝续滑。
-static void PTExecutePlanRun(NSString *name) {
-    NSDictionary *p = gPlans[name];
+// v1.0.74：入参 name → planId（pid）。gPlans 按 pid 索引；测试链路读实时配置生成的 pid
+// 可能还没进缓存（UI 刚改完配置、mtime 未刷新）→ 查不到时强制刷新一次再查，仍查不到
+// 才放弃（配置被删/被改坏），不留半启动的脏状态。
+static void PTExecutePlanRun(NSString *planId) {
+    NSDictionary *p = gPlans[planId];
+    if (!p) {
+        PTDylibLoadConfig(YES);   // 强制重读（跳过 mtime 判断）+ 补发 pid
+        p = gPlans[planId];
+        if (!p) { PTDylibLog(@"[执行] 方案 %@ 不存在（配置已变更？），放弃本次执行", planId); return; }
+    }
     NSArray *actions = p[@"actions"] ?: @[];
-    if (!actions.count) { PTDylibLog(@"[执行] %@ 无动作，跳过", name); return; }
+    NSString *pname = PTPlanNameForId(planId);
+    if (!actions.count) { PTDylibLog(@"[执行] %@ 无动作，跳过", pname); return; }
     gExecToken++;   // 全新启动递增令牌（刹停/异常中止时令在飞手势令牌失配 → 抬手收尾）
     int token = gExecToken;
     gIsInjecting = YES;
     gExecRunning = YES;
-    PTDylibLog(@"[执行] 命中 %@，开始动作序列（%lu 条，档位 %ld）", name, (unsigned long)actions.count, (long)gSwipeBurstRate);
+    PTDylibLog(@"[执行] 命中 %@，开始动作序列（%lu 条，档位 %ld）", pname, (unsigned long)actions.count, (long)gSwipeBurstRate);
     __block int idx = 0;
     __block void (^runNext)(void);
     runNext = ^(void) {
@@ -1234,17 +1316,17 @@ static void PTExecutePlanRun(NSString *name) {
         if (idx >= (int)actions.count) {
             gIsInjecting = NO;
             gExecRunning = NO;
-            PTDylibLog(@"[执行] %@ 序列完成", name);
+            PTDylibLog(@"[执行] %@ 序列完成", pname);
             // v1.0.67：DVT 式自动续滑——连滑中且未刹停 → 立即重开同方案（无缝重复，无需再按键）
             if (gSwipeBurstActive && gChainEnabled && !gSwipeStopRequested) {
-                PTDylibLog(@"[连滑] 自动续滑「%@」（档位 %ld）", name, (long)gSwipeBurstRate);
+                PTDylibLog(@"[连滑] 自动续滑「%@」（档位 %ld）", pname, (long)gSwipeBurstRate);
                 // v1.0.73：自动续滑此前绕过"按键→匹配→记录"整条 UI 链路，达成连滑后记录区完全
                 // 静默——用户无从确认连滑是否真在跑、跑了几轮、当前几档。逐轮 append 会刷屏
                 // （点击类一轮约 80ms），故聚合为同一行原地改写。
                 gChainBurstRounds++;
                 PTTestLog(YES, [NSString stringWithFormat:@"⟳ 续滑中… 第 %ld 轮  档位 ×%ld",
                     (long)gChainBurstRounds, (long)gSwipeBurstRate]);
-                PTExecutePlanRun(name);
+                PTExecutePlanRun(planId);
             }
             return;
         }
@@ -1258,14 +1340,15 @@ static void PTExecutePlanRun(NSString *name) {
 // v1.0.72：force=YES 跳过防抖——仅用于"刚刚进入连滑的那一次按键"：时间窗蓄力修好后，
 // 激活连滑的那一击距上次起播往往不足一个防抖周期，被挡下就会出现「已进入连滑」却没有
 // 回放在跑的假连滑。
-static void PTExecutePlan(NSString *name, BOOL force) {
+// v1.0.74：name → planId（pid）。
+static void PTExecutePlan(NSString *planId, BOOL force) {
     double now = PTNowC();
     if (!force && now - gLastExec < gDebounceMs / 1000.0) {
-        PTDylibLog(@"[执行] 防抖：忽略 %@（%.0fms 内已执行）", name, gDebounceMs);
+        PTDylibLog(@"[执行] 防抖：忽略 %@（%.0fms 内已执行）", PTPlanNameForId(planId), gDebounceMs);
         return;
     }
     gLastExec = now;
-    PTExecutePlanRun(name);
+    PTExecutePlanRun(planId);
 }
 
 // v1.0.72：蓄力提示——只在最后两档出现（4/5 与 已进入连滑）。实测反馈：前 3 下也提示
@@ -1302,22 +1385,27 @@ static BOOL PTChainChargePill(void) {
 //   按键到来时早已回落空闲路径 → 计数重置为 1 → 永远蓄不满 5 次（实测：连滑只对
 //   滑动(手动)类慢动作生效）。现在同方案 1.2s 内的命中都累计，快动作同样能进连滑
 //   （自动续滑对点击即高频连击）。
-static void PTChainOnHit(NSString *plan, BOOL viaTest) {
+//
+// v1.0.74：plan → planId（方案 pid）。gSwipeBurstPlan 同步改存 pid——同方案判定
+// （samePlan）按 pid 比较，重名的两个方案不会再被误判为"同一个"而续滑/升档。
+static void PTChainOnHit(NSString *planId, BOOL viaTest) {
     double now = PTNowC();
-    BOOL samePlan = [gSwipeBurstPlan isEqualToString:plan];
+    BOOL samePlan = [gSwipeBurstPlan isEqualToString:planId];
 
     if (gExecRunning) {   // 回放中 = 连按累计窗口（只累计/升档/刹停，不起新动作）
         if (!samePlan) {
             // 异方案 = 刹停：立即中断当前滑剩余帧 + 退连滑 + 档位复位（DVT v1.0.22）
             BOOL wasActive = gSwipeBurstActive;
+            NSString *oldName = PTPlanNameForId(gSwipeBurstPlan);   // v1.0.74：被刹停的旧链（pid→name）
+            NSString *newName = PTPlanNameForId(planId);            // v1.0.74：新按的方案（pid→name）
             gSwipeBurstActive = NO; gSwipeBurstCount = 0; gSwipeBurstRate = 1;
             gSwipeBurstLastAt = 0;                    // v1.0.72：时间窗清零，旧链不能跨刹停续接
             gSwipeStopRequested = YES; gExecToken++;  // 中断在飞回放（令牌失配 → 抬手收尾）
-            PTDylibLog(viaTest ? @"[测试] 异方案「%@」→ 刹停「%@」" : @"[连滑] 异方案「%@」→ 刹停「%@」", plan, gSwipeBurstPlan);
+            PTDylibLog(viaTest ? @"[测试] 异方案「%@」→ 刹停「%@」" : @"[连滑] 异方案「%@」→ 刹停「%@」", newName, oldName);
             if (wasActive) {
                 PTChainPill(@"已退出连滑");
                 // v1.0.73：记录区关键事件独占一行（并打断续滑聚合行）
-                PTTestLog(NO, [NSString stringWithFormat:@"✗ 刹停（异方案「%@」）→ 已退出连滑", plan]);
+                PTTestLog(NO, [NSString stringWithFormat:@"✗ 刹停（异方案「%@」）→ 已退出连滑", newName]);
             }
             return;
         }
@@ -1344,17 +1432,17 @@ static void PTChainOnHit(NSString *plan, BOOL viaTest) {
         gSwipeBurstCount++;
     } else {
         gSwipeBurstCount = gChainEnabled ? 1 : 0;
-        gSwipeBurstPlan  = plan;
+        gSwipeBurstPlan  = planId;   // v1.0.74：锁定 pid（重名方案互不串链）
         gSwipeBurstRate  = 1;
     }
     gSwipeStopRequested = NO;   // 已无在飞回放，旧刹停请求作废
     gSwipeBurstLastAt = now;
     BOOL justActivated = PTChainChargePill();
-    if (!viaTest) PTDylibLog(@"[会话] 命中「%@」→ 起映射（原始滑动已整段吞掉）", plan);
+    if (!viaTest) PTDylibLog(@"[会话] 命中「%@」→ 起映射（原始滑动已整段吞掉）", PTPlanNameForId(planId));
     if (justActivated) {
         // 刚进连滑：两道防抖都放行，强行起播（激活那一击被防抖挡下 = 假连滑）
         if (viaTest) sLastTestExec = now;
-        PTExecutePlan(plan, YES);
+        PTExecutePlan(planId, YES);
         return;
     }
     if (viaTest) {
@@ -1362,12 +1450,13 @@ static void PTChainOnHit(NSString *plan, BOOL viaTest) {
         if (now - sLastTestExec < 0.3) { PTDylibLog(@"[测试] 防抖：忽略本次起播（连滑计数已累计）"); return; }
         sLastTestExec = now;
     }
-    PTExecutePlan(plan, NO);   // 测试页走与运行端完全相同的回放路径，验证即所见
+    PTExecutePlan(planId, NO);   // 测试页走与运行端完全相同的回放路径，验证即所见
 }
 
 // v1.0.72：运行端命中方案后的连滑判定 + 起执行（外壳 PTHandlePagerEvent 调用）。
 // 逻辑与测试页共用 PTChainOnHit，差异仅 viaTest=NO（无测试页 0.3s 防抖）。
+// v1.0.74：入参为方案 pid（PTMatchPlan 返回值），不再按 name 匹配。
 // 调用方（外壳 PTHandlePagerEvent）负责：gSessTrail 清理 / 未命中时 PTReplayTrailAsync 重放。
-void PTChainHandleHit(NSString *plan) {
-    PTChainOnHit(plan, NO);
+void PTChainHandleHit(NSString *planId) {
+    PTChainOnHit(planId, NO);
 }

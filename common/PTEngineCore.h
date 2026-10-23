@@ -106,6 +106,19 @@ extern NSString *PTDuplicate(NSDictionary *s, NSArray *plans);
 extern BOOL PTStable(NSArray *mem, NSString *sender);
 extern BOOL PTIsLearnedSender(uint64_t s);
 
+// ---------- 方案唯一身份 pid（v1.0.74：重名方案不再互相覆盖/串台） ----------
+// 背景：配置里两个方案可以同名（设置页/dylib UI 均允许），而引擎 gPlans 长期按
+// name 索引——同名方案"后写覆盖前一个"（执行错方案）、改名即失联、删除/编辑按
+// name 匹配会误伤同名者。设置页 UI 层 v1.0.66-fix 已 pid 化，本版把 pid 贯通到
+// 引擎执行层：gPlans 改 pid 索引，匹配/连滑/执行全链路按 pid 走。
+// 规则（三端一致，不会漂移）：有 p[@"pid"] 用字段；无则按「name#数组下标」惰性
+// 补发——设置页 PTRead（v1.0.66-fix）、引擎 PTDylibLoadConfig、dylib UI（v1.0.75）
+// 对同一份配置补出同一批 pid。补发即落盘，下次读取即带 pid。
+extern NSString *PTPlanPid(NSDictionary *p, NSInteger idx);
+// pid → 显示名（日志 / pill / 记录区格式化用）；查不到返回 pid 本身（永不返回
+// nil——执行中配置被改的极端场景也要有可读标识，同时避免 %@ 格式化 nil）
+extern NSString *PTPlanNameForId(NSString *planId);
+
 // ---------- 特征结构 + 运行端匹配（外壳 PTHandlePagerEvent 用） ----------
 typedef struct {
     int phase;        // 0=tap 1=swipe
@@ -113,6 +126,8 @@ typedef struct {
     double dist;
     int tapDx;
 } PagerFeature;
+// v1.0.74：返回值由 name 改为方案 pid（gPlans 按 pid 索引后，name 无法唯一定位
+// 方案——重名时两条记录共用一个键）。调用方（PTEngine.m）原样传给 PTChainHandleHit。
 extern NSString *PTMatchPlan(PagerFeature f, uint64_t sender);
 
 // ---------- 测试（Core 实现；设置页/dylib 测试页共用） ----------
@@ -122,7 +137,9 @@ extern void PTSampleAppend(int phase, double dir, double dist, int tapDx);   // 
 extern void PTTestReset(void);      // v1.0.71：测试页退出一键复位（armed/绿点/方向线/P/尾巴/记录区）
 
 // ---------- 连滑（Core 状态机；外壳命中判定后调用） ----------
-extern void PTChainHandleHit(NSString *plan);   // v1.0.71：运行端命中方案——连滑判定 + 起执行/续档/刹停
+// v1.0.74：入参为方案 pid（PTMatchPlan 的返回值），不再按 name 匹配——重名方案
+// 在执行层曾互相覆盖/串台（UI 层 v1.0.66-fix 已修，本版修引擎执行层）。
+extern void PTChainHandleHit(NSString *planId);   // v1.0.71：运行端命中方案——连滑判定 + 起执行/续档/刹停
 extern void PTChainReset(void);                 // 刹停/未命中/关开关：清空连滑链
 // v1.0.73：按键未命中（没录入的按键）——退出连滑 **且** 立刻停掉在飞动作。
 // 与 PTChainReset 的区别：Reset 只清连滑状态、在飞动作照常播完；Miss 额外 gExecToken++

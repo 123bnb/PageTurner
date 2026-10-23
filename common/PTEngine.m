@@ -256,12 +256,14 @@ static BOOL PTHandlePagerEvent(UIEvent *event) {
                 double dxv = ex - sx;
                 f.tapDx = (dxv > kTapDxThresh) ? 1 : (dxv < -kTapDxThresh ? -1 : 0);
             }
-            NSString *plan = PTMatchPlan(f, gCurSender);
-            if (plan) {
+            // v1.0.74：PTMatchPlan 返回值即方案 pid（引擎 gPlans 按 pid 索引，重名方案
+            // 是两条独立记录，按 name 走会互相覆盖/串台）
+            NSString *planId = PTMatchPlan(f, gCurSender);
+            if (planId) {
                 gSessTrail = nil;
                 // v1.0.71：连滑判定（蓄力/升档/刹停）+ 起执行已抽至 Core 的 PTChainHandleHit，
                 // 与测试页 PTTestExecPlan 共用同一套连滑状态机（修掉设置页侧旧版无连滑逻辑的漂移）。
-                PTChainHandleHit(plan);
+                PTChainHandleHit(planId);
                 return YES;
             }
             // v1.0.73：未命中 = 退出连滑 + 立刻停在飞动作（旧为 PTChainReset，只清链、动作照常播完）
