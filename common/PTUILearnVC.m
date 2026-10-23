@@ -170,7 +170,7 @@
         self.dirLabel.text = @"方向：—";
         self.distLabel.text = @"位移：—";
         [self appendLog:[NSString stringWithFormat:@"✗ 拒绝（与『%@』重复）  sender=%@ phase=%d dir=%.1f° dist=%.1f",
-            dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]];
+            dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]]];
         return;
     }
     self.status.textColor = [UIColor labelColor];
@@ -218,7 +218,7 @@
         self.status.text = [NSString stringWithFormat:@"⚠️ 与已有方案『%@』高度相似\n可能按错了键，请换一个键", dup];
         self.status.textColor = [UIColor systemRedColor];
         [self appendLog:[NSString stringWithFormat:@"✗ 拒绝（与『%@』重复）  sender=%@ phase=%d dir=%.1f° dist=%.1f",
-            dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]];
+            dup, s[@"sender"], [s[@"phase"] intValue], [s[@"direction"] doubleValue], [s[@"dist"] doubleValue]]];
         // v1.0.43：重复特征 → 右上角禁止保存 + 已记录清空（防止把之前录的旧记录
         // 当新特征保存——旧版只提示，右上角仍可点，会把旧 readyFt 存进去）
         self.readyFt = nil;
