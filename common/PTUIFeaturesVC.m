@@ -3,6 +3,7 @@
 // 行 = 特征详情；点击 = 详情/重新录制；左滑 = 删除；无新增入口
 // ============================================================
 #import "PTUIFeaturesVC.h"
+#import "PTUILearnVC.h"        // 重新录制特征跳学习页
 #import "PTUICommon.h"
 
 @implementation PTUIFeaturesVC

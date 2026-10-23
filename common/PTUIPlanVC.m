@@ -13,6 +13,10 @@
 #import "PTUIPlanVC.h"
 #import "PTUICommon.h"
 #import "PTDragSortHelper.h"
+#import "PTUIFeaturesVC.h"     // 记录特征
+#import "PTUILearnVC.h"        // 学习页入口
+#import "PTUIActionParamVC.h"  // 动作参数页
+#import "PTUITestVC.h"         // 测试页入口
 
 @implementation PTUIPlanVC
 

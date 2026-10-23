@@ -7,6 +7,7 @@
 //   · 打开：一律按 pid 定位（重名不串）
 // ============================================================
 #import "PTUIPlansVC.h"
+#import "PTUIPlanVC.h"     // 打开方案详情页（按 pid 定位）
 #import "PTUICommon.h"
 #import "PTDragSortHelper.h"
 

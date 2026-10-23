@@ -7,6 +7,7 @@
 // （PTLogMaxLines，dylib 旧版 200——大诊断场景截断太早）。
 // ============================================================
 #import "PTUIDebugLogVC.h"
+#import "PTUILogContentVC.h"   // didSelect → 日志内容页
 #import "PTUICommon.h"
 
 @implementation PTUIDebugLogVC
