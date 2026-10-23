@@ -50,6 +50,14 @@ extern NSString *PTDylibCfgPath(void);
 extern NSString *PTJbrootRoot(void);       // 共享 jbroot 根路径（roothide），nil=未探测到
 extern NSMutableDictionary *PTDylibReadCfg(void);
 extern void PTDylibWriteCfg(NSDictionary *cfg);
+// v1.0.77：UI 层统一配置读写（设置页 / dylib 浮窗 / common/PTUI* 共享 VC 三处合一）。
+// 此前「读+pid 惰性补发」在设置页 PTRead 与 dylib PTUIRead 各存一份逐字复制的实现，
+// 写路径也有两条（设置页双写 / dylib 容器单写）——UI 共享化后统一到此：
+//   · 读 = PTDylibReadCfg + pid 补发（规则同引擎 PTDylibLoadConfig 的 gPlans 补发），
+//     补发即经 PTUIWriteCfg 落盘；
+//   · 写 = 经 PTSetCfgWriter 注入的写入器（设置进程=双写；未注入=dylib 容器单写）。
+extern NSMutableDictionary *PTUIReadCfg(void);
+extern void PTUIWriteCfg(NSDictionary *cfg);
 extern void PTWriteCfgTo(NSString *path, NSDictionary *cfg);   // v1.0.71：原子写指定路径（设置页双写用）
 extern void PTSetCfgPath(NSString *p);     // 配置路径由 target 注入（roothide 多候选 / dylib 容器 / 设置页 PT_PREFS）
 extern NSDictionary *PTConfigDict(void);   // 暴露当前配置字典（roothide 读 masterEnabled/enabledApps）

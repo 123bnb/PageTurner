@@ -12,9 +12,16 @@
 #import <UIKit/UIKit.h>
 #import "PTEngine.h"
 #import "PTVersion.h"   // 版本横幅宏（scripts/gen_ptversion.sh 生成，勿手改）
+#import "PTUICommon.h"  // v1.0.77：共享 UI 伞标题（导航/日志源协议，构造函数里各设一次）
 
 // 主菜单类在 PTDylibUI.m 实现
 @interface PTDylibMenuVC : UITableViewController
+@end
+
+// v1.0.77：导航协议实现 / 内存日志数据源在 PTDylibUI.m 实现
+@interface PTNavigatorDylib : NSObject <PTUINavigator>
+@end
+@interface PTDylibLogSource : NSObject <PTUILogSource>
 @end
 
 static UIWindow *gMenuWindow = nil;
@@ -93,6 +100,10 @@ static void PTDylibInit(void) {
         @autoreleasepool {
             dispatch_async(dispatch_get_main_queue(), ^{
                 NSString *bid = [[NSBundle mainBundle] bundleIdentifier] ?: @"?";
+                // v1.0.77：共享 UI 装配——设置页统一后，共享页（common/PTUI*）经这两个
+                // 协议口拿宿主的导航与日志能力（deb 侧在 RootListController.m 构造函数同样装配）
+                PTUINavigator.current = [PTNavigatorDylib new];
+                PTUILogSource.current = [PTDylibLogSource new];
                 // v1.0.65：巨魔(dylib)形态【不落盘任何日志文件】——不调 PTSetLogPath，也不调
                 // PTSetFileLogEnabled(YES)（引擎默认 NO），日志只留在内存（PTDylibLogLines()）。
                 // 依据：日志文件 PageTurner-<bid>.log 的唯一读者是 deb 设置页的日志列表，它只枚举 deb

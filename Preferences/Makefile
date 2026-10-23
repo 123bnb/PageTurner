@@ -20,6 +20,8 @@ BUNDLE_NAME = PageTurner
 #          统一模板 PTOverlayPage + 设置页本体 RootListController）。
 #          deb 私有的 Tweak.m / 引擎外壳 PTEngine.m 均不进这里（外壳的 hook 装配是
 #          deb/dylib 专属；设置页进程用自己的 SImpAddEvent/SImpSendEvent）。
+# v1.0.77：设置页 UI 全量统一，列表再并上 PTSRC_UISHARED（共享设置页 9 个 VC + 基础设施）
+#          与本目录私有 PTShimVC.m（PSViewController 桥接壳）/ PTLogSourceDeb.m（日志源）。
 PageTurner_FILES = $(addprefix $(PTROOT)/,$(PTSRC_ALL_PREFS))
 PageTurner_FRAMEWORKS = UIKit
 PageTurner_PRIVATE_FRAMEWORKS = Preferences

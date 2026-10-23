@@ -25,11 +25,16 @@
 #   PTSRC_CORE    common/PTEngineCore.m（引擎核心：配置/匹配/学习样本/测试回放/连滑/动作执行/日志） 三目标全要
 #   PTSRC_ENGINE  common/PTEngine.m（引擎外壳：hook 装配/运行拦截/调试可视化）  deb + dylib
 #   PTSRC_OVERLAY common/PTOverlayPage.m（点击/双击/滑动统一模板页）   dylib + Preferences
+#   PTSRC_UISHARED common/PTUI*.m + PTDragSortHelper.m（共享设置页：基础设施 + 9 个 VC + 桥接工具） dylib + Preferences
 #   PTSRC_DEB     Tweak.m（deb 私有：MSHookMessageEx/ellekit 装配）   deb
-#   PTSRC_DYLIB   targets/dylib/*.m（dylib 私有：入口/菜单/关于页）   dylib
-#   PTSRC_PREFS   Preferences/RootListController.m（设置页）          Preferences
+#   PTSRC_DYLIB   targets/dylib/*.m（dylib 私有：入口/菜单/日志源/导航器）  dylib
+#   PTSRC_PREFS   Preferences/RootListController.m + PTShimVC.m + PTLogSourceDeb.m（设置页）  Preferences
 # 目标组合 = 组相并。v1.0.71 起 Preferences 也链 PTSRC_CORE（消除设置页 ~950 行重复实现），
 # 但不链 PTSRC_ENGINE（外壳的 hook 装配是 deb/dylib 专属；设置页进程有自己的 hook）。
+# v1.0.77 起设置页 UI 全量统一：8 个同名 VC 曾 deb/dylib 各存一份（约 1,900 行×2，重复度 95–98%，
+# 且 8 项行为漂移），现全部收敛到 common/PTUI*，两侧只留各实现一次的
+# PTUIEnsureCollectHook / PTUIPresentEditor / 日志源 / 导航器（见各文件头注释）。
+# deb 不链 PTSRC_UISHARED（注入镜像不带设置页）。
 PTROOT ?= .
 
 PTSRC_KIF := \
@@ -46,11 +51,31 @@ PTSRC_DEB := Tweak.m
 PTSRC_DYLIB := \
 	targets/dylib/PTDylibMain.m \
 	targets/dylib/PTDylibUI.m
-PTSRC_PREFS := Preferences/RootListController.m
+PTSRC_PREFS := \
+	Preferences/RootListController.m \
+	Preferences/PTShimVC.m \
+	Preferences/PTLogSourceDeb.m
+
+# 共享设置页（v1.0.77 全量统一）：基础设施 + 9 个共享 VC + 拖拽助手
+PTSRC_UISHARED := \
+	common/PTUINavigator.m \
+	common/PTUILogSource.m \
+	common/PTUIBaseListVC.m \
+	common/PTDragSortHelper.m \
+	common/PTUICommon.m \
+	common/PTUIDebounceVC.m \
+	common/PTUIPlansVC.m \
+	common/PTUIPlanVC.m \
+	common/PTUIFeaturesVC.m \
+	common/PTUILearnVC.m \
+	common/PTUIActionParamVC.m \
+	common/PTUITestVC.m \
+	common/PTUIDebugLogVC.m \
+	common/PTUILogContentVC.m
 
 PTSRC_ALL_DEB := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_ENGINE) $(PTSRC_DEB)
-PTSRC_ALL_DYLIB := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_ENGINE) $(PTSRC_OVERLAY) $(PTSRC_DYLIB)
-PTSRC_ALL_PREFS := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_OVERLAY) $(PTSRC_PREFS)
+PTSRC_ALL_DYLIB := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_ENGINE) $(PTSRC_OVERLAY) $(PTSRC_UISHARED) $(PTSRC_DYLIB)
+PTSRC_ALL_PREFS := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_OVERLAY) $(PTSRC_UISHARED) $(PTSRC_PREFS)
 
 SHARED_CFLAGS := \
 	-fobjc-arc \
@@ -66,7 +91,7 @@ SHARED_CFLAGS := \
 	-include $(PTROOT)/ptftouch/Compat.h
 
 ifeq ($(PRINT_CONFIG),1)
-.PHONY: print-cflags print-deb-sources print-dylib-sources print-prefs-sources print-all-sources
+.PHONY: print-cflags print-deb-sources print-dylib-sources print-prefs-sources print-uihared-sources print-all-sources
 print-cflags:
 	@echo $(SHARED_CFLAGS)
 print-deb-sources:
@@ -75,6 +100,8 @@ print-dylib-sources:
 	@echo $(PTSRC_ALL_DYLIB)
 print-prefs-sources:
 	@echo $(PTSRC_ALL_PREFS)
+print-uihared-sources:
+	@echo $(PTSRC_UISHARED)
 print-all-sources:
 	@echo $(sort $(PTSRC_ALL_DEB) $(PTSRC_ALL_DYLIB) $(PTSRC_ALL_PREFS))
 endif

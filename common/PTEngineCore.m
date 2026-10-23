@@ -258,6 +258,51 @@ static void PTWriteCfg(NSDictionary *cfg) {
     else PTDylibWriteCfg(cfg);
 }
 
+// ============================================================
+// v1.0.77：UI 层统一配置读写入口（设置页 / dylib 浮窗 / 共享 VC 合一）
+// ============================================================
+// 背景：v1.0.77 前「读配置 + pid 惰性补发」有两份逐字复制的实现——
+//   · Preferences/RootListController.m 的 PTRead（v1.0.66-fix，含重名去重）
+//   · targets/dylib/PTDylibUI.m 的 PTUIRead（v1.0.75，同规则）
+// 写路径同样两条（设置页 PTWrite 双写 / dylib PTDylibWriteCfg 单写）。8 个同名 VC
+// 抽到 common/PTUI* 后，读写入口必须合一，否则「设置各管各的」又复辟。
+// 补发规则与引擎 PTDylibLoadConfig 的 gPlans 补发完全一致（PTPlanPid：有 pid 用
+// 字段、无则 name#数组下标），补发即经 PTUIWriteCfg 落盘（设置页=双写，dylib=单写）。
+void PTUIWriteCfg(NSDictionary *cfg) {
+    PTWriteCfg(cfg);
+}
+
+NSMutableDictionary *PTUIReadCfg(void) {
+    NSMutableDictionary *d = PTDylibReadCfg();
+    NSArray *plans = d[@"plans"];
+    if ([plans isKindOfClass:[NSArray class]] && plans.count) {
+        BOOL need = NO;
+        for (id p in plans) {
+            if (![p isKindOfClass:[NSDictionary class]] || !p[@"name"]) continue;
+            // 取字符串字段先过 isKindOfClass 再转型——id 上直接点 .length 编译不过
+            NSString *pf = [p[@"pid"] isKindOfClass:[NSString class]] ? p[@"pid"] : nil;
+            if (!pf.length) { need = YES; break; }
+        }
+        if (need) {
+            NSMutableArray *out = [NSMutableArray array];
+            for (NSUInteger i = 0; i < plans.count; i++) {
+                id p = plans[i];
+                if ([p isKindOfClass:[NSDictionary class]] && p[@"name"]) {
+                    NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+                    NSString *pf = [np[@"pid"] isKindOfClass:[NSString class]] ? np[@"pid"] : nil;
+                    if (!pf.length) np[@"pid"] = PTPlanPid(np, (NSInteger)i);
+                    p = np;
+                }
+                [out addObject:p];
+            }
+            d[@"plans"] = out;
+            PTUIWriteCfg(d);   // 补发即落盘（经注入写入器：设置页双写 / dylib 容器单写）
+            PTDylibLog(@"[配置] UI 侧方案 pid 惰性补发完成（%lu 条）", (unsigned long)out.count);
+        }
+    }
+    return d;
+}
+
 void PTDylibSetLearningLocal(BOOL on) {
     NSMutableDictionary *cfg = PTDylibReadCfg();
     cfg[@"learning"] = @{ @"active": @(on) };

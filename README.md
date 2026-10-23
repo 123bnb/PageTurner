@@ -141,13 +141,18 @@ UIApplication -sendEvent:               ← hook：
 
 ```
 PageTurner/
-├── common/PTEngine.{h,m}             # 统一运行端引擎（roothide / dylib 共用）：配置/日志/匹配/执行/可视化/hook 处理器
+├── common/PTEngine.{h,m}             # 统一运行端引擎（roothide / dylib 共用）：hook 装配/运行拦截/调试可视化
+├── common/PTEngineCore.{h,m}         # 引擎核心（deb / dylib / 设置页三链接）：配置读写/匹配/学习样本/测试回放/连滑/动作执行/日志
+├── common/PTUI*.{h,m}                # 共享设置页（dylib + Preferences 链接）：9 个 VC + 导航/日志源协议 + 表格基类 + 长按拖拽助手
 ├── Tweak.m                           # roothide deb 薄壳：配置路径注入 + 总开关+指定App门控 + MSHookMessageEx 装 hook
-├── targets/dylib/                    # 巨魔 dylib 薄壳：PTDylibMain（入口/菜单窗口）+ PTDylibUI（浮窗菜单/录制覆盖层）
+├── targets/dylib/                    # 巨魔 dylib 薄壳：PTDylibMain（入口/菜单窗口）+ PTDylibUI（浮窗菜单/日志源/导航器/编辑器装配）
 ├── Preferences/
-│   ├── RootListController.m          # 设置页全部 UI（方案 / 学习 / 映射 / 测试 / 调试）
+│   ├── RootListController.m          # 设置页入口（specifiers）+ App 选择 + 事件注入 + deb 侧一次性实现
+│   ├── PTShimVC.m                    # PSViewController 桥接壳（3 个 specifier detail 入口）
+│   ├── PTLogSourceDeb.m              # deb 日志源（文件日志尾部 500 行）
 │   └── Resources/Info.plist
 ├── ptftouch/                         # PTFakeMetaTouch（KIF FakeTouch 触摸注入库）
+├── build/sources.mk                  # 三目标源文件列表 + 共享 flags 单一真源（CI 覆盖审计）
 ├── Makefile / control                # Theos roothide 打包
 └── .github/workflows/build.yml       # push 自动编译 roothide deb + 巨魔 dylib 并发布 Release
 ```
@@ -179,6 +184,7 @@ PageTurner/
 
 | 版本 | 这一版做了什么 |
 | --- | --- |
+| [v1.0.77](https://github.com/123bnb/PageTurner/releases/tag/v1.0.77) | **设置页全量统一（重构版）**：deb 设置页与巨魔 dylib 菜单 8 个同名页面（防抖/方案列表/方案详情/功能/学习/动作参数/测试/日志）从各存一份（重复度 95–98%、8 项行为漂移）收敛到 `common/PTUI*` 单一真源——RootListController.m 2,568→573 行、PTDylibUI.m 1,758→330 行，新增共享导航/日志源协议、表格基类、长按拖拽助手、PSViewController 桥接壳；8 项漂移裁定：delay 上限统一 60,000ms、连滑提速开关 dylib 补齐、排序统一长按拖拽、删除统一按 pid（同名方案不再误伤）、日志统一 500 行、废案提示去版本号、tapManual 弹提示。deb 用户行为零变化，dylib 用户多处向 deb 看齐 |
 | [v1.0.76](https://github.com/123bnb/PageTurner/releases/tag/v1.0.76) | 修复「滑动中被未识别动作打断 → 粘手卡死」：假触摸池分配不再把在飞触摸（Stationary）当空闲槽位（根因——打断时重放抢槽致原触摸永不受 Ended、App 内粘手、后续手势重心降速至无法滑动、点击点不中）；被替换的在飞触摸先补发 Ended 实现升级后自愈；gIsInjecting 改引用计数（修打断后永久卡 YES 导致双指菜单失灵）；打断路径动作链双回调修复 |
 | [v1.0.75](https://github.com/123bnb/PageTurner/releases/tag/v1.0.75) | 巨魔 dylib UI 完整 pid 化（同名方案 bug 最后一环）：读配置即惰性补发 pid（与设置页/引擎三端同规则），方案列表/方案页/特征/学习/动作参数五页全量按 pid 定位，删除与改名不再误伤同名者，新建方案带 UUID pid |
 | [v1.0.74](https://github.com/123bnb/PageTurner/releases/tag/v1.0.74) | 引擎执行层方案 pid 贯通（修复同名方案 bug 最后一环）：gPlans 改 pid 索引、匹配/连滑/执行全链路按 pid、旧配置三端一致规则惰性补发并落盘、执行层 pid 失联强制刷新兜底；设置页 UI 层 v1.0.66-fix 已修，巨魔 UI 层见 v1.0.75 |

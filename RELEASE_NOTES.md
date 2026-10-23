@@ -1,3 +1,92 @@
+# PageTurner v1.0.77
+
+> **设置页全量统一（重构版，零 deb 侧行为变化）**：deb 设置页与巨魔 dylib 菜单此前是「两个版本合在一起、代码却各管各的」——8 个同名页面（防抖/方案列表/方案详情/功能/学习/动作参数/测试/日志）在 `Preferences/RootListController.m`（2,568 行）与 `targets/dylib/PTDylibUI.m`（1,758 行）里各存一份，约 1,900 行重复度 95–98%，且已漂出 8 处行为不一致。本版把 8 个页面连拖拽助手、导航、日志源一并收敛到 `common/PTUI*` 单一真源，两侧只留必须各实现一次的桥接/装配代码（Core 配置读写、`PTUIEnsureCollectHook`、`PTUIPresentEditor`）。**deb 安装用户界面与行为零变化**；dylib 用户获得多处向 deb 看齐的修复（见「行为变化」）。
+
+## ♻️ 改动
+
+### 1. 单一真源：8 个共享 VC + 5 件基础设施（`common/PTUI*.m`）
+
+| 共享文件 | 内容 | 原 deb / dylib 重复量 |
+| --- | --- | --- |
+| `PTUIDebounceVC` | 防抖设置页 | 两份 |
+| `PTUIPlansVC` | 方案列表（长按拖拽排序 + 删除） | 两份 |
+| `PTUIPlanVC` | 方案详情（动作列表 Z 型排序 + 弹编辑器） | 两份 |
+| `PTUIFeaturesVC` | 功能开关页 | 两份 |
+| `PTUILearnVC` | 学习页 | 两份 |
+| `PTUIActionParamVC` | 动作参数页 | 两份 |
+| `PTUITestVC` | 测试页（含连滑进度） | 两份 |
+| `PTUIDebugLogVC` + `PTUILogContentVC` | 调试日志列表 + 内容页 | 两份 |
+| `PTUINavigator` / `PTUILogSource` | 导航协议 / 日志数据源协议（两侧各实现一次） | 新增 |
+| `PTUIBaseListVC` | 分组表格基类（统一 `PTUIReadCfg/PTUIWriteCfg` 读写） | 新增 |
+| `PTDragSortHelper` | 长按拖拽排序助手（table / cells 两种挂载模式，合并 deb 原两份状态机） | 新增 |
+| `PTUICommon` | `PTUIPlanById/PTUIPlanIndexById`（pid 定位）、`PTUISaveActionToPlan`（pid 写回）、回退栈助手 | 新增 |
+
+`build/sources.mk` 新增 `PTSRC_UISHARED` 组接入 dylib + Preferences 两目标（deb 注入镜像不链设置页），CI 源码覆盖审计自动接管新文件；以后改设置页只改一处。
+
+### 2. 两侧残留代码收敛
+
+- `Preferences/RootListController.m`：2,568 → 573 行，只留设置页入口（specifiers）、App 选择页、事件注入、`PTRead/PTWrite` 薄转发、deb 侧三个一次性实现（`PTNavigatorDeb` / `PTUIPresentEditor` / `PTUIEnsureCollectHook`）。
+- `targets/dylib/PTDylibUI.m`：1,758 → 330 行，只留菜单入口、`PTDylibLogSource`（内存日志源）、`PTNavigatorDylib`、dylib 版 `PTUIPresentEditor`（独立 UIWindow 半透明编辑器）。
+- 新增 `Preferences/PTShimVC.m`：`PSViewController` 桥接壳（仅 3 个 specifier 入口需要，共享 VC 在壳内铺满）。
+- 新增 `Preferences/PTLogSourceDeb.m`：deb 日志源（设置页日志 + 各 App 日志，读文件尾部 500 行）。
+- Core 层统一读写入口 `PTUIReadCfg/PTUIWriteCfg`（`common/PTEngineCore.m`）：deb 经 `PTSetCfgPath(PT_PREFS)` + `PTSetCfgWriter(PTWrite)` 双写，dylib 用 App 容器独立配置单写，设置页代码对两者无感。
+
+### 3. 8 项行为漂移裁定（统一口径）
+
+| # | 漂移项 | deb 旧行为 | dylib 旧行为 | 本版统一 |
+| --- | --- | --- | --- | --- |
+| 1 | delay 上限 | 60,000 ms | 5,000 ms | **60,000 ms** |
+| 2 | 连滑提速开关 | 有 | 无 | **有**（dylib 菜单补，tag=12 写 `chainEnabled`） |
+| 3 | 方案排序方式 | 长按拖拽（Z 型） | 系统编辑态 | **长按拖拽**（删 `toggleEdit/canMoveRow`） |
+| 4 | 删除定位方式 | 行索引（误伤同名方案） | pid | **pid** |
+| 5 | pid 辅助函数 | 3 个静态函数 | Core `PTPlanPid` | **Core `PTPlanPid`** |
+| 6 | 日志最大行数 | 500 | 200 | **500**（`PTLogMaxLines`） |
+| 7 | 废案提示版本号 | v1.0.48 | v1.0.5 | **去掉版本号** |
+| 8 | tapManual 转换提示 | 弹提示 | 静默 | **弹提示** |
+
+## ⚠️ 行为变化
+
+**deb（roothide）安装用户：无感知**——本侧本来就是统一口径的基准，行为零变化。
+
+**巨魔 dylib 用户**（以下均向 deb 看齐）：
+
+1. 菜单新增「连滑提速」开关（此前只有 deb 有）。
+2. 方案列表排序统一为**长按拖拽**（原系统编辑态入口移除）。
+3. 删除方案/动作按 pid 定位，**同名方案不再误伤**。
+4. 动作参数页 delay 上限 5,000 → 60,000 ms。
+5. 调试日志保留量 200 → 500 行；关闭日志开关时同步清空已收集日志。
+6. tapManual（轻点两下）转换时弹提示（原静默）。
+7. 废案动作提示不再带旧版本号。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/PTUINavigator.h/.m` | 新增：导航协议 + 两侧实现（栈内找共享页回退） |
+| `common/PTUILogSource.h/.m` | 新增：日志数据源协议（列表/内容/清空） |
+| `common/PTUIBaseListVC.h/.m` | 新增：分组表格基类 |
+| `common/PTDragSortHelper.h/.m` | 新增：长按拖拽排序（table/cells 双模式，合并 deb 原两份状态机；修 `canDragRow` 块签名 bug） |
+| `common/PTUICommon.h/.m` | 新增：pid 定位/写回/回退栈公共函数 + `PTUIPresentEditor`/`PTUIEnsureCollectHook` 装配声明 |
+| `common/PTUIDebounceVC.h/.m` | 抽取：防抖页 |
+| `common/PTUIPlansVC.h/.m` | 抽取：方案列表（长按拖拽 + pid 删除） |
+| `common/PTUIPlanVC.h/.m` | 抽取：方案详情（Z 型拖拽 + pid 写回 + 废案提示去版本号） |
+| `common/PTUIFeaturesVC.h/.m` | 抽取：功能页 |
+| `common/PTUILearnVC.h/.m` | 抽取：学习页（新建方案即带 pid） |
+| `common/PTUIActionParamVC.h/.m` | 抽取：动作参数页（delay 上限统一 60,000） |
+| `common/PTUITestVC.h/.m` | 抽取：测试页（含连滑进度行） |
+| `common/PTUIDebugLogVC.h/.m` | 抽取：日志列表（经 `PTUILogSource`） |
+| `common/PTUILogContentVC.h/.m` | 抽取：日志内容页（尾部 500 行） |
+| `Preferences/RootListController.m` | 重写：2,568 → 573 行（入口 + App 选择 + 事件注入 + deb 侧一次性实现） |
+| `Preferences/PTShimVC.h/.m` | 新增：`PSViewController` 桥接壳 ×3 |
+| `Preferences/PTLogSourceDeb.h/.m` | 新增：deb 日志源（文件日志尾部 500 行） |
+| `targets/dylib/PTDylibUI.m` | 重写：1,758 → 330 行（菜单 + dylib 日志源 + 导航器 + 编辑器装配；补连滑开关） |
+| `targets/dylib/PTDylibMain.m` | 构造函数装配 `PTUINavigator.current` / `PTUILogSource.current` |
+| `common/PTEngineCore.m` | 新增 `PTUIReadCfg/PTUIWriteCfg` 统一读写入口 |
+| `build/sources.mk` | 新增 `PTSRC_UISHARED` 组接入 dylib + Preferences；`PTSRC_PREFS` 增壳/日志源 |
+| `Preferences/Makefile` | 列表改走 `PTSRC_ALL_PREFS`（含共享 UI），注释更新 |
+
+---
+
 # PageTurner v1.0.76
 
 > 修复「滑动中被未识别动作打断 → 粘手卡死」bug：滑行途中按到没录入方案的按键（未命中）时，在飞快动作有概率**永久卡在半路上**（轨迹不消失），之后再按同一方案**滑动速度逐次减半直至无法滑动**，其他方案的点击也**有轨迹但点不中**。根因是假触摸池的槽位分配把「在飞」触摸当成了空闲槽位。
