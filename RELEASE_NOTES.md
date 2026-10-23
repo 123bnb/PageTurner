@@ -1,3 +1,52 @@
+# PageTurner v1.0.74
+
+> 引擎执行层方案 pid 贯通——修复「同名方案」bug 的最后一环。设置页 UI 早在 v1.0.66-fix 已按 pid 定位，但引擎 `gPlans` 一直按 **name** 索引：两个方案同名时**后写覆盖前一个**（执行错方案）、改名即失联、删除/编辑按 name 匹配会误伤同名者；巨魔 dylib UI 则完全没有 pid。本版把 pid 贯通到引擎执行层（deb / dylib / 设置三目标共链的 Core），巨魔 UI 的完整 pid 化见 v1.0.75。
+
+## ♻️ 改动
+
+### 1. 引擎 `gPlans` 改按 pid 索引（name → pid）
+- **旧结构**：`gPlans` 是 `name -> 方案字典`。配置里两个方案可以同名（设置页 / 巨魔 UI 都允许），
+  于是同名方案**后写覆盖前一个**——匹配命中哪个特征，执行的都是被保留下来的那一个；
+  运行中把方案 A 改名成 B，若已有另一个 B，A 直接失联。
+- **新结构**：`pid -> 方案字典`。pid 是每条方案的唯一身份（配置字段 `pid`），
+  匹配（`PTMatchPlan` / `PTTestMatchFeature`）、连滑链（`gSwipeBurstPlan`）、
+  执行（`PTExecutePlan` / `PTExecutePlanRun`）全链路按 pid 走；
+  日志 / pill / 记录区显示名经新增的 `PTPlanNameForId(pid)` 取回，可读性不变。
+- **同名判定同步修正**：连滑的「同方案续滑 / 升档」按 pid 比较——
+  旧版按 name 比较时，两个同名方案会被误判为「同一个」，按 A 起的链会被 B 的按键续滑 / 升档。
+
+### 2. 三端一致的 pid 惰性补发（旧配置零迁移成本）
+- 旧配置没有 `pid` 字段。补发规则：**有 pid 用字段；无则「name#数组下标」**。
+- 三个入口规则完全一致，对同一份配置补出**同一批 pid**，不会漂移：
+  - 设置页 `PTRead`（v1.0.66-fix 起已有）；
+  - 引擎 `PTDylibLoadConfig`（本版新增：加载时检测到无 pid 即补发并落盘，只写一次）；
+  - 巨魔 dylib UI（v1.0.75 补上，规则同 Core `PTPlanPid`）。
+- 补发落盘走既有的 `PTWriteCfg`（设置进程 = 双写，行为随进程角色自动正确）；
+  落盘后下次读取即带 pid，不会反复写盘（mtime 不会因此反复变化）。
+- 多进程并发补发无害：规则确定，各进程补出的 pid 相同，写回内容一致。
+
+### 3. 执行层自愈：pid 查不到时强制刷新一次配置
+- 测试链路读的是**实时配置**（`PTTestMatchFeature` 直连 cfg，不经 `gPlans` 缓存），
+  而执行读 `gPlans`。UI 刚改完配置、引擎缓存还没按 mtime 刷新时，pid 会短暂失联。
+- `PTExecutePlanRun` 查不到 pid → `PTDylibLoadConfig(YES)` 强制重读（跳过 mtime 判断，
+  重读即补发）→ 再查一次；仍查不到（配置被删 / 被改坏）才放弃并记日志，
+  不留半启动的脏状态。
+
+## ⚠️ 行为变化（属预期修复）
+
+1. **同名方案不再互相覆盖**：两个方案可以同名，各自的特征、动作、连滑链完全独立
+   （旧版：后建的覆盖先建的，匹配到哪个特征执行的都是同一个方案）。
+2. **改名不再误伤**：给方案改名只改这一个（dylib UI 侧见 v1.0.75；引擎侧执行不再按 name 找）。
+3. **旧配置首次运行会自动补发 pid 并落盘**（日志一行「方案 pid 惰性补发完成」），之后行为不变。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/PTEngineCore.h` | 新增 `PTPlanPid` / `PTPlanNameForId` 公开 API；`PTChainHandleHit` 入参改 planId（pid）；`PTMatchPlan` 注释更新（返回 pid） |
+| `common/PTEngineCore.m` | `gPlans` 改 pid 索引 + 加载时惰性补发落盘；`PTMatchPlan` / `PTTestMatchFeature` 返回 pid；`gSwipeBurstPlan` 存 pid；`PTTestOnEnded` / `PTChainOnHit` / `PTExecutePlan` / `PTExecutePlanRun` 全链路 pid 化；执行层 pid 失联强制刷新兜底 |
+| `common/PTEngine.m` | `PTHandlePagerEvent` 命中分支变量改名 planId（PTMatchPlan 现返回 pid），逻辑不变 |
+
 # PageTurner v1.0.73
 
 > 测试页记录区连滑可见化 + 未命中按键行为统一。1.0.72 → 1.0.73。本版全部来自实测反馈：**达成连滑后测试页记录区完全静默**、**按到没录入的按键时连滑与动作的去留不明**。记录区新增连滑续滑进度（聚合为一行原地刷新，不刷屏）；未命中按键统一为**退出连滑且立刻停在飞动作**；顺带修掉未命中重放与在飞回放互相踩踏的两个隐患。

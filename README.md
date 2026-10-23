@@ -173,12 +173,13 @@ PageTurner/
 | [v1.0.57](https://github.com/123bnb/PageTurner/releases/tag/v1.0.57) | 统一代码：单仓库双 target，一次构建同时产出越狱 .deb 与巨魔 .dylib；删除失效的注入探针 |
 | [v1.0.66](https://github.com/123bnb/PageTurner/releases/tag/v1.0.66) | 连滑 1:1 复刻 DVT 1.0.22：满 5 次进连滑、自动续滑、1→2→3 档变速、异方案刹停；v1.0.67 起 pill 绿底白字（深色模式自适应）|
 
-## 版本历史（全部 74 个版本）
+## 版本历史（全部 75 个版本）
 
 > 每个版本点版本号可看该版完整的「新增 / 修复 / 删除 / 改动」说明。
 
 | 版本 | 这一版做了什么 |
 | --- | --- |
+| [v1.0.74](https://github.com/123bnb/PageTurner/releases/tag/v1.0.74) | 引擎执行层方案 pid 贯通（修复同名方案 bug 最后一环）：gPlans 改 pid 索引、匹配/连滑/执行全链路按 pid、旧配置三端一致规则惰性补发并落盘、执行层 pid 失联强制刷新兜底；设置页 UI 层 v1.0.66-fix 已修，巨魔 UI 层见 v1.0.75 |
 | [v1.0.73](https://github.com/123bnb/PageTurner/releases/tag/v1.0.73) | 测试页记录区连滑可见化（续滑进度聚合一行原地刷新，不刷屏；进入连滑/升档/刹停留痕）；未命中按键统一为「退出连滑 + 立刻停在飞动作」（PTChainMiss 两端共用，旧测试页连滑继续）；修未命中重放与在飞回放互相踩踏（gIsInjecting 抢写、touchId 撞车） |
 | [v1.0.72](https://github.com/123bnb/PageTurner/releases/tag/v1.0.72) | 连滑三处实测修复：测试区执行中按键被吞（hook 守卫对齐运行端）、连滑只对慢动作生效（蓄力改 1.2s 时间窗，快动作也能连滑）、提示绿底通栏（按文字测宽）；提示降噪（前 3 下静默，只提示 4/5 与已进入连滑）；连滑判定统一入口 PTChainOnHit 治漂移 |
 | [v1.0.71](https://github.com/123bnb/PageTurner/releases/tag/v1.0.71) | 引擎核心抽取 PTEngineCore 三目标（deb/dylib/Preferences）链接、设置页删 ~490 行重复实现、版本横幅宏化 PT_VERSION_STRING、构建配置三目标化+CI 源码覆盖审计；设置页测试区与运行端行为对齐（详见发布说明「行为变化」） |
