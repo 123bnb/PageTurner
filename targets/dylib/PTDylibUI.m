@@ -24,9 +24,46 @@
 #import "PTOverlayPage.h"   // v1.0.62：点击/双击/滑动/滑动(手动) 统一模板（与 deb 共用）
 
 // 配置读写 / 日志 / 工具统一走 core 实现
-#define PTRead() PTDylibReadCfg()
-#define PTWrite(c) PTDylibWriteCfg(c)
 #define SLog(...) PTDylibLog(__VA_ARGS__)
+
+// v1.0.75：方案 pid 贯通到巨魔 UI。旧版全文件按 name 匹配方案——重名时删除/改名/
+// 写动作/写特征全部误伤同名者（与设置页 v1.0.66-fix 修复前同款 bug；引擎执行层
+// v1.0.74 已修，本版修 UI 层）。
+// 惰性补发：读配置时给无 pid 的方案补「name#下标」（Core PTPlanPid 同规则）并落盘，
+// 之后所有页面一律按 pid 定位。三端（设置页 v1.0.66-fix / 引擎 v1.0.74 / 本页）
+// 规则一致，同一份配置补出同一批 pid，不会漂移。
+static NSMutableDictionary *PTUIRead(void) {
+    NSMutableDictionary *d = PTDylibReadCfg();
+    NSArray *plans = d[@"plans"];
+    if ([plans isKindOfClass:[NSArray class]] && plans.count) {
+        BOOL need = NO;
+        for (id p in plans) {
+            if (![p isKindOfClass:[NSDictionary class]] || !p[@"name"]) continue;
+            // 取字符串字段要先过 isKindOfClass 再转型——id 上直接点 .length 编译不过
+            NSString *pf = [p[@"pid"] isKindOfClass:[NSString class]] ? p[@"pid"] : nil;
+            if (!pf.length) { need = YES; break; }
+        }
+        if (need) {
+            NSMutableArray *out = [NSMutableArray array];
+            for (NSUInteger i = 0; i < plans.count; i++) {
+                id p = plans[i];
+                if ([p isKindOfClass:[NSDictionary class]] && p[@"name"]) {
+                    NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
+                    NSString *pf = [np[@"pid"] isKindOfClass:[NSString class]] ? np[@"pid"] : nil;
+                    if (!pf.length) np[@"pid"] = PTPlanPid(np, (NSInteger)i);
+                    p = np;
+                }
+                [out addObject:p];
+            }
+            d[@"plans"] = out;
+            PTDylibWriteCfg(d);   // 落盘唯一 pid（下次读即带 pid）
+            SLog(@"[配置] UI 侧方案 pid 惰性补发完成（%lu 条）", (unsigned long)out.count);
+        }
+    }
+    return d;
+}
+#define PTRead() PTUIRead()
+#define PTWrite(c) PTDylibWriteCfg(c)
 
 // ---------- 全部页面接口（顶部集中声明） ----------
 @interface PTDylibMenuVC : UITableViewController <UITableViewDataSource, UITableViewDelegate>
@@ -44,7 +81,8 @@
 @end
 
 @interface PTPlanVC : UIViewController <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, strong) NSString *planName;
+@property (nonatomic, strong) NSString *planId;      // v1.0.75：唯一身份（所有读写按它定位，重名不串）
+@property (nonatomic, strong) NSString *planName;    // 仅显示用（测试页标题/改名框预填）
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UILabel *recStatus;
 @property (nonatomic, strong) UILabel *addFeatureBtn;
@@ -54,14 +92,14 @@
 @end
 
 @interface PTFeaturesVC : UIViewController <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, strong) NSString *planName;
+@property (nonatomic, strong) NSString *planId;      // v1.0.75：name → pid（重名不串）
 @property (nonatomic, strong) NSMutableArray *features;
 @property (nonatomic, strong) UITableView *tv;
 - (void)reload;
 @end
 
 @interface PTLearnVC : UIViewController
-@property (nonatomic, strong) NSString *planName;
+@property (nonatomic, strong) NSString *planId;      // v1.0.75：name → pid（重名不串）
 @property (nonatomic, strong) UILabel *status;
 @property (nonatomic, strong) UILabel *countLabel;
 @property (nonatomic, strong) UILabel *dirLabel;
@@ -88,7 +126,7 @@
 // 支持 滑动(手动)/点击(手动)/双击(手动) 三种模式。
 
 @interface PTActionParamVC : UIViewController
-@property (nonatomic, strong) NSString *planName;
+@property (nonatomic, strong) NSString *planId;      // v1.0.75：name → pid（重名不串）
 @property (nonatomic, assign) NSInteger actionIndex;
 @property (nonatomic, strong) NSDictionary *action;
 @property (nonatomic, strong) NSArray *paramDefs;
@@ -357,17 +395,18 @@
     [tv deselectRowAtIndexPath:ip animated:YES];
     if (ip.row < (NSInteger)self.plans.count) {
         PTPlanVC *vc = [PTPlanVC new];
-        vc.planName = self.plans[ip.row][@"name"];
+        vc.planId = PTPlanPid(self.plans[ip.row], ip.row);   // v1.0.75：按 pid 打开，重名不串
         [self.navigationController pushViewController:vc animated:YES];
     } else {
         NSMutableDictionary *cfg = PTRead();
         NSMutableArray *plans = [NSMutableArray arrayWithArray:cfg[@"plans"] ?: @[]];
         NSString *name = [NSString stringWithFormat:@"新方案%lu", (unsigned long)(plans.count + 1)];
-        [plans addObject:@{ @"name": name, @"actions": @[] }];
+        NSString *newPid = [[NSUUID UUID] UUIDString];   // v1.0.75：新建即带唯一 pid（与设置页同规则）
+        [plans addObject:@{ @"name": name, @"pid": newPid, @"actions": @[] }];
         cfg[@"plans"] = plans;
         PTWrite(cfg);
         PTPlanVC *vc = [PTPlanVC new];
-        vc.planName = name;
+        vc.planId = newPid;
         [self.navigationController pushViewController:vc animated:YES];
         [self reload];
     }
@@ -377,10 +416,13 @@
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
         title:@"删除" handler:^(UIContextualAction *action, UIView *v, void (^done)(BOOL)) {
         NSDictionary *p = self.plans[ip.row];
+        NSString *pid = PTPlanPid(p, ip.row);   // v1.0.75：按 pid 删——重名时只删划掉的这一个
         NSMutableDictionary *cfg = PTRead();
         NSMutableArray *plans = [NSMutableArray array];
-        for (NSDictionary *x in cfg[@"plans"] ?: @[]) {
-            if (![x[@"name"] isEqualToString:p[@"name"]]) [plans addObject:x];
+        NSArray *raw = cfg[@"plans"] ?: @[];
+        for (NSUInteger i = 0; i < raw.count; i++) {
+            NSDictionary *x = raw[i];
+            if (![x isKindOfClass:[NSDictionary class]] || ![PTPlanPid(x, (NSInteger)i) isEqualToString:pid]) [plans addObject:x];
         }
         cfg[@"plans"] = plans;
         PTWrite(cfg);
@@ -411,10 +453,15 @@
 
 - (void)reload {
     NSDictionary *plan = nil;
-    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) { plan = p; break; }
+    NSArray *raw = PTRead()[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < raw.count; i++) {
+        NSDictionary *p = raw[i];
+        if (![p isKindOfClass:[NSDictionary class]]) continue;
+        // v1.0.75：按 pid 定位——重名方案是两条独立记录，按 name 找会错找另一个
+        if ([PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) { plan = p; break; }
     }
     if (!plan) { [self.navigationController popViewControllerAnimated:YES]; return; }
+    self.planName = plan[@"name"] ?: self.planName;   // v1.0.75：显示名跟随配置
     self.actions = [NSMutableArray arrayWithArray:plan[@"actions"] ?: @[]];
 
     CGFloat top = 110;
@@ -493,8 +540,11 @@
         if (!newName.length || [newName isEqualToString:self.planName]) return;
         NSMutableDictionary *cfg = PTRead();
         NSMutableArray *plans = [NSMutableArray array];
-        for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-            if ([p[@"name"] isEqualToString:self.planName]) {
+        NSArray *raw = cfg[@"plans"] ?: @[];
+        // v1.0.75：按 pid 定位要改名的方案——重名时只改这一个（旧版把所有同名都改了）
+        for (NSUInteger i = 0; i < raw.count; i++) {
+            NSDictionary *p = raw[i];
+            if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) {
                 NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
                 np[@"name"] = newName;
                 [plans addObject:np];
@@ -510,23 +560,26 @@
 
 - (void)recordTapped {
     NSDictionary *plan = nil;
-    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) { plan = p; break; }
+    NSArray *raw = PTRead()[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < raw.count; i++) {
+        NSDictionary *p = raw[i];
+        if (![p isKindOfClass:[NSDictionary class]]) continue;
+        if ([PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) { plan = p; break; }
     }
     if (PTFeaturesOfPlan(plan).count) {
         PTFeaturesVC *vc = [PTFeaturesVC new];
-        vc.planName = self.planName;
+        vc.planId = self.planId;   // v1.0.75：传 pid
         [self.navigationController pushViewController:vc animated:YES];
     } else {
         PTLearnVC *vc = [PTLearnVC new];
-        vc.planName = self.planName;
+        vc.planId = self.planId;   // v1.0.75：传 pid
         [self.navigationController pushViewController:vc animated:YES];
     }
 }
 
 - (void)addFeatureTapped {
     PTLearnVC *vc = [PTLearnVC new];
-    vc.planName = self.planName;
+    vc.planId = self.planId;   // v1.0.75：传 pid
     vc.onceMode = YES;
     [self.navigationController pushViewController:vc animated:YES];
 }
@@ -571,7 +624,7 @@
         }
         // v1.0.62：滑动(手动)已录动作再次点击 → 统一模板重录（预载已有轨迹）
         if ([type isEqualToString:@"recSwipe"]) {
-            PTDylibPresentOverlay(PTOverlayModeRecSwipe, self.planName, ip.row, act);
+            PTDylibPresentOverlay(PTOverlayModeRecSwipe, self.planId, ip.row, act);
             return;
         }
         if ([type isEqualToString:@"tapManual"]) type = @"tap";
@@ -579,10 +632,10 @@
         if (![type isEqualToString:@"delay"]) {
             PTOverlayMode mode = [type isEqualToString:@"doubleTap"] ? PTOverlayModeDoubleTap
                             : ([type isEqualToString:@"swipe"] ? PTOverlayModeSwipe : PTOverlayModeTap);
-            PTDylibPresentOverlay(mode, self.planName, ip.row, act);
+            PTDylibPresentOverlay(mode, self.planId, ip.row, act);   // v1.0.75：传 pid
         } else {
             PTActionParamVC *vc = [PTActionParamVC new];
-            vc.planName = self.planName;
+            vc.planId = self.planId;   // v1.0.75：传 pid
             vc.actionIndex = ip.row;
             vc.action = act;
             [self.navigationController pushViewController:vc animated:YES];
@@ -603,7 +656,7 @@
     NSIndexPath *ip = [self.tv indexPathForCell:cell];
     if (!ip || ip.row >= (NSInteger)self.actions.count) return;
     PTActionParamVC *vc = [PTActionParamVC new];
-    vc.planName = self.planName;
+    vc.planId = self.planId;   // v1.0.75：传 pid
     vc.actionIndex = ip.row;
     vc.action = self.actions[ip.row];
     [self.navigationController pushViewController:vc animated:YES];
@@ -664,22 +717,27 @@
 
 // v1.0.62：统一模板呈现"新增映射"四页面（dylib：半透明覆盖窗口 + 关菜单保留导航栈；
 // recStart/recStop 接引擎录制守卫）。取消/完成后重显菜单并回到方案页（修 bug B）。
+// v1.0.75：planName → planId——保存/刷新一律按 pid，重名方案不再串台。
 static UIWindow *gOverlayWindow = nil;
-static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInteger editIndex, NSDictionary *editAction) {
+static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planId, NSInteger editIndex, NSDictionary *editAction) {
     PTDylibHideMenuPreserving();   // 关菜单但保留导航栈（取消/完成后回到方案页，不改全局关菜单行为）
     PTOverlayPage *page = [PTOverlayPage new];
     page.mode = mode;
-    page.planName = planName;
     page.editIndex = editIndex;
     page.editAction = editAction;
     page.translucent = YES;        // dylib 半透明黑，透出 App
+    // 注：page.planName 是 host→page 的传参属性，PTOverlayPage 内部从不读取（deb 侧同理），
+    // v1.0.75 起 dylib 不再设置——方案定位已全量改走 planId。
     __weak typeof(page) wpage = page;
     page.onSave = ^(NSDictionary *a, NSInteger ei, NSDictionary *ea) {
         // dylib 保存（与引擎回放字段一致）
         NSMutableDictionary *cfg = PTRead();
         NSMutableArray *plans = [NSMutableArray array];
-        for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-            if ([p[@"name"] isEqualToString:planName]) {
+        NSArray *raw = cfg[@"plans"] ?: @[];
+        for (NSUInteger i = 0; i < raw.count; i++) {
+            NSDictionary *p = raw[i];
+            // v1.0.75：按 pid 写回（旧为按 name——重名时写进另一个同名方案）
+            if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:planId]) {
                 NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
                 NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
                 if (ei >= 0 && ea && ei < (NSInteger)acts.count) acts[ei] = a;
@@ -700,7 +758,8 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
         PTDylibShowMenu();
         UINavigationController *nav = (UINavigationController *)PTDylibMenuWindow().rootViewController;
         for (UIViewController *vc in nav.viewControllers) {
-            if ([vc isKindOfClass:[PTPlanVC class]] && [[(PTPlanVC *)vc planName] isEqualToString:planName]) {
+            // v1.0.75：按 pid 匹配栈里的方案页（重名时只刷新对应的那个）
+            if ([vc isKindOfClass:[PTPlanVC class]] && [[(PTPlanVC *)vc planId] isEqualToString:planId]) {
                 [(PTPlanVC *)vc reload];
                 break;
             }
@@ -727,7 +786,7 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
 - (void)configAction:(NSString *)type {
     if ([type isEqualToString:@"recSwipe"]) {
         // v1.0.62：滑动(手动)——统一模板（半透明覆盖层实地录制，落盘 @{x,y,t} 与引擎回放一致）
-        PTDylibPresentOverlay(PTOverlayModeRecSwipe, self.planName, -1, nil);
+        PTDylibPresentOverlay(PTOverlayModeRecSwipe, self.planId, -1, nil);   // v1.0.75：传 pid
     } else if ([type isEqualToString:@"delay"]) {
         UIAlertController *al = [UIAlertController alertControllerWithTitle:@"延迟"
             message:@"输入延迟毫秒数（如 500 = 0.5 秒）" preferredStyle:UIAlertControllerStyleAlert];
@@ -741,15 +800,18 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
     } else {
         PTOverlayMode mode = [type isEqualToString:@"doubleTap"] ? PTOverlayModeDoubleTap
                         : ([type isEqualToString:@"swipe"] ? PTOverlayModeSwipe : PTOverlayModeTap);
-        PTDylibPresentOverlay(mode, self.planName, -1, nil);
+        PTDylibPresentOverlay(mode, self.planId, -1, nil);   // v1.0.75：传 pid
     }
 }
 
 - (void)saveActions {
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+    NSArray *raw = cfg[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < raw.count; i++) {
+        NSDictionary *p = raw[i];
+        // v1.0.75：按 pid 写回——重名方案的动作各写各的，不再互相覆盖
+        if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) {
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             np[@"actions"] = self.actions;
             [plans addObject:np];
@@ -784,8 +846,12 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
 
 - (void)reload {
     NSDictionary *plan = nil;
-    for (NSDictionary *p in PTRead()[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) { plan = p; break; }
+    NSArray *raw = PTRead()[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < raw.count; i++) {
+        NSDictionary *p = raw[i];
+        if (![p isKindOfClass:[NSDictionary class]]) continue;
+        // v1.0.75：按 pid 定位（重名不串）
+        if ([PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) { plan = p; break; }
     }
     if (!plan) { [self.navigationController popViewControllerAnimated:YES]; return; }
     self.features = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(plan)];
@@ -852,7 +918,7 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
     [al addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [al addAction:[UIAlertAction actionWithTitle:@"重新录制" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
         PTLearnVC *vc = [PTLearnVC new];
-        vc.planName = self.planName;
+        vc.planId = self.planId;   // v1.0.75：传 pid
         vc.replaceIndex = ip.row;
         [self.navigationController pushViewController:vc animated:YES];
     }]];
@@ -866,8 +932,11 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
     if (style != UITableViewCellEditingStyleDelete || ip.row >= (NSInteger)self.features.count) return;
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+    NSArray *raw = cfg[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < raw.count; i++) {
+        NSDictionary *p = raw[i];
+        // v1.0.75：按 pid 写回（重名不串）
+        if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) {
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
             [fts removeObjectAtIndex:ip.row];
@@ -1164,7 +1233,8 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
     if (!name) name = @"新按键";
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *nplans = [NSMutableArray arrayWithArray:cfg[@"plans"] ?: @[]];
-    [nplans addObject:@{@"name": name, @"features": @[ft], @"actions": @[]}];
+    // v1.0.75：新建即带唯一 pid（与设置页/引擎补发规则并存——新方案不需要惰性补发）
+    [nplans addObject:@{@"name": name, @"pid": [[NSUUID UUID] UUIDString], @"features": @[ft], @"actions": @[]}];
     cfg[@"plans"] = nplans;
     PTWrite(cfg);
     PTDylibSetLearningLocal(NO);
@@ -1187,8 +1257,11 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
     BOOL done = NO;
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+    NSArray *raw = cfg[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < raw.count; i++) {
+        NSDictionary *p = raw[i];
+        // v1.0.75：按 pid 写回（重名不串）
+        if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) {
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
             [fts addObject:self.readyFt];
@@ -1203,7 +1276,10 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
     PTWrite(cfg);
     PTDylibSetLearningLocal(NO);
     NSUInteger total = 0;
-    for (NSDictionary *p in plans) if ([p[@"name"] isEqualToString:self.planName]) { total = PTFeaturesOfPlan(p).count; break; }
+    for (NSUInteger i = 0; i < plans.count; i++) {
+        NSDictionary *p = plans[i];
+        if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) { total = PTFeaturesOfPlan(p).count; break; }
+    }
     [self appendLog:[NSString stringWithFormat:@"已增加 1 条特征（共 %lu 条），回方案页", (unsigned long)total]];
     NSMutableArray *stack = [NSMutableArray arrayWithArray:self.navigationController.viewControllers];
     NSUInteger base = NSNotFound;
@@ -1223,8 +1299,11 @@ static void PTDylibPresentOverlay(PTOverlayMode mode, NSString *planName, NSInte
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
     BOOL done = NO;
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+    NSArray *raw = cfg[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < raw.count; i++) {
+        NSDictionary *p = raw[i];
+        // v1.0.75：按 pid 写回（重名不串）
+        if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) {
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *fts = [NSMutableArray arrayWithArray:PTFeaturesOfPlan(np)];
             if (self.replaceIndex >= 0 && self.replaceIndex < (NSInteger)fts.count) {
@@ -1484,8 +1563,11 @@ static void *PTParamValueKey = &PTParamValueKey;
 - (void)done {
     NSMutableDictionary *cfg = PTRead();
     NSMutableArray *plans = [NSMutableArray array];
-    for (NSDictionary *p in cfg[@"plans"] ?: @[]) {
-        if ([p[@"name"] isEqualToString:self.planName]) {
+    NSArray *raw = cfg[@"plans"] ?: @[];
+    for (NSUInteger i = 0; i < raw.count; i++) {
+        NSDictionary *p = raw[i];
+        // v1.0.75：按 pid 写回（重名不串）
+        if ([p isKindOfClass:[NSDictionary class]] && [PTPlanPid(p, (NSInteger)i) isEqualToString:self.planId]) {
             NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:p];
             NSMutableArray *acts = [NSMutableArray arrayWithArray:np[@"actions"] ?: @[]];
             if (self.actionIndex >= 0 && self.actionIndex < (NSInteger)acts.count) {
