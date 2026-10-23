@@ -1,3 +1,45 @@
+# PageTurner v1.0.75
+
+> 巨魔 dylib UI 完整 pid 化——「同名方案」bug 的最后一环。v1.0.74 已把 pid 贯通到引擎执行层（gPlans 按 pid 索引），但巨魔 dylib 的设置 UI 仍全文件按 **name** 匹配方案：两个方案同名时，**删除一个把两个都删掉**、**改名把两个都改名**、**加动作/加特征写进另一个同名方案**——与设置页 v1.0.66-fix 修复前同款 bug。本版把巨魔 UI 的方案定位全量改到 pid（引擎已就绪，本版是纯 UI 层改动）。
+
+## ♻️ 改动
+
+### 1. 巨魔 UI 读配置即惰性补发 pid（`PTUIRead`）
+- 新增 `PTUIRead()` 取代原来的 `#define PTRead() PTDylibReadCfg()`：
+  读配置时给无 `pid` 的方案补「name#下标」（**Core `PTPlanPid` 同一函数、同一规则**）并落盘。
+- 与设置页 `PTRead`（v1.0.66-fix）、引擎 `PTDylibLoadConfig`（v1.0.74）三端规则一致，
+  对同一份配置补出同一批 pid；补发只写盘一次。
+- 之后所有页面一律按 pid 定位，`name` 退化为**纯显示字段**。
+
+### 2. 五个页面全量按 pid 定位
+| 页面 | 旧行为（按 name） | 新行为（按 pid） |
+| --- | --- | --- |
+| 方案列表 `PTPlansVC` | 点行/删除按 name 匹配 | 打开传 `planId`；删除只删划掉的这一个 |
+| 方案页 `PTPlanVC` | reload/改名/存动作按 name | 全部按 `planId`；`planName` 仅作显示（标题、改名框预填、测试页标题） |
+| 特征列表 `PTFeaturesVC` | 读方案/删特征/重录传参按 name | 按 `planId` |
+| 学习页 `PTLearnVC` | 存特征（新增/替换/once）按 name | 按 `planId`；**新建方案带 UUID pid**（与设置页新建同规则） |
+| 动作参数页 `PTActionParamVC` | 保存参数按 name | 按 `planId` |
+
+### 3. 新增映射覆盖层保存按 pid 写回
+- `PTDylibPresentOverlay` 入参 `planName` → `planId`：
+  - `onSave` 按 pid 找方案写动作（旧版写进第一个同名方案）；
+  - `onDismiss` 刷新导航栈里的方案页也按 pid 匹配（重名时只刷新对应的那个）。
+- `PTOverlayPage.planName` 是 host→page 的传参属性，`PTOverlayPage` 内部从不读取
+  （deb 侧同样只传不用）——dylib 不再设置它，无行为影响。
+
+## ⚠️ 行为变化（属预期修复）
+
+1. **巨魔 UI 删除方案不再误删同名者**：左滑删除只删划掉的那一个（旧版两个同名的一起消失）。
+2. **巨魔 UI 改名只改这一个**（旧版所有同名方案一起改名）。
+3. **巨魔 UI 加动作 / 加特征 / 调参数各进各的方案**（旧版写进第一个同名方案）。
+4. 测试页仍按**特征匹配**执行（与 deb 一致），pid 化不影响测试链路。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `targets/dylib/PTDylibUI.m` | 新增 `PTUIRead`（读即补发 pid 并落盘）；五个 VC 增加 `planId` 属性（`PTPlanVC` 的 `planName` 保留为显示字段）；全部方案定位 / 写回按 pid；新建方案带 UUID pid；`PTDylibPresentOverlay` 入参改 planId |
+
 # PageTurner v1.0.74
 
 > 引擎执行层方案 pid 贯通——修复「同名方案」bug 的最后一环。设置页 UI 早在 v1.0.66-fix 已按 pid 定位，但引擎 `gPlans` 一直按 **name** 索引：两个方案同名时**后写覆盖前一个**（执行错方案）、改名即失联、删除/编辑按 name 匹配会误伤同名者；巨魔 dylib UI 则完全没有 pid。本版把 pid 贯通到引擎执行层（deb / dylib / 设置三目标共链的 Core），巨魔 UI 的完整 pid 化见 v1.0.75。
