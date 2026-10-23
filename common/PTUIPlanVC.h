@@ -6,6 +6,8 @@
 
 #import "PTUIBaseListVC.h"
 
+@class PTDragSortHelper;   // 属性仅需前向声明（.m 内 import PTDragSortHelper.h）
+
 @interface PTUIPlanVC : PTUIBaseListVC <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) NSString *planId;   // 方案唯一身份（重名不串名）
 @property (nonatomic, strong) NSString *planName;
