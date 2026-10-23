@@ -351,8 +351,9 @@ void PTDylibLoadConfig(BOOL force) {
     for (NSUInteger i = 0; i < plansArr.count; i++) {
         NSDictionary *pl = plansArr[i];
         if (![pl isKindOfClass:[NSDictionary class]] || !pl[@"name"]) continue;
-        id pidField = pl[@"pid"];
-        if (![pidField isKindOfClass:[NSString class]] || !pidField.length) { needPid = YES; break; }
+        // v1.0.74(3/3)：取字符串字段要先过 isKindOfClass 再转型——id 上直接点 .length 编译不过
+        NSString *pidField = [pl[@"pid"] isKindOfClass:[NSString class]] ? pl[@"pid"] : nil;
+        if (!pidField.length) { needPid = YES; break; }
     }
     if (needPid) {
         NSMutableArray *out = [NSMutableArray array];
@@ -360,15 +361,18 @@ void PTDylibLoadConfig(BOOL force) {
             id pl = plansArr[i];
             if ([pl isKindOfClass:[NSDictionary class]] && pl[@"name"]) {
                 NSMutableDictionary *np = [NSMutableDictionary dictionaryWithDictionary:pl];
-                id pf = np[@"pid"];
-                if (![pf isKindOfClass:[NSString class]] || !pf.length) np[@"pid"] = PTPlanPid(np, (NSInteger)i);
+                NSString *pf = [np[@"pid"] isKindOfClass:[NSString class]] ? np[@"pid"] : nil;
+                if (!pf.length) np[@"pid"] = PTPlanPid(np, (NSInteger)i);
                 pl = np;
             }
             [out addObject:pl];
         }
         plansArr = out;
-        gConfig[@"plans"] = out;
-        PTWriteCfg(gConfig);   // 落盘唯一 pid（三端下次读即带 pid）
+        // v1.0.74(3/3)：gConfig 声明为不可变 NSDictionary*，下标赋值要先转可变副本
+        NSMutableDictionary *mCfg = [NSMutableDictionary dictionaryWithDictionary:gConfig];
+        mCfg[@"plans"] = out;
+        gConfig = mCfg;
+        PTWriteCfg(mCfg);   // 落盘唯一 pid（三端下次读即带 pid）
         PTDylibLog(@"[配置] 方案 pid 惰性补发完成（%lu 条）", (unsigned long)out.count);
     }
     for (NSUInteger i = 0; i < plansArr.count; i++) {
