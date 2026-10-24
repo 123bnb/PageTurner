@@ -74,6 +74,15 @@ jobs:
       - name: Check shared table wiring (dataSource/delegate guard)
         run: bash scripts/check_table_wiring.sh
 
+      # v1.0.80：深色模式色彩安全门禁。系统深色模式会把容器背景变暗，
+      # UI 层写死白/黑/灰背景或文字色 → 暗底白块糊成一片/暗底黑字不可读，
+      # 浅色模式下肉眼完全正常、只有用户开深色模式才炸（与白屏同类：
+      # 装配疏漏编译期零暴露）。禁背景写死、禁文字写死黑灰（彩色底白字
+      # 放行——白字只出现在彩色底上，两模式均可读）；直写彩色必须包
+      # colorWithDynamicProvider 按深浅分支。
+      - name: Check dark mode color safety
+        run: bash scripts/check_darkmode.sh
+
       # ---------- PTCoreLogic 纯逻辑测试（clone Theos 之前，秒级） ----------
       # v1.0.78（评审 #6）：引擎六个实现文件都 import UIKit，macOS 上编不了 →
       # CI 原本零单测。v1.0.78 把零 UI 依赖的纯逻辑下沉 common/PTCoreLogic.{h,m}
