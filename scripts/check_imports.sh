@@ -30,12 +30,24 @@ cd "$(dirname "$0")/.."
 FILES=("$@")
 if [ ${#FILES[@]} -eq 0 ]; then
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    mapfile -t FILES < <(git ls-files '*.m' '*.h')
+    # 注意：不用 mapfile——macOS 的 /bin/bash 是 3.2，没有该内建
+    # （v1.0.78-fix：CI macos-latest 上 mapfile 直接 command not found，
+    # 空 FILES 又触发 set -u 的 unbound variable，整关白挂）。
+    FILES=()
+    while IFS= read -r f; do FILES+=("$f"); done < <(git ls-files '*.m' '*.h')
   else
-    mapfile -t FILES < <(find . -path ./.git -prune -o -path ./.theos -prune -o \
+    FILES=()
+    while IFS= read -r f; do FILES+=("$f"); done < <(find . -path ./.git -prune -o -path ./.theos -prune -o \
       -path ./packages -prune -o -path ./out -prune -o -path ./.pt-version-snapshot -prune -o \
       -name '*.[mh]' -print | sed 's|^\./||')
   fi
+fi
+
+# 空文件列表 = 发现机制坏了（不是「没文件可查」）——必须响亮失败，
+# 绝不静默跳过（v1.0.78-fix：CI 上假绿比挂更糟）。
+if [ ${#FILES[@]} -eq 0 ]; then
+  echo "check_imports: ✗ 未发现任何待检查文件（git ls-files/find 异常？）" >&2
+  exit 1
 fi
 
 python3 - "${FILES[@]}" <<'PY'
@@ -68,7 +80,11 @@ for h in headers:
         declared_in[h].add(m.group(1))
 
 if not project_types:
-    print("check_imports: 未发现任何 PT 前缀工程类型，检查无意义，退出")
+    if headers:
+        # 有头文件却零 PT 类型 = 命名约定被破坏或发现机制异常，响亮失败
+        print("check_imports: ✗ 发现工程头文件但零 PT 前缀类型（PT 命名约定被破坏？）")
+        sys.exit(1)
+    print("check_imports: 输入中没有工程头文件（只传了 .m？），无事可查")
     sys.exit(0)
 
 # ---------- 2. 去注释去字符串（保留换行以维持行号） ----------
