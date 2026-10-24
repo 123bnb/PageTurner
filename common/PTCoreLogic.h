@@ -105,4 +105,16 @@ extern NSString *PTVolPlanPid(NSArray *plans, NSString *volSource);
 // 两个都在则不动。调用方负责 PTUIWriteCfg 落盘。
 extern void PTEnsureVolPlans(NSMutableDictionary *cfg);
 
+// ---------- 音量键机制的两个纯判定（v1.0.80 #37 从 PTEngineVolume.m 下沉，供单测） ----------
+#define kVolStep      (1.0f / 16.0f)   // 单次按键步长（DVT v1.0.18：实测 0→满 16 档）
+#define kVolMaxBurst  8                 // delta 估算合并次数封顶（防极端跳变刷屏）
+#define kVolBoundHigh 0.75f             // 徘徊弹回上界：>12/16 弹回 1/16
+#define kVolBoundLow  0.0f              // 徘徊弹回下界：触底（含 0/负）弹回
+// delta 估算分治（对齐 DVT TapPointsDebounced 1061-1064 的滑动/点击二分）：
+// 序列含 swipe/recSwipe → n 恒 1（滑动回放几百毫秒，估算只会制造连滑误蓄）；
+// 纯 tap/doubleTap → 按 |delta|/步长估算 n（1~kVolMaxBurst 封顶，连按合并也逐页翻）。
+extern int  PTVolEstimateCount(float delta, NSArray *actions);
+// 徘徊弹回判定：超过 12/16 或触底才弹回 1/16（不钉死 0.5——DVT v1.0.18 替代方案）
+extern BOOL PTVolNeedsReset(float v);
+
 #endif  // PTCoreLogic_h

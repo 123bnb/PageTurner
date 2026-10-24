@@ -256,6 +256,27 @@ void PTEnsureVolPlans(NSMutableDictionary *cfg) {
     cfg[@"plans"] = plans;
 }
 
+// ---------- 音量键机制的两个纯判定（v1.0.80 #37 从 PTEngineVolume.m 下沉：UIKit 环境
+// 编不进 macOS 单测，这两个判定本身零宿主依赖，下沉后 tests/ 直接覆盖） ----------
+
+// delta 估算分治：调用方传方案动作数组（PTEngineVolume.m 传 gPlans[pid][@"actions"]）。
+// 脏数据容错：actions 非数组/元素非字典时跳过该元素，不崩。
+int PTVolEstimateCount(float delta, NSArray *actions) {
+    for (id a in ([actions isKindOfClass:[NSArray class]] ? actions : @[])) {
+        NSString *t = [a isKindOfClass:[NSDictionary class]] ? a[@"type"] : nil;
+        if ([t isEqualToString:@"swipe"] || [t isEqualToString:@"recSwipe"]) return 1;
+    }
+    int n = (int)(fabsf(delta) / kVolStep + 0.5f);
+    if (n < 1) n = 1;
+    if (n > kVolMaxBurst) n = kVolMaxBurst;
+    return n;
+}
+
+// 徘徊弹回判定：>12/16（0.75）或触底（<=0）→ 弹回 1/16；12/16 本身不弹（闭边界留给真实按键）
+BOOL PTVolNeedsReset(float v) {
+    return (v > kVolBoundHigh || v <= kVolBoundLow);
+}
+
 // ---------- 原子写配置（原 PTEngineConfig.m） ----------
 // v1.0.71：原子写指定路径（从 PTDylibWriteCfg 抽出）——设置页双写（jbroot 真实路径 +
 // 普通路径兜底）直接用它，不必各写一份序列化逻辑。

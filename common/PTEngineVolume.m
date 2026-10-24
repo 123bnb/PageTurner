@@ -38,13 +38,11 @@
 #import "PTEngineInternal.h"
 #import "PTEngineVolume.h"
 
-// ---------- 常量（数值型统一宏在 PTCoreLogic.h；此处只留本文件私有） ----------
-static const float kVolStep      = 1.0f / 16.0f;   // 单次按键步长（DVT v1.0.18：实测 0→满 16 档）
+// ---------- 常量（数值型统一宏在 PTCoreLogic.h：kVolStep/kVolMaxBurst/kVolBoundHigh/
+// kVolBoundLow 随 PTVolEstimateCount/PTVolNeedsReset 下沉纯逻辑层，v1.0.80 #37）；
+// 此处只留本文件私有 ----------
 static const float kVolRest      = 1.0f / 16.0f;   // 徘徊目标 1/16
-static const float kVolBoundHigh = 0.75f;          // 超过 12/16 弹回
-static const float kVolBoundLow  = 0.0f;           // 触底弹回
 static const double kVolDebounce = 0.10;           // 去抖窗（DVT kTapDebounceSec）
-static const int    kVolMaxBurst = 8;              // delta 估算合并次数封顶（DVT 同款，防极端跳变刷屏）
 static const float  kVolJitter   = 0.0005f;        // 抖动过滤阈值
 
 BOOL gVolEnabled   = NO;    // 音量键模式总开关（volEnabled，默认关）——PTDylibLoadConfig 读写
@@ -120,10 +118,8 @@ void PTVolumeApplyHud(BOOL hidden) {
 // 徘徊（v1.0.18 方案，替代「钉死 0.5」）：不钉死，音量随按键真实移动；
 // 仅超过 12/16 或触底时，50ms 延迟弹回 1/16（避开同帧竞态——DVT v1.0.8 同款）
 // ============================================================
-static BOOL VolumeNeedsReset(float v) { return (v > kVolBoundHigh || v <= kVolBoundLow); }
-
 static void DoReset(float oldVol, float nowVol) {
-    if (VolumeNeedsReset(nowVol) || VolumeNeedsReset(oldVol)) {
+    if (PTVolNeedsReset(nowVol) || PTVolNeedsReset(oldVol)) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ PTVolSetSystemVolume(kVolRest); });
     }
@@ -145,30 +141,12 @@ static void PTVolDeactivateSession(void) {
 }
 
 // ============================================================
-// delta 估算分治（对齐 DVT TapPointsDebounced 1061-1064 的滑动/点击二分）
-// DVT：滑动模式一次触发一次回放、不估算；点击模式才按 delta 估算 n 逐次触发
-// （连按被合并成一次大跳变时也能每键翻一页）。PageTurner 动作序列是混合的，
-// 按「序列里有没有滑动回放」二分：有 swipe/recSwipe → n 恒 1（滑动回放本身
-// 几百毫秒，估算只会制造连滑误蓄）；纯 tap/doubleTap 序列 → 估算 n（1~8 封顶）。
-// ============================================================
-static int PTVolEstimateCount(float delta, NSString *planId) {
-    NSDictionary *p = gPlans[planId];
-    for (NSDictionary *a in p[@"actions"] ?: @[]) {
-        NSString *t = a[@"type"];
-        if ([t isEqualToString:@"swipe"] || [t isEqualToString:@"recSwipe"]) return 1;
-    }
-    int n = (int)(fabsf(delta) / kVolStep + 0.5f);
-    if (n < 1) n = 1;
-    if (n > kVolMaxBurst) n = kVolMaxBurst;
-    return n;
-}
-
-// ============================================================
 // 单次音量键 → 汇入连滑状态机（去抖 + 估算 + 逐次派发）
 // 派发目标 = PTChainHandleHitVolume → PTChainOnHit（与翻页器滑动命中
 // 完全同一入口）：起播/续滑/升档/刹停/未命中由状态机按 pid 原样裁定。
 // 同步 for 循环派发 n 次（DVT 1069 同款）：第 1 次起播后 gExecRunning=YES，
 // 后续次数走「回放中累计」路径——与真实连按 5 次进连滑的行为逐字一致。
+// （估算函数本体在 PTCoreLogic.m——纯判定，见其头注释；v1.0.80 #37 下沉）
 // ============================================================
 static void PTVolTapPoints(float delta) {
     // 整体上主队列：KVO 回调线程不定，而 PTChainOnHit/pill/状态机全局均要求主线程
@@ -187,7 +165,7 @@ static void PTVolTapPoints(float delta) {
             PTDylibLog(@"[音量] %@ 未配置方案（音量键模式未设置动作），忽略", isPlus ? kVolNameUp : kVolNameDown);
             return;
         }
-        int n = PTVolEstimateCount(delta, pid);
+        int n = PTVolEstimateCount(delta, [gPlans[pid][@"actions"] ?: @[]]);
         NSString *source = isPlus ? kVolNameUp : kVolNameDown;
         for (int i = 0; i < n; i++) PTChainHandleHitVolume(pid, source);
     });
@@ -216,7 +194,7 @@ static void PTVolTapPoints(float delta) {
     float delta = now - old;
     if (fabsf(delta) < kVolJitter) return;                                    // 抖动过滤
     if (fabsf(now - kVolRest) < 0.001f) return;                               // 停在 1/16（含自己的对齐/弹回写回）→ 无动作
-    if (VolumeNeedsReset(old) && fabsf(now - kVolRest) < 0.05f) return;       // 弹回副作用双保险：旧值越界且新值≈1/16 = 插件自己拉的
+    if (PTVolNeedsReset(old) && fabsf(now - kVolRest) < 0.05f) return;        // 弹回副作用双保险：旧值越界且新值≈1/16 = 插件自己拉的
     PTVolTapPoints(delta);             // 用这次变化触发（+ / - 由 delta 符号决定）
     DoReset(old, now);                 // 触界才弹回 1/16（不钉死）
 }

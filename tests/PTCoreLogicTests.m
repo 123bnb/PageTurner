@@ -13,9 +13,11 @@
 //   · PTDylibReadCfg —— PTTestMatchFeature 读实时配置的通道（实现在
 //     PTEngineConfig.m）；假实现直接返回注入的字典，匹配逻辑脱离文件系统。
 //
-// 覆盖（12 组）：PTPlanPid / PTPlanNameForId / PTDirName / PTActionText /
+// 覆盖（15 组）：PTPlanPid / PTPlanNameForId / PTDirName / PTActionText /
 //   PTFeaturesOfPlan / PTDuplicate / PTStable / PTMatchPlan /
-//   PTTestMatchFeature / PTIsLearnedSender / PTWriteCfgTo / PTRecSwipeInterp。
+//   PTTestMatchFeature / PTIsLearnedSender / PTWriteCfgTo / PTRecSwipeInterp /
+//   音量特殊方案（PTVolPlanPid/PTEnsureVolPlans）/ PTVolEstimateCount /
+//   PTVolNeedsReset。
 // 原则：只测「输入 → 输出」的判定与计算，不测宿主状态与 UI。
 // ============================================================
 #import <Foundation/Foundation.h>
@@ -340,6 +342,118 @@ static void test_rec_swipe_interp(void) {
 }
 
 // ============================================================
+// 13. 音量特殊方案：PTVolPlanPid 精确匹配 / PTEnsureVolPlans 幂等懒创建
+//     （v1.0.80——固定 pid 跨进程稳定，不走「name#下标」补发）
+// ============================================================
+static void test_vol_plans(void) {
+    section(__func__);
+    // 混合配置：普通方案 + 两个 vol 特殊方案（故意打乱顺序、加脏数据）
+    NSArray *plans = @[
+        @{@"name": @"普通甲", @"pid": @"pA", @"actions": @[]},
+        @{@"name": @"音量+", @"pid": kVolPidUp, @"volSource": kVolSourceUp, @"actions": @[]},
+        @"脏数据非字典",
+        @{@"name": @"音量-", @"pid": kVolPidDown, @"volSource": kVolSourceDown, @"actions": @[]},
+    ];
+    CHECK([PTVolPlanPid(plans, kVolSourceUp) isEqualToString:kVolPidUp]);
+    CHECK([PTVolPlanPid(plans, kVolSourceDown) isEqualToString:kVolPidDown]);
+    // 不存在的 volSource / 非字符串 → nil
+    CHECK(PTVolPlanPid(plans, @"left") == nil);
+    CHECK(PTVolPlanPid(plans, nil) == nil);
+    CHECK(PTVolPlanPid(plans, @123) == nil);
+    // 普通方案无 volSource 字段 → 不误命中
+    CHECK(PTVolPlanPid(@[@{@"name": @"普通甲"}], kVolSourceUp) == nil);
+
+    // 懒创建：空配置 → 补两个空壳（固定 pid/锁定名/空动作），已有则不动
+    NSMutableDictionary *cfg1 = [NSMutableDictionary dictionary];
+    PTEnsureVolPlans(cfg1);
+    NSArray *out1 = cfg1[@"plans"];
+    NSDictionary *sh1 = out1.firstObject;
+    NSArray *acts1 = sh1[@"actions"];
+    CHECK(out1.count == 2);
+    CHECK([PTVolPlanPid(out1, kVolSourceUp) isEqualToString:kVolPidUp]);
+    CHECK([PTVolPlanPid(out1, kVolSourceDown) isEqualToString:kVolPidDown]);
+    CHECK([sh1[@"name"] isEqualToString:kVolNameUp]);
+    CHECK([acts1 isKindOfClass:[NSArray class]] && acts1.count == 0);
+
+    // 幂等：再调一次不重复补（ plans 数不变、内容不变）
+    PTEnsureVolPlans(cfg1);
+    NSArray *out1b = cfg1[@"plans"];
+    CHECK(out1b.count == 2);
+
+    // 只缺一个（如用户手动删了 vol-down）→ 只补缺的那个，原有不动
+    NSMutableDictionary *cfg2 = [@{@"plans": [@[
+        @{@"name": kVolNameUp, @"pid": kVolPidUp, @"volSource": kVolSourceUp,
+          @"actions": @[@{@"type": @"tap", @"x": @1, @"y": @2}]}] mutableCopy]} mutableCopy];
+    PTEnsureVolPlans(cfg2);
+    NSArray *out2 = cfg2[@"plans"];
+    NSArray *acts2 = out2.firstObject[@"actions"];
+    CHECK(out2.count == 2);
+    CHECK([PTVolPlanPid(out2, kVolSourceUp) isEqualToString:kVolPidUp]);
+    CHECK([PTVolPlanPid(out2, kVolSourceDown) isEqualToString:kVolPidDown]);
+    CHECK(acts2.count == 1);   // 原有动作不被清掉
+
+    // plans 非数组（脏配置）→ 不崩，按空处理
+    NSMutableDictionary *cfg3 = [@{@"plans": @"不是数组"} mutableCopy];
+    PTEnsureVolPlans(cfg3);
+    NSArray *out3 = cfg3[@"plans"];
+    CHECK([out3 isKindOfClass:[NSArray class]] && out3.count == 2);
+}
+
+// ============================================================
+// 14. PTVolEstimateCount：delta 估算分治（v1.0.80 #37）
+//     纯 tap 序列 → 按 |delta|/步长估算（1~8 封顶）；
+//     含 swipe/recSwipe → n 恒 1（滑动回放不估算，DVT 滑动模式同款）
+// ============================================================
+static void test_vol_estimate_count(void) {
+    section(__func__);
+    NSArray *taps  = @[@{@"type": @"tap"}, @{@"type": @"doubleTap"}];
+    NSArray *mixSw = @[@{@"type": @"tap"}, @{@"type": @"swipe", @"x1": @0, @"y1": @0, @"x2": @9, @"y2": @9}];
+    NSArray *recSw = @[@{@"type": @"recSwipe", @"pts": @[@1, @2]}];
+
+    // 一次按键（1/16）→ 1
+    CHECK(PTVolEstimateCount(kVolStep, taps) == 1);
+    CHECK(PTVolEstimateCount(-kVolStep, taps) == 1);      // 反向同理（取绝对值）
+    // 连按被合并成 3 档跳变 → 3（每键翻一页）
+    CHECK(PTVolEstimateCount(3 * kVolStep, taps) == 3);
+    CHECK(PTVolEstimateCount(-5 * kVolStep, taps) == 5);
+    // 半档四舍五入 → 1（<1 也保底 1）
+    CHECK(PTVolEstimateCount(0.4f * kVolStep, taps) == 1);
+    // 极端跳变封顶 8（DVT 同款，防刷屏）
+    CHECK(PTVolEstimateCount(20 * kVolStep, taps) == 8);
+    CHECK(PTVolEstimateCount(-99 * kVolStep, taps) == 8);
+    CHECK(PTVolEstimateCount(0.0f, taps) == 1);
+    // 含滑动回放 → 恒 1，再大 delta 也不估算（滑动几百毫秒，估算只会制造连滑误蓄）
+    CHECK(PTVolEstimateCount(9 * kVolStep, mixSw) == 1);
+    CHECK(PTVolEstimateCount(9 * kVolStep, recSw) == 1);
+    // 空序列 / 脏数据 → 走估算兜底，不崩
+    CHECK(PTVolEstimateCount(2 * kVolStep, @[]) == 2);
+    CHECK(PTVolEstimateCount(2 * kVolStep, nil) == 2);
+    CHECK(PTVolEstimateCount(2 * kVolStep, @[@"脏", @42]) == 2);
+    // delay 在序列里不影响（非滑动类）
+    CHECK(PTVolEstimateCount(2 * kVolStep, @[@{@"type": @"delay", @"ms": @500}]) == 2);
+}
+
+// ============================================================
+// 15. PTVolNeedsReset：徘徊弹回边界（v1.0.80 #37）
+//     >12/16（0.75）或触底 → 弹回 1/16；12/16 本身不弹（留给真实按键）
+// ============================================================
+static void test_vol_needs_reset(void) {
+    section(__func__);
+    float s = kVolStep;
+    // 正常徘徊区间（1/16 ~ 12/16）→ 不弹回
+    CHECK(PTVolNeedsReset(1 * s) == NO);
+    CHECK(PTVolNeedsReset(6 * s) == NO);
+    CHECK(PTVolNeedsReset(12 * s) == NO);      // 12/16 = 0.75 闭边界，不弹
+    // 超过 12/16 → 弹回（0.7501 起）
+    CHECK(PTVolNeedsReset(12.5f * s) == YES);
+    CHECK(PTVolNeedsReset(13 * s) == YES);
+    CHECK(PTVolNeedsReset(1.0f) == YES);
+    // 触底/越界 → 弹回
+    CHECK(PTVolNeedsReset(0.0f) == YES);
+    CHECK(PTVolNeedsReset(-0.1f) == YES);
+}
+
+// ============================================================
 int main(void) {
     @autoreleasepool {
         test_plan_pid();
@@ -354,6 +468,9 @@ int main(void) {
         test_is_learned_sender();
         test_write_cfg_to();
         test_rec_swipe_interp();
+        test_vol_plans();
+        test_vol_estimate_count();
+        test_vol_needs_reset();
         NSLog(@"----------------------------------------");
         NSLog(@"PTCoreLogic: %d 通过 / %d 失败", gPass, gFail);
     }
