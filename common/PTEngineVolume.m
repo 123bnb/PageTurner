@@ -48,7 +48,10 @@ static const float  kVolJitter   = 0.0005f;        // 抖动过滤阈值
 BOOL gVolEnabled   = NO;    // 音量键模式总开关（volEnabled，默认关）——PTDylibLoadConfig 读写
 BOOL gVolHudHidden = YES;   // 隐藏系统音量条（volHudHidden，默认开）——PTDylibLoadConfig 读写
 
-static NSObject        *gVolObs     = nil;   // KVO + 前后台通知观察者
+@class PTVolumeObserver;    // 前向声明（@interface 在本文件下方——KVO 观察者要按真实类型持有，
+                            // 否则 [gVolObs ptAppDidBecomeActive] 过不了 NSObject 静态类型检查）
+
+static PTVolumeObserver *gVolObs = nil;   // KVO + 前后台通知观察者
 static BOOL             gVolRunning = NO;   // 机制已注册（幂等）
 static CFAbsoluteTime   gVolLastTap = 0;    // 去抖时间戳（DVT gLastTap）
 static MPVolumeView    *gVolView     = nil; // 离屏 MPVolumeView（HUD 抑制）
@@ -165,7 +168,11 @@ static void PTVolTapPoints(float delta) {
             PTDylibLog(@"[音量] %@ 未配置方案（音量键模式未设置动作），忽略", isPlus ? kVolNameUp : kVolNameDown);
             return;
         }
-        int n = PTVolEstimateCount(delta, [gPlans[pid][@"actions"] ?: @[]]);
+        // 直接传原始 actions 值（PTVolEstimateCount 内部对 nil/非数组/脏元素有容错）。
+        // 踩坑记录（v1.0.80 CI 实证）：不要写成 [X ?: @[]]——GNU 省略中项的三元
+        // 「?:」不能当**消息接收者**，clang 在该位置报 expected identifier；
+        // 语句级/消息参数位（cfg[@"plans"] ?: @[]）则全仓沿用无碍。
+        int n = PTVolEstimateCount(delta, gPlans[pid][@"actions"]);
         NSString *source = isPlus ? kVolNameUp : kVolNameDown;
         for (int i = 0; i < n; i++) PTChainHandleHitVolume(pid, source);
     });
