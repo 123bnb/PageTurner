@@ -119,9 +119,13 @@ static const CGFloat kZoneH   = 56.0;   // 区头高（buildUI 游标推进用�
     [card addSubview:_swHud];
 
     // ---------- ② 音量+ 区（绿区头 + 表1） ----------
+    // 踩坑记录（v1.0.80 CI 实证）：hintOut:(UILabel **) 在 ARC 下隐含 __autoreleasing，
+    // 不能直接 &ivar 写回（passing address of non-local object…write-back）——局部中转。
     top += 108 + kGap;
+    UILabel *upHint = nil;
     [self addZoneHeaderAt:top color:[UIColor systemGreenColor] title:@"音量+ 映射区"
-                    hint:@"按音量+ 键 → 依次执行下列动作" hintOut:&_upHint];
+                    hint:@"按音量+ 键 → 依次执行下列动作" hintOut:&upHint];
+    _upHint = upHint;
     top += kZoneH + 8;
     self.tv = [[UITableView alloc] initWithFrame:CGRectMake(kCardPad, top, cw, 0)
                                           style:UITableViewStyleGrouped];
@@ -131,8 +135,10 @@ static const CGFloat kZoneH   = 56.0;   // 区头高（buildUI 游标推进用�
 
     // ---------- ③ 音量- 区（红区头 + 表2） ----------
     top += kGap;
+    UILabel *downHint = nil;
     _downBar = [self addZoneHeaderAt:top color:[UIColor systemRedColor] title:@"音量- 映射区"
-                              hint:@"按音量- 键 → 依次执行下列动作" hintOut:&_downHint];
+                              hint:@"按音量- 键 → 依次执行下列动作" hintOut:&downHint];
+    _downHint = downHint;
     top += kZoneH + 8;
     self.tv2 = [[UITableView alloc] initWithFrame:CGRectMake(kCardPad, top, cw, 0)
                                            style:UITableViewStyleGrouped];
