@@ -1,3 +1,81 @@
+# PageTurner v1.0.80
+
+> **音量键模式（新功能）+ 深色模式色彩门禁**：v1.0.48 删除的「音量+/音量-/静音切换」动作，本版以**触发源**形态回归——按音量键 = 按翻页器，直接映射为动作序列，与翻页器**完全同一套连滑状态机**（连按 5 次进连滑、续滑、升档 ×1→×2→×3、按另一区刹停，零音量特例）。机制整套移植 DirectVolumeTap（DVT）v1.0.22 的音量基线（KVO 采集 + Ambient 会话 + 100ms 去抖 + 徘徊 1/16↔12/16 + HUD 抑制 + 前台闸 + 自我触发双保险），PageTurner 侧只改触发目标：命中即汇入 `PTChainOnHit`。新增「音量键模式」独立设置页（总开关 + 音量+ 绿区 / 音量- 红区双动作表 + 隐藏系统音量条 + 测试行）。另新增 CI 深色模式色彩安全门禁 `check_darkmode.sh`（UI 层写死白/黑/灰从此秒级失败），单测 84 → 123 条。**翻页器行为零变化。**
+
+## ♻️ 改动
+
+### 1. 音量键机制整套移植（`common/PTEngineVolume.m` 新增，~270 行）
+
+DVT 实证结论逐条对应（DVT = DirectVolumeTap v1.0.22，PageTurner 连滑状态机自 v1.0.67 起即 1:1 移植自它的音量键连滑）：
+
+| 机制 | 实现 | DVT 依据 |
+| --- | --- | --- |
+| 采集 | KVO `AVAudioSession.outputVolume`（不 hook 吞键——系统音量在 App 进程外改写，UIKit 事件层处于下游，吞键无效） | 1215-1217 注释实锤 |
+| 会话 | 前台 `setCategory:Ambient` + `setActive:YES`（会话不激活 KVO 不触发）；退后台 `setActive:NO` | v1.0.15/16 事故实证 |
+| 去抖 | 100ms 窗内重复 KVO 合并（只合并单次按键的重复回调，不吞有意连按） | 1050-1052 注释 |
+| 徘徊 | 启动/进前台对齐 1/16，随按键真实移动；>12/16 或触底 → 50ms 弹回 1/16（不钉死 0.5） | v1.0.18 替代方案 |
+| HUD 抑制 | 离屏 MPVolumeView 挂 key window；写回 = slider setValue + `AVSystemController setVolumeTo:forCategory:`（iOS 16.5 单参 API 已不存在，NSInvocation 传双参） | 1101-1103 注释 |
+| 前台闸 | `applicationState != Active` 直接忽略（后台回调也不影响其他 App 音量） | —— |
+| 双保险 | 新值≈1/16 不触发；旧值越界且新值≈1/16 是插件自己拉的，不触发 | —— |
+
+### 2. 汇入连滑全链路平权（零特例）
+
+音量事件 → `PTChainHandleHitVolume(pid, source)` → `PTChainOnHit(planId, NO)`，与滑动命中**完全同一入口**：起播/续滑/升档/刹停/未命中/pill/记录区聚合全链路原样复用，**状态机零改动、零音量特例**。原「连滑继承」特例方案作废。
+
+**delta 估算分治**（对齐 DVT 1061-1064 的滑动/点击二分）：方案动作序列含 swipe/recSwipe → n 恒 1（滑动回放几百毫秒，估算只会制造连滑误蓄）；纯 tap 类 → 估算 n（1~8 封顶，连按被合并成大跳变也逐页翻）。
+
+### 3. 「音量键模式」设置页（`common/PTUIVolumeVC.m` 新增）
+
+「记录与映射」列表入口行进入（新增方案上一行）：设置卡（总开关 + 隐藏系统音量条）+ 音量+ 绿区 / 音量- 红区两个独立动作表 + 底部唯一测试行。数据模型 = `plans[]` 里两个 `volSource` 特殊方案（固定 pid `vol-up`/`vol-down`，懒创建空壳）——与翻页器方案同一模型、同一条执行链，列表过滤不显示、不可删除只能清空动作。交互全家复用 `PTUIPlanVC` 同款（PTUIPresentEditor 五模板 / 长按不动=参数页 / 长按拖动=排序 / 左滑删除 / delay 弹窗），不新造交互。UI 侧只写配置不起停机制（App 进程 `PTDylibLoadConfig` 检测 mtime 变化热启停）。
+
+### 4. 新增 CI 门禁：`scripts/check_darkmode.sh`（深色模式色彩安全）
+
+| 规则 | 失败条件 |
+| --- | --- |
+| R1 背景写死 | `whiteColor`/`blackColor`/`darkGrayColor`/`lightGrayColor`/`grayColor`/`colorWithWhite:` |
+| R2 文字写死黑灰 | `labelColor`/`secondaryLabelColor` 以外的黑灰色系（**白字放行**——彩色底白字是设计意图） |
+| R3 直写彩色 | 非语义彩色未包 `colorWithDynamicProvider` 按深浅分支 |
+| 豁免 | 行内 `// dm-ok`；零 UIColor 命中即失败（防脚本空转假绿） |
+
+扫描 `common/PTUI*.m` + `Preferences/*.m`，本地正反验证通过（现有 17 个 UI 文件全过；4 类写死逐行报出）。挂 CI `Check dark mode color safety` 步。
+
+### 5. 其它
+
+- **方案列表**：入口行「音量键模式」+ `volSource` 方案过滤不显示 + 重排时 vol 方案合并保留（不被「仅可见方案」覆盖丢掉）+ 新方案命名按可见数（不跳号）
+- **测试页**：音量键入口文案扩为「按音量+ / 音量- 键测试」（不经特征匹配、按下即直映射，不用「匹配成功」口径）
+- **修**：`PTUIPlansVC` push 新方案后多余的 `[self reload]`（用户实测「点击瞬间刷新」——push 进行中再刷列表会闪；viewWillAppear 返回时自会重读）
+- **修**：闸已开时单改「隐藏系统音量条」也热应用（此前只在开闸瞬间应用，挂/摘 MPVolumeView 不即时生效）
+- **文案收口**（#31）：README/control 简介删 v1.0.48 残留的「静音/音量±」宣传（4 处），README 补音量键模式说明
+- **单测**：84 → 123 条（volSource 匹配 / 懒创建幂等 / delta 估算 1~8 封顶 / 徘徊边界 >12/16 弹回）；`PTVolEstimateCount`/`PTVolNeedsReset` 下沉纯逻辑层供 macOS 单测覆盖
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/PTEngineVolume.m` / `.h` | 新增：音量键机制整套（KVO/会话/去抖/徘徊/HUD 抑制/前台闸/双保险/启停） |
+| `common/PTEngineChain.m` | +`PTChainHandleHitVolume`：音量命中 → `PTChainOnHit`（与滑动同一入口） |
+| `common/PTEngineConfig.m` | `PTDylibLoadConfig` 热启停（volEnabled 翻转起停机制 + volHudHidden 热应用） |
+| `common/PTCoreLogic.h/.m` | +`PTVolPlanPid`/`PTEnsureVolPlans`/`PTVolEstimateCount`/`PTVolNeedsReset` + 4 个数值宏 |
+| `common/PTUIVolumeVC.m` / `.h` | 新增：音量键模式设置页（双区动作表 + 总开关 + 隐藏音量条 + 测试行） |
+| `common/PTUIPlansVC.m` | 入口行 + volSource 过滤 + 重排合并保留 + 删 push 后多余 reload |
+| `common/PTUITestVC.h/.m` | +`volumeMode`：测试页文案扩「按音量+ / 音量- 键测试」 |
+| `Tweak.m` / `targets/dylib/PTDylibMain.m` | intercept/install 分支调 `PTVolumeStart()` |
+| `Makefile` / `build/sources.mk` | +AVFoundation/MediaPlayer 框架；PTSRC_CORE/UISHARED 各 +1 文件 |
+| `.github/workflows/build.yml` | +`Check dark mode color safety` 步骤；dylib clang +两框架 |
+| `scripts/check_darkmode.sh` | 新增：深色模式色彩安全门禁 |
+| `Makefile` / `control` / `Preferences/Resources/Info.plist` | 版本 1.0.79 → 1.0.80（sync_version.sh 单一真源派生，脚本本身未改） |
+| `README.md` / `control` / `RELEASE_NOTES.md` / `docs/REGRESSION_CHECKLIST.md` | 音量键模式说明 + 版本 1.0.80 + 回归清单补 B9 节 |
+
+## ✅ 验证
+
+| 项 | 结果 |
+| --- | --- |
+| check_syntax / check_imports / check_table_wiring / check_darkmode | ✅ 本地全过（67/67/4/17） |
+| 纯逻辑单测（volSource/懒创建/估算/徘徊边界） | ✅ 123 通过 / 0 失败（CI 同跑） |
+| 深色模式门禁正反验证 | ✅ 现有 17 文件过；4 类写死色逐行报出 + 豁免/白字正确放行 |
+| deb + dylib 双包编译 | ⏳ CI tag 构建验证 |
+| 真机音量键连滑（B9 全条） | ⏳ 待装机确认（机制与连滑状态机均为移植实证代码，首次真机音量键链路） |
+
 # PageTurner v1.0.79
 
 > **修复 deb「记录与映射」白屏 + CI 新增 table 装配门禁**：v1.0.78 装机实测，deb 设置页「记录与映射」打开一片空白。根因是 v1.0.71「8 个设置页收敛共享 VC」时 `PTUIPlansVC` 漏设 `tv.dataSource/delegate`——table 建了但无数据源，`numberOfRowsInSection` 永不被调用，连「新增方案」行都不渲染。同类 3 个列表页均有赋值，唯此页漏。本版补上，并把「建了 table 的共享页必须设 dataSource/delegate」做成 CI 静态门禁，此类装配疏漏此后在 clone Theos 之前秒级失败。**dylib（巨魔）形态的同一页面同样受益。**
@@ -48,7 +126,7 @@ self.tv.delegate = self;
 | check_table_wiring 本地正反验证 | ✅ 修复后 OK / 撤掉修复 exit 1 |
 | check_syntax / check_imports / 84 条单测 | ✅ CI 全绿（tag 构建 run 内实跑） |
 | deb + dylib 双包编译 | ✅ 构建 success 后才允许发布 |
-| 真机 deb「记录与映射」 | ⏳ 待装机确认（修复直接对应白屏根因） |
+| 真机 deb「记录与映射」 | ✅ 装机确认（v1.0.80 开发期实测：页面恢复正常列表，入口行/新增/删除/排序均正常） |
 
 # PageTurner v1.0.78
 
