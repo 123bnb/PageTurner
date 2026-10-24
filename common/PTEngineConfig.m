@@ -211,10 +211,12 @@ void PTDylibLoadConfig(BOOL force) {
     // v1.0.80：音量键配置缓存 + 热启停（对称 chainEnabled：开关翻转时机制起停干净，
     // 不在「关了闸」的状态下残留 KVO/会话）。首次加载 prevVol=NO，配置开即热启动。
     BOOL prevVol = gVolEnabled;
+    BOOL prevVolHud = gVolHudHidden;
     gVolEnabled   = [gConfig[@"volEnabled"] boolValue];                                    // 默认关
     gVolHudHidden = (gConfig[@"volHudHidden"] == nil) ? YES : [gConfig[@"volHudHidden"] boolValue];   // 默认开
     if (prevVol && !gVolEnabled) { PTChainReset(); PTVolumeStop(); }                        // 关闸：断链 + 停机制
     if (!prevVol && gVolEnabled) { PTVolumeStart(); PTVolumeApplyHud(gVolHudHidden); }      // 开闸：热启动 + HUD 应用
+    if (prevVol && prevVolHud != gVolHudHidden) PTVolumeApplyHud(gVolHudHidden);            // 闸已开时单改「隐藏音量条」：热应用（挂/摘 MPVolumeView）
     gPlans = [NSMutableDictionary dictionary];
     gLearnedSenderCount = 0;
     // v1.0.74：pid 贯通——gPlans 由 name 索引改 pid 索引。旧配置无 pid → 惰性补发

@@ -80,6 +80,7 @@ PTSRC_PREFS := \
 	Preferences/PTLogSourceDeb.m
 
 # 共享设置页（v1.0.77 全量统一）：基础设施 + 9 个共享 VC + 拖拽助手
+# v1.0.80：+PTUIVolumeVC（音量键模式页：总开关 + 音量+ 绿区 / 音量- 红区 + 测试行）
 PTSRC_UISHARED := \
 	common/PTUINavigator.m \
 	common/PTUILogSource.m \
@@ -94,7 +95,8 @@ PTSRC_UISHARED := \
 	common/PTUIActionParamVC.m \
 	common/PTUITestVC.m \
 	common/PTUIDebugLogVC.m \
-	common/PTUILogContentVC.m
+	common/PTUILogContentVC.m \
+	common/PTUIVolumeVC.m
 
 PTSRC_ALL_DEB := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_ENGINE) $(PTSRC_DEB)
 PTSRC_ALL_DYLIB := $(PTSRC_KIF) $(PTSRC_CORE) $(PTSRC_ENGINE) $(PTSRC_OVERLAY) $(PTSRC_UISHARED) $(PTSRC_DYLIB)
