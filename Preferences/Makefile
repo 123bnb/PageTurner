@@ -16,8 +16,9 @@ include $(THEOS_MAKE_PATH)/common.mk
 
 BUNDLE_NAME = PageTurner
 
-# v1.0.71：列表来自 sources.mk 的 PTSRC_ALL_PREFS（KIF + 引擎核心 PTEngineCore +
-#          统一模板 PTOverlayPage + 设置页本体 RootListController）。
+# v1.0.71：列表来自 sources.mk 的 PTSRC_ALL_PREFS（KIF + 引擎核心七文件
+#          PTCoreLogic + PTEngineLog/Config/Match/Exec/TestUI/Chain，v1.0.78 自
+#          PTEngineCore.m 拆出 + 统一模板 PTOverlayPage + 设置页本体 RootListController）。
 #          deb 私有的 Tweak.m / 引擎外壳 PTEngine.m 均不进这里（外壳的 hook 装配是
 #          deb/dylib 专属；设置页进程用自己的 SImpAddEvent/SImpSendEvent）。
 # v1.0.77：设置页 UI 全量统一，列表再并上 PTSRC_UISHARED（共享设置页 9 个 VC + 基础设施）

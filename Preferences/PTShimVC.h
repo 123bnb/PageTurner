@@ -9,6 +9,17 @@
 //   · 外观回调（viewWillAppear 等）由子 VC 自己响应，壳只转发状态栏样式
 // 只有三个 specifier 入口需要壳：防抖 / 记录与映射 / 调试日志；其余共享页
 // （方案页/特征/学习/测试/参数/日志内容）全部由代码 push，直接入栈无壳。
+//
+// ------------------------------------------------------------
+// 踩坑记录（改这个壳之前必读，v1.0.77 CI 第四轮编译实锤）：
+//   1. PSViewController **没有公开 initWithSpecifier:** —— 桥接壳若写
+//      [super initWithSpecifier:] 直接编译不过（selector 未声明）。
+//      正确写法是 [super init]（specifier 由 Preferences 框架自己持有，
+//      壳不参与 specifier 解析，页面内容全来自 ptChildVC）。
+//   2. 状态栏样式转发的方法是 UIViewController 容器 API 的
+//      **childViewControllerForStatusBarStyle**（全名带 ViewController），
+//      不是 childForStatusBarStyle —— 少写一段静默不生效，状态栏颜色会漂。
+// ------------------------------------------------------------
 // ============================================================
 #ifndef PTShimVC_h
 #define PTShimVC_h

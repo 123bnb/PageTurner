@@ -22,7 +22,8 @@
 #
 # 文件分组（按使用者）：
 #   PTSRC_KIF     ptftouch 四件（fake touch / KIF 事件注入）       三目标全要
-#   PTSRC_CORE    common/PTEngineCore.m（引擎核心：配置/匹配/学习样本/测试回放/连滑/动作执行/日志） 三目标全要
+#   PTSRC_CORE    引擎核心 7 文件（v1.0.78 起 PTEngineCore.m 拆为：纯逻辑层 PTCoreLogic +
+#                  日志/配置/匹配/动作执行/测试可视化/连滑 6 件套 + 内部共享头 PTEngineInternal.h）  三目标全要
 #   PTSRC_ENGINE  common/PTEngine.m（引擎外壳：hook 装配/运行拦截/调试可视化）  deb + dylib
 #   PTSRC_OVERLAY common/PTOverlayPage.m（点击/双击/滑动统一模板页）   dylib + Preferences
 #   PTSRC_UISHARED common/PTUI*.m + PTDragSortHelper.m（共享设置页：基础设施 + 9 个 VC + 桥接工具） dylib + Preferences
@@ -43,7 +44,27 @@ PTSRC_KIF := \
 	ptftouch/UIEvent+KIFAdditions.m \
 	ptftouch/IOHIDEvent+KIF.m
 
-PTSRC_CORE := common/PTEngineCore.m
+# v1.0.78：PTEngineCore.m（1,525 行 / 84KB）按职责拆为 6 个实现文件 + 1 个内部共享头。
+# 拆前它是全仓最大文件、单文件改一行就要全量重编；且 static 跨段可见性靠文件中部
+# 前向声明维持（v1.0.66~77 因此炸过 3 轮「调用早于定义」）。拆后：
+#   PTEngineLog.m     日志（PTDylibLog 家族 + PTNowC）
+#   PTEngineConfig.m  配置路径/读写/UI 入口/运行端缓存/IOKit dlsym
+#   PTEngineMatch.m   会话状态/学习样本/方案 pid/工具/匹配（运行端 + 测试端）
+#   PTEngineExec.m    动作执行全家（fake touch）+ 测试回放执行链
+#   PTEngineTestUI.m  测试可视化（绿点/方向线/P 标记/尾巴）+ 实时记录区
+#   PTEngineChain.m   连滑状态机 + pill + 执行入口 + 注入引用计数
+#   PTEngineInternal.h（非 .m）跨文件内部 extern——仅上列 6 个 .m import，
+#                       公共 API 仍走 PTEngineCore.h（三目标共享）。
+# v1.0.78(2)：PTCoreLogic.m = 纯逻辑层（零 UI 依赖，Foundation-only）——从六件套抽出，
+#   使 tests/ 能在 macOS 原生编译运行（CI 可跑单测）；三个 target 照常链接。
+PTSRC_CORE := \
+	common/PTCoreLogic.m \
+	common/PTEngineLog.m \
+	common/PTEngineConfig.m \
+	common/PTEngineMatch.m \
+	common/PTEngineExec.m \
+	common/PTEngineTestUI.m \
+	common/PTEngineChain.m
 PTSRC_ENGINE := common/PTEngine.m
 PTSRC_OVERLAY := common/PTOverlayPage.m
 
@@ -90,8 +111,18 @@ SHARED_CFLAGS := \
 	-I$(PTROOT)/ptftouch \
 	-include $(PTROOT)/ptftouch/Compat.h
 
+# dylib 专属编译/链接 flags（v1.0.78，评审 #4）：
+#   v1.0.77 起 dylib 从「自建精简副本」切换为链接 deb 派生的完整共享层（14 个 .m），
+#   产物 +148KB（+18%）。这里做体积回补，**只作用于裸 clang 的 dylib 构建**：
+#     · -Os                      体积优先的优化等级
+#     · -ffunction-sections -fdata-sections  按函数/数据分区，供死代码消除生效
+#     · -Wl,-dead_strip          链接期剔除未被引用的分区（macOS ld64 的 --gc-sections）
+#   deb（theos + substrate）不感知这两个变量——注入镜像不冒险改能跑的形态。
+DYLIB_CFLAGS := -Os -ffunction-sections -fdata-sections
+DYLIB_LDFLAGS := -Wl,-dead_strip
+
 ifeq ($(PRINT_CONFIG),1)
-.PHONY: print-cflags print-deb-sources print-dylib-sources print-prefs-sources print-uihared-sources print-all-sources
+.PHONY: print-cflags print-deb-sources print-dylib-sources print-prefs-sources print-uihared-sources print-all-sources print-dylib-cflags print-dylib-ldflags
 print-cflags:
 	@echo $(SHARED_CFLAGS)
 print-deb-sources:
@@ -104,4 +135,8 @@ print-uihared-sources:
 	@echo $(PTSRC_UISHARED)
 print-all-sources:
 	@echo $(sort $(PTSRC_ALL_DEB) $(PTSRC_ALL_DYLIB) $(PTSRC_ALL_PREFS))
+print-dylib-cflags:
+	@echo $(DYLIB_CFLAGS)
+print-dylib-ldflags:
+	@echo $(DYLIB_LDFLAGS)
 endif

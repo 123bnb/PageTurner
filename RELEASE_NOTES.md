@@ -1,3 +1,94 @@
+# PageTurner v1.0.78
+
+> **构建校验加固 + 引擎核心拆分（运行端零行为变化）**：v1.0.77 连炸 5 轮 CI 的根因，是「括号平衡 / import 链只有人肉一道关，而巨魔 dylib 走裸 clang、本地不可编」——每轮修复都要付一次 clone Theos + 全量编译的时间成本；引擎侧 `PTEngineCore.m` 滚到 1,525 行成为全仓最大文件，改一行全量重编，且 static 跨段可见性靠文件中部的老式前向声明维持（v1.0.66~77 因此炸过 3 轮「调用早于定义」）。本版把该关前移（clone Theos 之前秒级失败）、把引擎核心拆成 7 文件、并第一次让 CI 跑得起纯逻辑单测。**安装用户行为零变化。**
+
+## ♻️ 改动
+
+### 1. 静态校验前移到 clone Theos 之前（评审 #2）
+
+新增两个纯文本分析脚本并挂 CI（`Check bracket balance` / `Check import chain` 两步，均位于 Clone Theos 之前）：
+
+| 脚本 | 查什么 | 挡住什么 |
+| --- | --- | --- |
+| `scripts/check_syntax.sh` | 全仓 `.m/.h` 三括号平衡 + 同名函数重复实现 | v1.0.77 连炸 3 轮的「缺方括号」（CI deb 编译第三轮才暴露） |
+| `scripts/check_imports.sh` | 每个 `.m` 引用工程类型的 import 闭包完整 | 「声明在但 import 漏」的链接期错误（dylib 裸 clang 本地不可编，原来只能等 CI） |
+
+两者在 Linux/macOS 均可跑（python3 实现，无平台依赖）；CI 上秒级完成，语法级/链接级问题立刻失败，不再消耗 Theos clone + 全量编译。
+
+### 2. 本地一键构建与 CI 同源（评审 #1/#4）
+
+新增 `scripts/build_dylib.sh`：dylib 的源文件列表 + 共享/专属 flags 全部从 `build/sources.mk` 单一真源读取（`print-dylib-sources` / `print-cflags` / `print-dylib-cflags` / `print-dylib-ldflags`），本地一键构建与 CI 的裸 clang 命令读同一组变量，两条路永不漂移。体积回补：v1.0.77 起 dylib 从「自建精简副本」切换为链接完整共享层（+148KB / +18%），新增 `DYLIB_CFLAGS := -Os -ffunction-sections -fdata-sections` + `DYLIB_LDFLAGS := -Wl,-dead_strip`（链接期死代码消除）——**只作用于裸 clang 的 dylib 构建**；deb（theos + substrate）不感知这两个变量，注入镜像不冒险改能跑的形态。
+
+### 3. after-package 还原改快照式（评审 #3）
+
+旧实现 `git checkout -- control Info.plist` 无条件还原到提交态，会把用户对这两个文件的**本地未提交改动一并冲掉且无提示**。改为：`before-package` 先把原内容快照进 `.pt-version-snapshot/`，`after-package` 按快照精确写回。语义 = 「打包前是什么样，打包后还是什么样」；无快照（非常规调用，如只跑 make 不打包）时跳过，绝不碰 git。
+
+### 4. `PTEngineCore.m` 二次拆分：1,525 行 → 7 文件（评审 #7）
+
+按职责拆为 6 个实现文件 + 1 个内部共享头，公共 API 仍走 `PTEngineCore.h`（三目标共享面不变）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `common/PTCoreLogic.{h,m}` | **纯逻辑层**（零 UI 依赖，Foundation-only）：数值常量 / pid 身份 / 文案 / 特征工具 / 学习稳定性 / 匹配 / 插值 / 原子写——详见第 5 节 |
+| `common/PTEngineLog.m` | 日志（`PTDylibLog` 家族 + `PTNowC`） |
+| `common/PTEngineConfig.m` | 配置路径/读写/UI 入口/运行端缓存/IOKit dlsym |
+| `common/PTEngineMatch.m` | 会话状态/学习样本/方案 pid/匹配（运行端 + 测试端） |
+| `common/PTEngineExec.m` | 动作执行全家（fake touch）+ 测试回放执行链 |
+| `common/PTEngineTestUI.m` | 测试可视化（绿点/方向线/P 标记/尾巴）+ 实时记录区 |
+| `common/PTEngineChain.m` | 连滑状态机 + pill + 执行入口 + 注入引用计数 |
+| `common/PTEngineInternal.h` | 跨文件内部 extern（仅上列 6 个 `.m` import；不进公共面） |
+
+拆前它是全仓最大文件、单文件改一行就要全量重编，static 跨段可见性靠文件中部前向声明维持；拆后每文件职责单一，跨文件依赖走 `PTEngineInternal.h` 显式 extern。`build/sources.mk` 的 `PTSRC_CORE` 随之扩为 7 文件（CI 覆盖审计自动接管）。
+
+### 5. 纯逻辑层下沉 + CLI 测试 harness：CI 第一次跑得起单测（评审 #6）
+
+引擎六个实现文件都 import UIKit → macOS 上编不了 → CI（macos-latest）原本**零单测**。解法即被测对象本身：把零 UI 依赖的纯逻辑下沉为 `common/PTCoreLogic.{h,m}`（Foundation/CoreGraphics-only，经 `PTEngineCore.h` 转曝，API 面不变），`tests/PTCoreLogicTests.m` 以 CLI harness（`main()` + `CHECK` 宏）只链它：
+
+- **覆盖 12 组 / 84 条断言**：`PTPlanPid` / `PTPlanNameForId` / `PTDirName` / `PTActionText` / `PTFeaturesOfPlan` / `PTDuplicate` / `PTStable` / `PTMatchPlan` / `PTTestMatchFeature` / `PTIsLearnedSender` / `PTWriteCfgTo` / `PTRecSwipeInterp`。
+- **测试替身**：宿主持有的运行端缓存（`gPlans` / `gDebounceMs` / `gLearnedSenders` / `gLearnedSenderCount`）与 `PTDylibReadCfg` 由测试文件提供定义/假实现（注入字典），匹配逻辑脱离文件系统。
+- `tests/run.sh` 三路径：macOS 原生编译（**CI 实跑**，插在 clone Theos 之前，秒级失败）；Linux 装 libobjc2 时 gnustep-2.0 完整构建；只有 gnustep-base 时经 `tests/transpile_subscript.py` 把对象下标机械改写为等价显式消息后走 legacy runtime——**断言照跑，不冒充通过也不空手而归**。
+- 覆盖审计同步排除 `tests/`（harness 不进 theos 三目标，混进 `sources.mk` 反而会撞 `main` 重定义）。
+
+### 6. 双形态人工回归清单 + PTShimVC.h 踩坑注释（评审 #5/#8）
+
+- 新增 `docs/REGRESSION_CHECKLIST.md`：deb（roothide）与 dylib（巨魔）两形态的人工回归清单——构建校验再全也替不了真机手感，清单把「必测路径」固定成文档。
+- `Preferences/PTShimVC.h` 补踩坑注释：记录 `PSViewController` 桥接壳为什么只包 3 个 specifier detail 入口、共享 VC 在壳内铺满的装配约束。
+
+## ⚠️ 行为变化
+
+**无。** 本版全部改动在构建层（校验脚本/CI 步骤/编译 flags）与代码组织层（文件拆分/纯逻辑下沉），运行端逻辑逐字迁移（符号集合审计：拆分前后 117 → 117，零丢失/零新增/零重复），安装用户零感知。dylib 产物体积因 `-Os + dead_strip` 回补（构建层优化，不改变行为）。
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `scripts/check_syntax.sh` | 新增：括号平衡 + 重复实现校验（挂 CI，pre-Theos） |
+| `scripts/check_imports.sh` | 新增：import 链闭包校验（挂 CI，pre-Theos） |
+| `scripts/build_dylib.sh` | 新增：dylib 本地一键构建（flags 从 sources.mk 单一真源读） |
+| `scripts/sync_version.sh` / `Makefile` | after-package 改快照式还原（`.pt-version-snapshot/`）；before-package 增快照 |
+| `common/PTEngineCore.m` | 删除：1,525 行按职责拆为下列 7 文件（`PTEngineCore.h` 收敛公共 API 不变） |
+| `common/PTCoreLogic.{h,m}` | 新增：纯逻辑层（Foundation-only），三目标经 `PTEngineCore.h` 转曝链接 |
+| `common/PTEngineLog.m` / `PTEngineConfig.m` / `PTEngineMatch.m` / `PTEngineExec.m` / `PTEngineTestUI.m` / `PTEngineChain.m` | 新增：引擎核心六件套（自 `PTEngineCore.m` 拆出） |
+| `common/PTEngineInternal.h` | 新增：跨文件内部 extern（仅六件套 import） |
+| `common/PTEngineCore.h` / `common/PTEngineInternal.h` | 公共 API 面不变；边界注释补 PTCoreLogic 条目 |
+| `tests/PTCoreLogicTests.m` | 新增：12 组 / 84 断言 CLI harness（macOS 原生编译执行） |
+| `tests/run.sh` | 新增：三路径测试入口（macOS / Linux gnustep-2.0 / Linux 下标改写） |
+| `tests/transpile_subscript.py` | 新增：对象下标 → 显式消息改写器（Linux 深度通道，产物进 `.build` 勿提交） |
+| `docs/REGRESSION_CHECKLIST.md` | 新增：deb/dylib 双形态人工回归清单 |
+| `Preferences/PTShimVC.h` | 补踩坑注释（桥接壳装配约束） |
+| `Preferences/Makefile` / `Preferences/RootListController.m` | 文件清单/导航注释同步 7 文件结构 |
+| `build/sources.mk` | `PTSRC_CORE` 扩为 7 文件；新增 `DYLIB_CFLAGS` / `DYLIB_LDFLAGS` 与两个 print 目标 |
+| `Makefile` / `.gitignore` | `PACKAGE_VERSION` 1.0.77 → 1.0.78；`.gitignore` 收录 `tests/.build/` |
+| `.github/workflows/build.yml` | 新增两步 pre-Theos 关卡（括号/import 校验后插 `Run PTCoreLogic tests`）；覆盖审计排除 `tests/`；dylib 构建读新增 flags |
+
+## ✅ 验证
+
+- **静态**：`check_syntax` / `check_imports` 全绿（63 文件）；符号集合审计 117 → 117 零差异；`sources.mk` 覆盖对账 33/33。
+- **单测**：84 条断言全过（沙箱经下标改写通道真跑；CI macos-latest 走原生路径）。
+- **版本**：`check_version.sh` 四处一致（1.0.78），无源码层硬编码横幅。
+
+---
+
 # PageTurner v1.0.77
 
 > **设置页全量统一（重构版，零 deb 侧行为变化）**：deb 设置页与巨魔 dylib 菜单此前是「两个版本合在一起、代码却各管各的」——8 个同名页面（防抖/方案列表/方案详情/功能/学习/动作参数/测试/日志）在 `Preferences/RootListController.m`（2,568 行）与 `targets/dylib/PTDylibUI.m`（1,758 行）里各存一份，约 1,900 行重复度 95–98%，且已漂出 8 处行为不一致。本版把 8 个页面连拖拽助手、导航、日志源一并收敛到 `common/PTUI*` 单一真源，两侧只留必须各实现一次的桥接/装配代码（Core 配置读写、`PTUIEnsureCollectHook`、`PTUIPresentEditor`）。**deb 安装用户界面与行为零变化**；dylib 用户获得多处向 deb 看齐的修复（见「行为变化」）。

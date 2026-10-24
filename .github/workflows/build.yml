@@ -37,11 +37,14 @@ jobs:
       # ---------- 源码覆盖审计：每个 tracked .m 都必须登记进某个目标组合 ----------
       # build/sources.mk 是三目标文件列表的单一真源；漏登记 = 该文件被静默漏编译
       # （不报链接错、直接丢功能）。用 git ls-files 与 print-all-sources 对账，漏一个即失败。
+      # v1.0.78：排除 tests/——tests/PTCoreLogicTests.m 是 CLI 测试 harness（main()，
+      # 只链 PTCoreLogic.m），不进 theos 三目标，由下面的「Run PTCoreLogic tests」
+      # 单独编译执行。它若混进 sources.mk 反而会被编进 tweak/dylib，撞 main 重定义。
       - name: Audit source coverage (every tracked .m registered in sources.mk)
         run: |
-          git ls-files '*.m' | sort > /tmp/tracked_m.txt
+          git ls-files '*.m' | grep -v '^tests/' | sort > /tmp/tracked_m.txt
           make -s -f build/sources.mk PRINT_CONFIG=1 print-all-sources | tr ' ' '\n' | sort -u > /tmp/registered_m.txt
-          echo "===== tracked .m ($(wc -l < /tmp/tracked_m.txt) 个) ====="
+          echo "===== tracked .m ($(wc -l < /tmp/tracked_m.txt) 个，已排除 tests/) ====="
           cat /tmp/tracked_m.txt
           echo "===== registered .m ($(wc -l < /tmp/registered_m.txt) 个) ====="
           cat /tmp/registered_m.txt
@@ -52,6 +55,26 @@ jobs:
             exit 1
           fi
           echo "OK: 所有 tracked .m 均已登记"
+
+      # ---------- 语法/import 静态校验（clone Theos 之前，fail fast） ----------
+      # v1.0.78（评审 #2）：v1.0.77 连炸 5 轮 CI 的根因 = 括号平衡 / import 链
+      # 只有「人肉 + 等编译」一道关，而 dylib 走裸 clang、本地不可编 → 每轮修复
+      # 都要付一次 clone Theos + 全量编译的时间成本。这两个脚本把该关前移到
+      # clone Theos 之前：纯文本分析，秒级完成，语法级/链接级问题立刻失败。
+      - name: Check bracket balance (syntax guard, pre-Theos)
+        run: bash scripts/check_syntax.sh
+
+      - name: Check import chain (link guard, pre-Theos)
+        run: bash scripts/check_imports.sh
+
+      # ---------- PTCoreLogic 纯逻辑测试（clone Theos 之前，秒级） ----------
+      # v1.0.78（评审 #6）：引擎六个实现文件都 import UIKit，macOS 上编不了 →
+      # CI 原本零单测。v1.0.78 把零 UI 依赖的纯逻辑下沉 common/PTCoreLogic.{h,m}
+      # （Foundation/CoreGraphics-only），tests/PTCoreLogicTests.m 以 CLI harness
+      # （main() + CHECK）只链它——macos-latest 上 clang 原生编译执行，84 条断言。
+      # 放在 clone Theos 之前：纯逻辑回归秒级失败，不付全量编译的时间成本。
+      - name: Run PTCoreLogic tests (pure-logic, pre-Theos)
+        run: bash tests/run.sh
 
       - name: Clone Theos (roothide fork)
         run: git clone --recursive --depth=1 https://github.com/roothide/theos.git "$THEOS"
@@ -78,17 +101,21 @@ jobs:
           dpkg-deb -f "$DEB" | grep -E '^(Package|Version|Architecture):'
 
       # ---------- TrollStore / 巨魔 dylib（纯 clang + ldid，无 theos / 无 Logos / 无 ellekit） ----------
-      # ---------- TrollStore / 巨魔 dylib（纯 clang + ldid，无 theos / 无 Logos / 无 ellekit） ----------
       - name: Build TrollStore dylib
         run: |
           SDK="$THEOS/sdks/iPhoneOS16.5.sdk"
           mkdir -p out
           # v1.0.71：dylib 目标源文件列表 + 共享编译 flags 全部从 build/sources.mk 单一真源读取。
           # 此前此处手拼「SHARED_SRCS + PTOverlayPage.m + dylib 薄壳」，与根 Makefile 两处维护。
+          # v1.0.78：再并上 dylib 专属 flags（-Os + 分区 + -dead_strip，体积回补）——本地
+          # 一键构建 scripts/build_dylib.sh 与这里读同一组变量，两条路永不漂移。
           SRCS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-dylib-sources)
           SHARED_CFLAGS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-cflags)
+          DYLIB_CFLAGS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-dylib-cflags)
+          DYLIB_LDFLAGS=$(make -s -f build/sources.mk PRINT_CONFIG=1 print-dylib-ldflags)
           echo "dylib 源文件: ${SRCS}"
           echo "共享 flags : ${SHARED_CFLAGS}"
+          echo "dylib flags: ${DYLIB_CFLAGS} / ${DYLIB_LDFLAGS}"
           # 打 tag(v*) 用 tag 名，普通 push 用 dev-<短sha>
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then VER="${GITHUB_REF_NAME}"; else VER="dev-${GITHUB_SHA:0:7}"; fi
           OUT="out/PageTurnerDylib_${VER}.dylib"
@@ -96,17 +123,19 @@ jobs:
           echo "输出产物: ${OUT}"
           # 先试 arm64+arm64e；arm64e 若失败则只 arm64
           clang -arch arm64 -arch arm64e -isysroot "$SDK" -miphoneos-version-min=15.0 \
-            ${SHARED_CFLAGS} \
-            -Wl,-undefined,dynamic_lookup \
+            ${SHARED_CFLAGS} ${DYLIB_CFLAGS} \
+            -Wl,-undefined,dynamic_lookup ${DYLIB_LDFLAGS} \
             -framework Foundation -framework UIKit \
             -dynamiclib $SRCS -o "$OUT" \
+            && { strip -x "$OUT" && echo "strip OK"; } \
             && echo "编译 OK (arm64+arm64e)" \
             || { echo "arm64+arm64e 失败, 尝试只 arm64"; \
                  clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
-                   ${SHARED_CFLAGS} \
-                   -Wl,-undefined,dynamic_lookup \
+                   ${SHARED_CFLAGS} ${DYLIB_CFLAGS} \
+                   -Wl,-undefined,dynamic_lookup ${DYLIB_LDFLAGS} \
                    -framework Foundation -framework UIKit \
                    -dynamiclib $SRCS -o "$OUT" \
+                   && { strip -x "$OUT" && echo "strip OK"; } \
                    && echo "编译 OK (仅arm64)"; }
           file "$OUT"
           ldid -S "$OUT" && echo "ldid 签名 OK"

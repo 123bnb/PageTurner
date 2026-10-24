@@ -20,7 +20,8 @@
 //   PTDebugLogVC/PTLogContentVC/PTTestVC → common/PTUI* 同名共享版。
 //
 // v1.0.71（引擎核心化，删除 ~950 行重复实现）：常量/日志/样本/测试/数学工具/IOTool
-//   全部移交 common/PTEngineCore.m；plist 读写走 Core 的 PTDylibReadCfg/PTWriteCfgTo
+//   全部移交 common/PTEngineCore.m（v1.0.78 拆分为 common/PTEngine* 七文件）；
+//   plist 读写走 Core 的 PTDylibReadCfg/PTWriteCfgTo（v1.0.78 起后者在 PTCoreLogic.m）
 //   （本文件 PTWrite 双写经 PTSetCfgWriter 注入给 Core）。
 // v1.0.66-fix：方案唯一身份 pid 贯通设置页（重名不串）；v1.0.66 #5/#5b：长按拖拽
 //   排序（Z 方案）——两项均已随共享页移至 common/PTUI*。

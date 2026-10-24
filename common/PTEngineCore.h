@@ -14,6 +14,9 @@
 // 边界：
 //   Core（本文件）= 配置读写/jbroot/特征匹配/学习样本/测试回放/连滑状态机/
 //                   动作执行/日志/进程角色无关的纯逻辑 + 会话/执行态全局。
+//   PTCoreLogic（v1.0.78）= Core 中「零 UI 依赖」的纯逻辑子层（数值常量/pid 身份/
+//                   文案/特征工具/学习稳定性/匹配/插值/原子写），Foundation-only，
+//                   tests/ 只链它即可在 macOS 原生单测；经本头 import 转曝。
 //   外壳（PTEngine.h）= hook 装配、运行拦截会话、调试可视化、录制、双指菜单
 //                   ——只被 deb 与 dylib 链接，Preferences 不链。
 //   跨层依赖解法：
@@ -27,23 +30,16 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-// ---------- 常量（原 PTEngine.m / RootListController.m / PTDylibUI.m 三处各抄一份，统一为宏） ----------
-// 注意 kMaxLearnedSenders 必须是宏：C 中 static const int 不是编译期常量，
-// 用作数组尺寸会退化为 VLA（theos -Werror 会升级为错误）。
-#define kMaxLearnedSenders 64                    // 已学 sender 上限
-#define PTLogMaxLines 500                        // 日志循环上限（内存与文件一致）
-#define kPagerWindowSec 0.4                      // 翻页器活跃窗口（已学 sender 开窗）
-#define kCollectWindowSec 0.30                   // v1.0.19：学习/测试采集窗口（原设置页 0.05s 过短，已对齐）
-#define kTapDistThreshold 30.0                   // 位移 <30pt 判定 tap
-#define kDirTolerance 15.0                       // 方向容差 ±15°
-#define kDistSlack 30.0                          // 位移区间匹配裕度
-#define kTapDistSlack 0.15                       // 点击位移区间容差
-#define kTapDxThresh 0.05                        // 点击位移方向判定阈值
-#define kLearnMin 5                              // 学习下限
-#define kLearnMax 15                             // 学习上限
-#define kConverge 60.0                           // 位移收敛阈值
-#define kSwipeBurstThreshold 5                   // 同方案连续命中达此值 → 进入连滑
-#define kSwipeBurstWindowSec 1.2                 // v1.0.72：蓄力时间窗——同方案 1.2s 内的命中都累计（旧版窗口="回放中"，点击等快动作 80~230ms 就播完，第二次按键到来时计数已复位，永远蓄不满）
+// ---------- 纯逻辑层（v1.0.78：常量与零 UI 依赖逻辑下沉 common/PTCoreLogic.h） ----------
+// 为什么抽：要求「纯逻辑测试 + CI 接线」，而引擎六个实现文件都 import UIKit——
+// macOS 上一个都编不了，CI（macos-latest）跑不了任何单测。PTCoreLogic 把纯逻辑
+// + 数值常量收成 Foundation/CoreGraphics-only 层：三个 target 照常经本头转曝
+// （公共 API 面不变），tests/ 只链 PTCoreLogic.m 即可原生跑（tests/run.sh）。
+// 转曝内容：数值常量 / gPlans 等运行端缓存声明 / PTPlanPid / PTPlanNameForId /
+//           PagerFeature / PTMatchPlan / PTTestMatchFeature / PTFeaturesOfPlan /
+//           PTDirName / PTActionText / PTDuplicate / PTStable / PTIsLearnedSender /
+//           PTRecSwipeInterp / PTWriteCfgTo。
+#import "PTCoreLogic.h"
 
 // ---------- 配置 ----------
 extern NSString *PTDylibCfgPath(void);
@@ -58,7 +54,6 @@ extern void PTDylibWriteCfg(NSDictionary *cfg);
 //   · 写 = 经 PTSetCfgWriter 注入的写入器（设置进程=双写；未注入=dylib 容器单写）。
 extern NSMutableDictionary *PTUIReadCfg(void);
 extern void PTUIWriteCfg(NSDictionary *cfg);
-extern void PTWriteCfgTo(NSString *path, NSDictionary *cfg);   // v1.0.71：原子写指定路径（设置页双写用）
 extern void PTSetCfgPath(NSString *p);     // 配置路径由 target 注入（roothide 多候选 / dylib 容器 / 设置页 PT_PREFS）
 extern NSDictionary *PTConfigDict(void);   // 暴露当前配置字典（roothide 读 masterEnabled/enabledApps）
 extern void PTDylibLoadConfig(BOOL force); // 加载/刷新配置（mtime 懒加载）
@@ -112,36 +107,13 @@ extern void PTInjectEnd(void);
 
 // ---------- 工具 ----------
 extern double PTNowC(void);
-extern NSString *PTDirName(double dir);
-extern NSString *PTActionText(NSDictionary *a);
-extern NSArray *PTFeaturesOfPlan(NSDictionary *p);
-extern NSString *PTDuplicate(NSDictionary *s, NSArray *plans);
-extern BOOL PTStable(NSArray *mem, NSString *sender);
-extern BOOL PTIsLearnedSender(uint64_t s);
+// 其余工具（PTDirName/PTActionText/PTFeaturesOfPlan/PTDuplicate/PTStable/
+// PTIsLearnedSender）v1.0.78 已随纯逻辑层下沉 PTCoreLogic.h（经本头转曝可见）。
 
-// ---------- 方案唯一身份 pid（v1.0.74：重名方案不再互相覆盖/串台） ----------
-// 背景：配置里两个方案可以同名（设置页/dylib UI 均允许），而引擎 gPlans 长期按
-// name 索引——同名方案"后写覆盖前一个"（执行错方案）、改名即失联、删除/编辑按
-// name 匹配会误伤同名者。设置页 UI 层 v1.0.66-fix 已 pid 化，本版把 pid 贯通到
-// 引擎执行层：gPlans 改 pid 索引，匹配/连滑/执行全链路按 pid 走。
-// 规则（三端一致，不会漂移）：有 p[@"pid"] 用字段；无则按「name#数组下标」惰性
-// 补发——设置页 PTRead（v1.0.66-fix）、引擎 PTDylibLoadConfig、dylib UI（v1.0.75）
-// 对同一份配置补出同一批 pid。补发即落盘，下次读取即带 pid。
-extern NSString *PTPlanPid(NSDictionary *p, NSInteger idx);
-// pid → 显示名（日志 / pill / 记录区格式化用）；查不到返回 pid 本身（永不返回
-// nil——执行中配置被改的极端场景也要有可读标识，同时避免 %@ 格式化 nil）
-extern NSString *PTPlanNameForId(NSString *planId);
-
-// ---------- 特征结构 + 运行端匹配（外壳 PTHandlePagerEvent 用） ----------
-typedef struct {
-    int phase;        // 0=tap 1=swipe
-    double direction;
-    double dist;
-    int tapDx;
-} PagerFeature;
-// v1.0.74：返回值由 name 改为方案 pid（gPlans 按 pid 索引后，name 无法唯一定位
-// 方案——重名时两条记录共用一个键）。调用方（PTEngine.m）原样传给 PTChainHandleHit。
-extern NSString *PTMatchPlan(PagerFeature f, uint64_t sender);
+// ---------- 方案唯一身份 pid / 特征结构 / 匹配（v1.0.78 起见 common/PTCoreLogic.h） ----------
+// PTPlanPid / PTPlanNameForId / PagerFeature / PTMatchPlan 已随纯逻辑层下沉，
+// 声明与「重名方案互不覆盖/串台」的背景注释见 PTCoreLogic.h（经本头 import
+// 转曝，调用方无需改）。
 
 // ---------- 测试（Core 实现；设置页/dylib 测试页共用） ----------
 extern void PTTestOnEnded(int phase, double dir, double dist, uint64_t sender, int tapDx);

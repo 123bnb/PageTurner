@@ -3,3 +3,5 @@ common/PTVersion.h
 packages/
 .theos/
 out/
+.pt-version-snapshot/
+tests/.build/
