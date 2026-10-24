@@ -283,6 +283,7 @@ static const CGFloat kZoneH   = 56.0;   // 区头高（buildUI 游标推进用�
 - (void)testTapped {
     PTUITestVC *vc = [PTUITestVC new];
     vc.planName = @"音量键模式";   // 仅显示用（测试页按特征匹配执行，不按 pid 写方案）
+    vc.volumeMode = YES;          // v1.0.80：文案切「按音量+ / 音量- 键测试」
     [self.navigationController pushViewController:vc animated:YES];
 }
 

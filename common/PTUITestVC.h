@@ -8,6 +8,7 @@
 
 @interface PTUITestVC : PTUIBaseListVC
 @property (nonatomic, strong) NSString *planName;
+@property (nonatomic, assign) BOOL volumeMode;   // v1.0.80：音量键模式入口（文案改「按音量+ / 音量- 键测试」）
 @property (nonatomic, strong) UITextView *logView;   // v1.0.28：实时记录区
 @property (nonatomic, strong) CAShapeLayer *trailLayer;   // v1.0.29：调试可视化同款轨迹
 @property (nonatomic, strong) UIView *trailDot;

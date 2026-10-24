@@ -20,7 +20,13 @@
     tip.numberOfLines = 0;
     tip.textAlignment = NSTextAlignmentCenter;
     tip.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
-    tip.text = [NSString stringWithFormat:@"按翻页器按键测试方案「%@」\n\n匹配成功会执行动作序列，\n绿点 = 注入点触的位置\n（点击原地显示；滑动从起点到终点）", self.planName ?: @""];
+    // v1.0.80：音量键模式入口——文案扩为「按音量+ / 音量- 键测试」（音量键不经特征
+    // 匹配，按下即按 volSource 直映射，故不用「匹配成功」口径）
+    if (self.volumeMode) {
+        tip.text = @"按音量+ / 音量- 键测试音量键模式\n\n音量键按下即执行对应映射区的动作序列，\n绿点 = 注入点触的位置\n（点击原地显示；滑动从起点到终点）";
+    } else {
+        tip.text = [NSString stringWithFormat:@"按翻页器按键测试方案「%@」\n\n匹配成功会执行动作序列，\n绿点 = 注入点触的位置\n（点击原地显示；滑动从起点到终点）", self.planName ?: @""];
+    }
     [self.view addSubview:tip];
 
     // v1.0.28：测试页下方实时记录区（吞了什么/映射了什么；返回即消失不保留）
