@@ -67,6 +67,13 @@ jobs:
       - name: Check import chain (link guard, pre-Theos)
         run: bash scripts/check_imports.sh
 
+      # v1.0.79-fix1：deb 装机实测「记录与映射」白屏——PTUIPlansVC 建了 table
+      # 却漏设 dataSource/delegate（v1.0.71 收敛共享 VC 时漏行）。这类装配
+      # 疏漏编译期零暴露、运行期白屏，用文本级检查兜住：建了 self.tv 的
+      # 共享列表页必须设置 dataSource/delegate（基类除外，其数据源归子类）。
+      - name: Check shared table wiring (dataSource/delegate guard)
+        run: bash scripts/check_table_wiring.sh
+
       # ---------- PTCoreLogic 纯逻辑测试（clone Theos 之前，秒级） ----------
       # v1.0.78（评审 #6）：引擎六个实现文件都 import UIKit，macOS 上编不了 →
       # CI 原本零单测。v1.0.78 把零 UI 依赖的纯逻辑下沉 common/PTCoreLogic.{h,m}

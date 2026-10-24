@@ -17,6 +17,12 @@
     [super viewDidLoad];
     self.title = @"记录与映射";
     [self setupGroupedTableWithTop:100];
+    // v1.0.79-fix1：补 dataSource/delegate 赋值——v1.0.71「8 页收敛共享 VC」时
+    // 漏了这两行（基类 setupGroupedTableWithTop 只建 table，不设数据源），
+    // deb 装机实测「记录与映射」打开一片空白：numberOfRowsInSection 永不被调用，
+    // 连「新增方案」行都不渲染。同类页（Features/DebugLog/Plan）均有赋值，唯此页漏。
+    self.tv.dataSource = self;
+    self.tv.delegate = self;
     // v1.0.66(#5)：长按方案行拖拽排序（自定义浮层，零三横线）
     self.dragHelper = [[PTDragSortHelper alloc] initWithTableView:self.tv mode:PTDragAttachTable];
     __weak typeof(self) wself = self;

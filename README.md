@@ -162,7 +162,7 @@ PageTurner/
 ├── tests/                            # PTCoreLogic 纯逻辑测试：CLI harness（84 断言）+ run.sh 三路径入口 + 下标改写器（Linux 通道）
 ├── docs/                             # REGRESSION_CHECKLIST.md（deb/dylib 双形态人工回归清单）
 ├── build/sources.mk                  # 三目标源文件列表 + 共享 flags 单一真源（CI 覆盖审计）
-├── scripts/                          # check_syntax / check_imports（pre-Theos 静态校验）+ build_dylib.sh + 版本同步
+├── scripts/                          # check_syntax / check_imports / check_table_wiring（pre-Theos 静态校验）+ build_dylib.sh + 版本同步
 ├── Makefile / control                # Theos roothide 打包
 └── .github/workflows/build.yml       # push 自动编译 roothide deb + 巨魔 dylib 并发布 Release（校验/单测关卡先于 clone Theos）
 ```
@@ -194,6 +194,7 @@ PageTurner/
 
 | 版本 | 这一版做了什么 |
 | --- | --- |
+| [v1.0.79](https://github.com/123bnb/PageTurner/releases/tag/v1.0.79) | **修复 deb「记录与映射」白屏 + CI table 装配门禁**：v1.0.71 收敛共享 VC 时 PTUIPlansVC 漏设 tv.dataSource/delegate，table 无数据源致 numberOfRowsInSection 永不被调用、页面全白（编译期零暴露——协议声明在 .h，运行期只有真机点得出来）；补两行修复，dylib 同名页同受益；新增 scripts/check_table_wiring.sh 静态门禁挂 CI（建了 self.tv 的共享页必须设 dataSource/delegate，基类除外，零命中即失败防空转），本地正反验证撤修复即报错 |
 | [v1.0.78](https://github.com/123bnb/PageTurner/releases/tag/v1.0.78) | **构建校验加固 + 引擎核心拆分（运行端零行为变化）**：静态校验前移到 clone Theos 之前（check_syntax 括号平衡/重复实现 + check_imports import 链闭包，秒级失败，根治 v1.0.77 连炸 5 轮 CI 的「人肉一道关」）；PTEngineCore.m 1,525 行按职责拆为 PTCoreLogic 纯逻辑层 + 引擎六件套（日志/配置/匹配/执行/测试可视化/连滑）+ 内部共享头，公共 API 面不变；纯逻辑下沉后 tests/ CLI harness 第一次让 CI 跑得起单测（12 组 84 断言，macOS 原生编译，三路径入口）；新增 scripts/build_dylib.sh 本地一键构建与 CI 同源 + dylib `-Os`/分区/dead_strip 体积回补；after-package 改快照式还原（不再冲掉用户未提交改动）；docs/REGRESSION_CHECKLIST.md 双形态人工回归清单 |
 | [v1.0.76](https://github.com/123bnb/PageTurner/releases/tag/v1.0.76) | 修复「滑动中被未识别动作打断 → 粘手卡死」：假触摸池分配不再把在飞触摸（Stationary）当空闲槽位（根因——打断时重放抢槽致原触摸永不受 Ended、App 内粘手、后续手势重心降速至无法滑动、点击点不中）；被替换的在飞触摸先补发 Ended 实现升级后自愈；gIsInjecting 改引用计数（修打断后永久卡 YES 导致双指菜单失灵）；打断路径动作链双回调修复 |
 | [v1.0.75](https://github.com/123bnb/PageTurner/releases/tag/v1.0.75) | 巨魔 dylib UI 完整 pid 化（同名方案 bug 最后一环）：读配置即惰性补发 pid（与设置页/引擎三端同规则），方案列表/方案页/特征/学习/动作参数五页全量按 pid 定位，删除与改名不再误伤同名者，新建方案带 UUID pid |

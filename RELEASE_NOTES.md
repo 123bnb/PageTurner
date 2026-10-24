@@ -1,3 +1,55 @@
+# PageTurner v1.0.79
+
+> **修复 deb「记录与映射」白屏 + CI 新增 table 装配门禁**：v1.0.78 装机实测，deb 设置页「记录与映射」打开一片空白。根因是 v1.0.71「8 个设置页收敛共享 VC」时 `PTUIPlansVC` 漏设 `tv.dataSource/delegate`——table 建了但无数据源，`numberOfRowsInSection` 永不被调用，连「新增方案」行都不渲染。同类 3 个列表页均有赋值，唯此页漏。本版补上，并把「建了 table 的共享页必须设 dataSource/delegate」做成 CI 静态门禁，此类装配疏漏此后在 clone Theos 之前秒级失败。**dylib（巨魔）形态的同一页面同样受益。**
+
+## ♻️ 改动
+
+### 1. 修复：`PTUIPlansVC` 补设 dataSource/delegate（白屏根因）
+
+`viewDidLoad` 的 `setupGroupedTableWithTop:100` 之后补两行：
+
+```objc
+self.tv.dataSource = self;
+self.tv.delegate = self;
+```
+
+漏设原因链：v1.0.71 收敛时基类 `setupGroupedTableWithTop` 只负责建 table（数据源归子类是其设计），而 Plans 页是唯一没在子类补赋值的列表页；`.h` 里 `<UITableViewDataSource, UITableViewDelegate>` 协议声明让编译器以为装配完整，**编译期零暴露、运行期直接白屏**——只有真机点得出来。
+
+### 2. 新增 CI 门禁：`scripts/check_table_wiring.sh`（防复发）
+
+| 规则 | 失败条件 |
+| --- | --- |
+| 建了 `self.tv`（自建或经 `setupGroupedTableWithTop`）的共享 VC，同文件必须含 `.dataSource = self` 与 `.delegate = self` | 任一缺失即失败并点名文件 |
+| 基类 `PTUIBaseListVC.m` 除外（其设计职责即建 table，数据源归子类） | —— |
+| 零文件命中「建 table」规则（规则本身失效） | 失败，防脚本空转假绿 |
+
+本地正反验证过：撤掉修复 → exit 1 响亮报错；恢复 → OK（3 个共享列表页全部通过）。挂 CI `Check shared table wiring` 步（pre-Theos，秒级）。
+
+## ⚠️ 行为变化
+
+| 变化 | 说明 |
+| --- | --- |
+| deb「记录与映射」页从白屏恢复为正常方案列表 | 修复即恢复，无其他行为改变 |
+| dylib 同名页面同样恢复（共享同一实现） | 巨魔用户若之前点到过空白，本版起正常 |
+
+## 🔧 对应文件改动
+
+| 文件 | 改动 |
+| --- | --- |
+| `common/PTUIPlansVC.m` | +4 行：补 dataSource/delegate 赋值（含根因注释） |
+| `scripts/check_table_wiring.sh` | 新增：table 装配完整性静态检查 |
+| `.github/workflows/build.yml` | +5 行：`Check shared table wiring` 步骤（import 链之后） |
+| `Makefile` / `control` / `Preferences/Resources/Info.plist` | 版本 1.0.78 → 1.0.79 |
+
+## ✅ 验证
+
+| 项 | 结果 |
+| --- | --- |
+| check_table_wiring 本地正反验证 | ✅ 修复后 OK / 撤掉修复 exit 1 |
+| check_syntax / check_imports / 84 条单测 | ✅ CI 全绿（tag 构建 run 内实跑） |
+| deb + dylib 双包编译 | ✅ 构建 success 后才允许发布 |
+| 真机 deb「记录与映射」 | ⏳ 待装机确认（修复直接对应白屏根因） |
+
 # PageTurner v1.0.78
 
 > **构建校验加固 + 引擎核心拆分（运行端零行为变化）**：v1.0.77 连炸 5 轮 CI 的根因，是「括号平衡 / import 链只有人肉一道关，而巨魔 dylib 走裸 clang、本地不可编」——每轮修复都要付一次 clone Theos + 全量编译的时间成本；引擎侧 `PTEngineCore.m` 滚到 1,525 行成为全仓最大文件，改一行全量重编，且 static 跨段可见性靠文件中部的老式前向声明维持（v1.0.66~77 因此炸过 3 轮「调用早于定义」）。本版把该关前移（clone Theos 之前秒级失败）、把引擎核心拆成 7 文件、并第一次让 CI 跑得起纯逻辑单测。**安装用户行为零变化。**
