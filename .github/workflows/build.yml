@@ -172,6 +172,27 @@ jobs:
           fi
           echo "OK: arm64e slice 存在"
 
+      # ---------- 产物挂到 Actions Artifacts（不打 tag 也能拿包装机测试） ----------
+      # v1.0.78-fix2：此前全流没有 upload-artifact → run 页面没有下载入口；
+      # 而不打 tag 时下面 Release 步骤又被 if 跳过 → 想装台测试机只能干等发版。
+      # 这里把两形态产物挂到 run 页面底部「Artifacts」区（保留 90 天）。
+      # 位置刻意放在所有审计之后：符号/切片/编译任一门禁不过就不挂，
+      # 避免把不合格产物挂上去被人当正式包装。
+      # 单文件路径上传，zip 内即文件名（deb 名含版本号；dylib 名含 tag 或 dev-短sha）。
+      - name: Upload roothide deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pageturner-roothide-deb
+          path: ${{ env.DEB_RAW }}
+          if-no-file-found: error
+
+      - name: Upload TrollStore dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pageturner-trollstore-dylib
+          path: ${{ env.DYLIB_OUT }}
+          if-no-file-found: error
+
       # ---------- 发布 Release（仅 tag，版本号取自 tag） ----------
       - name: Publish Release (tag only, version from tag)
         if: startsWith(github.ref, 'refs/tags/')
