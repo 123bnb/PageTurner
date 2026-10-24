@@ -12,6 +12,7 @@
 //         早该删）；多候选路径日志冗余收敛为单路径。
 // ============================================================
 #import "PTEngine.h"
+#import "PTEngineVolume.h"   // v1.0.80：音量键机制（与翻页器同门控：总开关+本 App 勾选；volEnabled 再加一层）
 #import "PTVersion.h"   // 版本横幅宏（scripts/gen_ptversion.sh 生成，勿手改）
 #import <dlfcn.h>
 #import <stdio.h>
@@ -126,6 +127,9 @@ static void PTInit() {
                 PTHook(@"UIApplication", @"sendEvent:", (IMP)PTDylibSendEvent, &origSend);
                 PTSetOrigAddEvent(origAdd);
                 PTSetOrigSendEvent(origSend);
+                // v1.0.80：音量键机制——与翻页器拦截同门控（本分支即「总开关+本 App 勾选」），
+                // volEnabled 总闸在 PTVolumeStart 内部判定（未开则零注册零开销）
+                PTVolumeStart();
                 PTDylibLog(@"生效 App 就绪：学过的 sender 按键将被拦截");
             } else {
                 PTDylibLog(@"旁路：未生效 App（bundleID=%@ 不在列表(%lu)或总开关=%d）——不写日志文件",

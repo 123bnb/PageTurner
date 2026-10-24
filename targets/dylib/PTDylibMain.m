@@ -13,6 +13,7 @@
 #import "PTEngine.h"
 #import "PTVersion.h"   // 版本横幅宏（scripts/gen_ptversion.sh 生成，勿手改）
 #import "PTUICommon.h"  // v1.0.77：共享 UI 伞标题（导航/日志源协议，构造函数里各设一次）
+#import "PTEngineVolume.h"   // v1.0.80：音量键机制（dylib 无 enabledApps 门控、注入即生效；volEnabled 内部控制）
 
 // 主菜单类在 PTDylibUI.m 实现
 @interface PTDylibMenuVC : UITableViewController
@@ -111,6 +112,9 @@ static void PTDylibInit(void) {
                 // 无「指定 App 生效」机制、注入即生效），不会有 App 被那个列表枚举到——以前无条件往共享
                 // jbroot 写，等于给每个被注入的 App 留一份没有任何代码会读的垃圾文件。
                 PTDylibInstallHooks();
+                // v1.0.80：音量键机制（巨魔形态无 enabledApps 门控——注入即生效，
+                // volEnabled 总闸默认关，用户未开则 PTVolumeStart 内部直接返回）
+                PTVolumeStart();
                 PTDylibLog(@"==================================================");
                 PTDylibLog(@"%@ 已注入 %@ (pid=%d) 配置来源=%@ 文件日志=(关闭·仅内存)", PT_VERSION_STRING,
                     bid, getpid(), @"独立配置");

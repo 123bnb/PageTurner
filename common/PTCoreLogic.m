@@ -225,6 +225,37 @@ CGPoint PTRecSwipeInterp(NSArray *xs, NSArray *ys, NSArray *ts, double targetT) 
     return CGPointMake(fa + (fb - fa) * f, ga + (gb - ga) * f);
 }
 
+// ---------- 音量键特殊方案（v1.0.80） ----------
+// 精确等值匹配（volSource 只有 up/down 两个值，无容差无特征——与触摸匹配的
+// 打分制是两套世界）。返回 pid 经 PTPlanPid：特殊方案带固定 pid 字段，
+// 旧配置若被手改成无 pid 也能按「name#下标」兜底（与普通方案同规则）。
+NSString *PTVolPlanPid(NSArray *plans, NSString *volSource) {
+    if (![volSource isKindOfClass:[NSString class]] || !volSource.length) return nil;
+    for (NSUInteger i = 0; i < plans.count; i++) {
+        NSDictionary *p = plans[i];
+        if (![p isKindOfClass:[NSDictionary class]]) continue;
+        if ([p[@"volSource"] isEqualToString:volSource]) return PTPlanPid(p, (NSInteger)i);
+    }
+    return nil;
+}
+
+// 懒创建两个空壳特殊方案。进 PTUIVolumeVC / 开总闸时调一次（幂等）：
+// 缺哪个补哪个，落盘由调用方经 PTUIWriteCfg 完成（设置页双写 / dylib 单写）。
+void PTEnsureVolPlans(NSMutableDictionary *cfg) {
+    NSArray *raw = [cfg[@"plans"] isKindOfClass:[NSArray class]] ? cfg[@"plans"] : nil;
+    NSMutableArray *plans = raw ? [NSMutableArray arrayWithArray:raw] : [NSMutableArray array];
+    if (PTVolPlanPid(plans, kVolSourceUp) && PTVolPlanPid(plans, kVolSourceDown)) return;
+    if (!PTVolPlanPid(plans, kVolSourceUp)) {
+        [plans addObject:@{ @"name": kVolNameUp, @"pid": kVolPidUp,
+                            @"volSource": kVolSourceUp, @"actions": @[] }];
+    }
+    if (!PTVolPlanPid(plans, kVolSourceDown)) {
+        [plans addObject:@{ @"name": kVolNameDown, @"pid": kVolPidDown,
+                            @"volSource": kVolSourceDown, @"actions": @[] }];
+    }
+    cfg[@"plans"] = plans;
+}
+
 // ---------- 原子写配置（原 PTEngineConfig.m） ----------
 // v1.0.71：原子写指定路径（从 PTDylibWriteCfg 抽出）——设置页双写（jbroot 真实路径 +
 // 普通路径兜底）直接用它，不必各写一份序列化逻辑。

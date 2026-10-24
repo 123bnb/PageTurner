@@ -59,7 +59,7 @@ TWEAK_NAME = PageTurner
 # 此前这里手写 `Tweak.m $(SHARED_SOURCES)`，与 build.yml / Preferences/Makefile 三处各自维护。
 PageTurner_FILES = $(PTSRC_ALL_DEB)
 PageTurner_CFLAGS = $(SHARED_CFLAGS)
-PageTurner_FRAMEWORKS = Foundation UIKit IOKit
+PageTurner_FRAMEWORKS = Foundation UIKit IOKit AVFoundation MediaPlayer
 PageTurner_LIBRARIES = substrate
 # 照抄 volumekeytapper：-Wl,-undefined,dynamic_lookup 允许 IOHIDEvent*/MSHookMessageEx
 # 未定义符号运行时动态解析；它带此 flag 注入成功，证明该 flag 不影响 ellekit 注入判定

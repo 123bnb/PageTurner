@@ -141,7 +141,7 @@ jobs:
           clang -arch arm64 -arch arm64e -isysroot "$SDK" -miphoneos-version-min=15.0 \
             ${SHARED_CFLAGS} ${DYLIB_CFLAGS} \
             -Wl,-undefined,dynamic_lookup ${DYLIB_LDFLAGS} \
-            -framework Foundation -framework UIKit \
+            -framework Foundation -framework UIKit -framework AVFoundation -framework MediaPlayer \
             -dynamiclib $SRCS -o "$OUT" \
             && { strip -x "$OUT" && echo "strip OK"; } \
             && echo "编译 OK (arm64+arm64e)" \
@@ -149,7 +149,7 @@ jobs:
                  clang -arch arm64 -isysroot "$SDK" -miphoneos-version-min=15.0 \
                    ${SHARED_CFLAGS} ${DYLIB_CFLAGS} \
                    -Wl,-undefined,dynamic_lookup ${DYLIB_LDFLAGS} \
-                   -framework Foundation -framework UIKit \
+                   -framework Foundation -framework UIKit -framework AVFoundation -framework MediaPlayer \
                    -dynamiclib $SRCS -o "$OUT" \
                    && { strip -x "$OUT" && echo "strip OK"; } \
                    && echo "编译 OK (仅arm64)"; }

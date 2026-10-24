@@ -125,6 +125,7 @@ extern void PTTestReset(void);      // v1.0.71：测试页退出一键复位（a
 // v1.0.74：入参为方案 pid（PTMatchPlan 的返回值），不再按 name 匹配——重名方案
 // 在执行层曾互相覆盖/串台（UI 层 v1.0.66-fix 已修，本版修引擎执行层）。
 extern void PTChainHandleHit(NSString *planId);   // v1.0.71：运行端命中方案——连滑判定 + 起执行/续档/刹停
+extern void PTChainHandleHitVolume(NSString *planId, NSString *source);   // v1.0.80：音量键命中入口（KVO 链路；连滑状态机原样复用，零特例）
 extern void PTChainReset(void);                 // 刹停/未命中/关开关：清空连滑链
 // v1.0.73：按键未命中（没录入的按键）——退出连滑 **且** 立刻停掉在飞动作。
 // 与 PTChainReset 的区别：Reset 只清连滑状态、在飞动作照常播完；Miss 额外 gExecToken++

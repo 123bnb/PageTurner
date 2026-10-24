@@ -308,3 +308,25 @@ void PTChainHandleHit(NSString *planId) {
     PTChainOnHit(planId, NO);
 }
 
+// v1.0.80：音量键命中入口（与 PTChainHandleHit 并列；PTEngineVolume.m 的 KVO 链路调用）。
+// 连滑状态机零改动——音量键 = 翻页器公民：本状态机 v1.0.67 起即 1:1 移植自 DVT
+// v1.0.22 的音量键连滑（「方向」→「方案」），起播/自动续滑/升档/异方案刹停/未命中
+// 全部走 PTChainOnHit 原样路径，无任何音量特例分支。与触摸命中的差异仅两点：
+//   ① 记录区命中日志标注来源「（来源：音量+ 按键）」——volSource 方案在触摸
+//      匹配链（PTHandlePagerEvent）里不可见，用户请求的提示口径在此落地；
+//   ② 无轨迹重放概念（音量键没有「未命中放行」一说：没配方案就静默忽略，
+//      见 PTEngineVolume.m 的 PTVolTapPoints）。
+void PTChainHandleHitVolume(NSString *planId, NSString *source) {
+    NSDictionary *p = gPlans[planId];
+    NSUInteger n = p[@"actions"] ? [p[@"actions"] count] : 0;
+    // 记录区（测试页开着时 sTestLogSink 非空）——与触摸命中同规则写 sink，
+    // 格式对齐 PTTestOnEnded 的「✓ 命中」行，来源替换触摸特征参数
+    if ([sTestLogSink respondsToSelector:@selector(appendLog:)]) {
+        [sTestLogSink appendLog:[NSString stringWithFormat:@"✓ 命中「%@」→ 映射 %lu 条动作（来源：%@ 按键）",
+            PTPlanNameForId(planId), (unsigned long)n, source]];
+    }
+    PTDylibLog(@"[音量] 命中「%@」→ 起映射（来源：%@ 按键，%lu 条动作）",
+        PTPlanNameForId(planId), source, (unsigned long)n);
+    PTChainOnHit(planId, NO);
+}
+

@@ -88,4 +88,21 @@ extern CGPoint PTRecSwipeInterp(NSArray *xs, NSArray *ys, NSArray *ts, double ta
 // 普通路径兜底）直接用它，不必各写一份序列化逻辑。
 extern void PTWriteCfgTo(NSString *path, NSDictionary *cfg);
 
+// ---------- 音量键特殊方案（v1.0.80） ----------
+// 音量+/- 作为两个「特殊方案」进 plans[]（volSource 字段标记）——与翻页器方案
+// 同一模型、同一条执行链（PTChainOnHit），连滑/升档/刹停全套平权。
+// 固定 pid + 锁定名：跨进程（UI 建/运行端读/测试端读）必须认同一批值，
+// 不走「name#下标」补发；方案页列表过滤不显示，不可删除只能清空动作。
+#define kVolPidUp      @"vol-up"        // 音量+ 特殊方案固定 pid
+#define kVolPidDown    @"vol-down"      // 音量- 特殊方案固定 pid
+#define kVolSourceUp   @"up"            // volSource 字段值（精确匹配，无容差）
+#define kVolSourceDown @"down"
+#define kVolNameUp     @"音量+"          // 锁定显示名（命中日志/记录区靠名字辨来源）
+#define kVolNameDown   @"音量-"
+// volSource 精确匹配：扫 plans[] 找 volSource 相符的特殊方案，返回其 pid；无返回 nil
+extern NSString *PTVolPlanPid(NSArray *plans, NSString *volSource);
+// 懒创建（音量键模式页开总闸/进页面时调）：缺哪个建哪个空壳（actions=[]），
+// 两个都在则不动。调用方负责 PTUIWriteCfg 落盘。
+extern void PTEnsureVolPlans(NSMutableDictionary *cfg);
+
 #endif  // PTCoreLogic_h

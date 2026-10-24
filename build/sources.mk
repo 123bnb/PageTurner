@@ -53,6 +53,7 @@ PTSRC_KIF := \
 #   PTEngineExec.m    动作执行全家（fake touch）+ 测试回放执行链
 #   PTEngineTestUI.m  测试可视化（绿点/方向线/P 标记/尾巴）+ 实时记录区
 #   PTEngineChain.m   连滑状态机 + pill + 执行入口 + 注入引用计数
+#   PTEngineVolume.m  音量键机制（KVO/Ambient 会话/去抖/徘徊/HUD 抑制/前台闸；v1.0.80）
 #   PTEngineInternal.h（非 .m）跨文件内部 extern——仅上列 6 个 .m import，
 #                       公共 API 仍走 PTEngineCore.h（三目标共享）。
 # v1.0.78(2)：PTCoreLogic.m = 纯逻辑层（零 UI 依赖，Foundation-only）——从六件套抽出，
@@ -64,7 +65,8 @@ PTSRC_CORE := \
 	common/PTEngineMatch.m \
 	common/PTEngineExec.m \
 	common/PTEngineTestUI.m \
-	common/PTEngineChain.m
+	common/PTEngineChain.m \
+	common/PTEngineVolume.m
 PTSRC_ENGINE := common/PTEngine.m
 PTSRC_OVERLAY := common/PTOverlayPage.m
 
